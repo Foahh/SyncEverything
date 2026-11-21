@@ -1,0 +1,154 @@
+@import "tailwindcss";
+@import "@heroui/styles";
+@import "@xyflow/react/dist/style.css";
+
+@custom-variant dark (&:is(.dark, .dark *, [data-theme="dark"], [data-theme="dark"] *));
+
+:root {
+  --font-sans: "Inter", "Noto Sans SC", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --font-mono: "JetBrains Mono", "Cascadia Code", ui-monospace, SFMono-Regular, monospace;
+
+  /* Swiss-Editorial Precision Light Palette (Projector-ready) */
+  --relay-canvas: #f5f7fa;
+  --relay-grid: #d4dce6;
+  --relay-surface: #ffffff;
+  --relay-surface-subtle: #f1f5f9;
+  --relay-border: #e2e8f0;
+  --relay-border-strong: #cbd5e1;
+  --relay-text: #0f172a;
+  --relay-text-muted: #475569;
+  --relay-text-faint: #64748b;
+  --relay-edge-label-bg: #ffffff;
+
+  /* Align HeroUI v3 accent token with Relay's precision teal-emerald identity */
+  --accent: #0d9488;
+  --accent-foreground: #ffffff;
+
+  /* Semantic State Accents */
+  --relay-fresh: #0d9488;
+  --relay-fresh-soft: #ecfdf5;
+  --relay-stale: #dc2626;
+  --relay-stale-soft: #fef2f2;
+  --relay-heal: #4f46e5;
+  --relay-heal-soft: #eef2ff;
+  --relay-warn: #d97706;
+  --relay-warn-soft: #fffbeb;
+  --relay-relay: #0284c7;
+  --relay-relay-soft: #f0f9ff;
+}
+
+.dark,
+[data-theme="dark"] {
+  --relay-canvas: #0b0e14;
+  --relay-grid: #1f2735;
+  --relay-surface: #121721;
+  --relay-surface-subtle: #0e131b;
+  --relay-border: #222b3a;
+  --relay-border-strong: #323f54;
+  --relay-text: #f1f5f9;
+  --relay-text-muted: #94a3b8;
+  --relay-text-faint: #64748b;
+  --relay-edge-label-bg: #121721;
+
+  --accent: #14b8a6;
+  --accent-foreground: #042f2e;
+
+  --relay-fresh: #2dd4bf;
+  --relay-fresh-soft: #092925;
+  --relay-stale: #f87171;
+  --relay-stale-soft: #2c1215;
+  --relay-heal: #818cf8;
+  --relay-heal-soft: #1a1b3a;
+  --relay-warn: #fbbf24;
+  --relay-warn-soft: #2b200c;
+  --relay-relay: #38bdf8;
+  --relay-relay-soft: #0c2233;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  width: 100%;
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
+  font-family: var(--font-sans);
+  background-color: var(--relay-canvas);
+  color: var(--relay-text);
+}
+
+.font-mono-tech {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Custom hairline scrollbars */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--relay-border-strong);
+  border-radius: 9999px;
+}
+
+/* React Flow precision overrides */
+.react-flow__controls {
+  bottom: 74px !important;
+  box-shadow: 0 4px 16px rgba(15, 23, 42, 0.08) !important;
+  border: 1px solid var(--relay-border) !important;
+  border-radius: 10px !important;
+  overflow: hidden;
+  background: var(--relay-surface) !important;
+}
+
+.react-flow__controls-button {
+  background: var(--relay-surface) !important;
+  border-bottom: 1px solid var(--relay-border) !important;
+  color: var(--relay-text-muted) !important;
+}
+
+.react-flow__controls-button:hover {
+  background: var(--relay-surface-subtle) !important;
+  color: var(--relay-text) !important;
+}
+
+.react-flow__controls-button svg {
+  fill: currentColor !important;
+}
+
+.react-flow__minimap {
+  bottom: 74px !important;
+  border: 1px solid var(--relay-border) !important;
+  border-radius: 12px !important;
+  background: var(--relay-surface) !important;
+  box-shadow: 0 4px 16px rgba(15, 23, 42, 0.08) !important;
+}
+
+.react-flow__attribution {
+  display: none !important;
+}
+
+@keyframes relayStalePulse {
+  0%,
+  100% {
+    box-shadow:
+      0 0 0 1px rgba(220, 38, 38, 0.35),
+      0 6px 20px -4px rgba(220, 38, 38, 0.16);
+  }
+  50% {
+    box-shadow:
+      0 0 0 3px rgba(220, 38, 38, 0.24),
+      0 8px 26px -4px rgba(220, 38, 38, 0.28);
+  }
+}
+
+.relay-node-stale {
+  animation: relayStalePulse 2.6s ease-in-out infinite;
+}

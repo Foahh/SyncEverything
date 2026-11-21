@@ -1,0 +1,141 @@
+{
+  "app": {
+    "name": "Relay",
+    "subtitle": "跨设备本地 Agent 协同工作台",
+    "previewBadge": "浏览器预览模式",
+    "tauriBadge": "Tauri 原生模式"
+  },
+  "topbar": {
+    "repoLabel": "当前仓库",
+    "headLabel": "HEAD",
+    "mode": {
+      "client": "笔记本 Client",
+      "host": "主机 Host",
+      "local_dual_sandbox": "双节点沙盒"
+    },
+    "transport": {
+      "direct_lan": "局域网直连",
+      "relay": "iroh 中继穿透",
+      "loopback": "本机环回",
+      "offline": "离线排队"
+    },
+    "stalePill_one": "{{count}} 项 STALE 失效证据",
+    "stalePill_other": "{{count}} 项 STALE 失效证据",
+    "allFresh": "全部证据有效",
+    "toggleTheme": "切换明暗主题",
+    "switchLang": "切换语言"
+  },
+  "rail": {
+    "topologyTitle": "双端拓扑状态",
+    "localPeer": "笔记本 · Edge Fast-Path",
+    "remotePeer": "算力主机 · Deep-Path",
+    "outboxQueued": "待同步 {{count}} 项",
+    "synced": "已同步",
+    "taskQueueTitle": "任务与审批队列",
+    "noTasks": "暂无执行中的跨端任务",
+    "reviewDiffCta": "审查自愈补丁 Diff",
+    "handoffsTitle": "近期交接记录",
+    "noHandoffs": "暂无跨设备交接记录",
+    "demoControlsTitle": "演示快捷触发",
+    "simulateUpstreamEdit": "模拟上游改码（触发 STALE）",
+    "resetDemo": "重置演示图谱"
+  },
+  "taskState": {
+    "queued": "排队中",
+    "preflight_running": "沙盒预检中",
+    "self_healing_proposed": "待人工审批",
+    "executing": "执行中",
+    "completed": "已完成",
+    "failed": "执行失败",
+    "stale": "STALE",
+    "rejected": "已拒绝"
+  },
+  "dag": {
+    "title": "决策-证据依赖图 (Decision-Evidence DAG)",
+    "staleGuardBanner": "确定性防幻觉已激活：{{count}} 个过期 Evidence 节点已隔离，系统层已强制阻断 Agent 引用 STALE 指标。",
+    "nodeKind": {
+      "decision": "Decision 决策",
+      "artifact": "Artifact 快照",
+      "evidence": "Evidence 证据"
+    },
+    "freshness": {
+      "fresh": "FRESH",
+      "stale": "STALE",
+      "pending_verify": "验证中"
+    },
+    "edgeKind": {
+      "informs": "指导",
+      "produced_from": "产出证据",
+      "supersedes": "替代旧版本",
+      "derived_from": "推导结论"
+    },
+    "citationBlocked": "已阻断 Agent 引用",
+    "dirtyTree": "含未提交改动",
+    "cleanTree": "工作区干净",
+    "changedFiles": "{{count}} 个文件变更",
+    "dock": {
+      "recordDecision": "记录决策节点",
+      "dispatchTask": "下发白名单实验",
+      "simulateEdit": "触发 STALE 传播",
+      "showStale": "显示 STALE",
+      "hideStale": "隐藏 STALE",
+      "fitView": "自适应视图"
+    },
+    "emptyTitle": "当前仓库尚无 DAG 节点",
+    "emptyDesc": "记录一条工程决策或向主机下发实验任务，即可建立可溯源的决策-证据依赖图。"
+  },
+  "inspector": {
+    "nodeTab": "节点溯源详情",
+    "approvalTab": "自愈 Diff 审批",
+    "close": "关闭抽屉",
+    "provenanceAlertTitle": "证据已失效 (STALE)",
+    "provenanceAlertBody": "上游节点 {{causedBy}} 发生变更：{{reason}}。在基于最新 Commit 重新执行前，系统禁止 Agent 引用该旧指标。",
+    "rationale": "方案决策理由",
+    "constraints": "约束条件",
+    "commitSha": "Git Commit SHA",
+    "envFingerprint": "环境指纹 (uv.lock)",
+    "changedFiles": "变更文件清单",
+    "metrics": "结构化实验指标",
+    "logBlobHash": "BLAKE3 日志哈希",
+    "deviceOrigin": "来源设备",
+    "updatedAt": "更新时间",
+    "worktreeShield": "独立 git worktree 隔离区 · 零污染主工作区",
+    "patchKindUv": "uv 依赖锁文件自愈方案",
+    "patchKindCode": "隔离区代码补丁 Diff",
+    "branchLabel": "预览分支",
+    "proposedDiff": "经沙盒验证的补丁 Diff",
+    "smokeProof": "冒烟预检验证输出",
+    "smokePassed": "冒烟通过",
+    "smokePending": "待验证",
+    "rejectPatch": "拒绝补丁",
+    "approveAndExecute": "批准并执行实验",
+    "noPendingApproval": "当前没有等待二次确认的自愈补丁提案。",
+    "selectNodePrompt": "点击画布中任意 Decision、Artifact 或 Evidence 节点查看完整溯源信息。"
+  },
+  "modals": {
+    "decision": {
+      "title": "记录决策节点 (Decision)",
+      "subtitle": "将方案取舍理由与工程约束沉淀进跨端 DAG，接收端 Agent 自动感知上下文。",
+      "labelField": "决策标题",
+      "labelPlaceholder": "例如：将 EWMA 平滑系数 alpha 从 0.35 调至 0.50",
+      "rationaleField": "决策理由",
+      "rationalePlaceholder": "说明为何采用该方案以及排除了哪些替代路径…",
+      "constraintsField": "关键约束（逗号分隔）",
+      "constraintsPlaceholder": "例如：冒烟耗时 < 2s, 离线 uv.lock 可复现, 严禁引用旧指标",
+      "cancel": "取消",
+      "submit": "写入 DAG"
+    },
+    "task": {
+      "title": "下发白名单实验预设",
+      "subtitle": "主机端仅允许运行目标仓库 relay.toml 中声明的白名单命令预设。",
+      "presetField": "实验预设 (relay.toml)",
+      "windowsField": "滑动窗口参数 (--windows)",
+      "alphaField": "平滑系数 (--alpha)",
+      "noteField": "交接上下文便签",
+      "notePlaceholder": "例如：重构特征工程后交由 Windows 主机复跑三组窗口参数",
+      "requireApproval": "主机自愈生成补丁时启用人工 Elicitation 二次确认",
+      "cancel": "取消",
+      "submit": "派发给主机"
+    }
+  }
+}

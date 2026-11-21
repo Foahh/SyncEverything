@@ -4,7 +4,7 @@
 
 # Frontend / Node / Vite+ / pnpm
 node_modules/
-dist/*
+**/dist/*
 !crates/relay-desktop/dist/.gitkeep
 .vite/
 *.local

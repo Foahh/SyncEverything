@@ -1,0 +1,141 @@
+{
+  "app": {
+    "name": "Relay",
+    "subtitle": "Cross-Device Agent Workbench",
+    "previewBadge": "Browser Preview",
+    "tauriBadge": "Tauri Native"
+  },
+  "topbar": {
+    "repoLabel": "Repository",
+    "headLabel": "HEAD",
+    "mode": {
+      "client": "Client",
+      "host": "Host",
+      "local_dual_sandbox": "Dual Sandbox"
+    },
+    "transport": {
+      "direct_lan": "Direct LAN",
+      "relay": "iroh Relay",
+      "loopback": "Loopback",
+      "offline": "Offline Queue"
+    },
+    "stalePill_one": "{{count}} STALE Evidence",
+    "stalePill_other": "{{count}} STALE Evidence",
+    "allFresh": "All Evidence Fresh",
+    "toggleTheme": "Toggle color theme",
+    "switchLang": "Switch language"
+  },
+  "rail": {
+    "topologyTitle": "Device Topology",
+    "localPeer": "Laptop · Edge Fast-Path",
+    "remotePeer": "Host · Deep-Path",
+    "outboxQueued": "{{count}} queued",
+    "synced": "In sync",
+    "taskQueueTitle": "Tasks & Approvals",
+    "noTasks": "No active tasks yet",
+    "reviewDiffCta": "Review Self-Healing Diff",
+    "handoffsTitle": "Recent Handoffs",
+    "noHandoffs": "No handoffs recorded yet",
+    "demoControlsTitle": "Live Demo Triggers",
+    "simulateUpstreamEdit": "Edit Upstream Code (Trigger STALE)",
+    "resetDemo": "Reset Demo Graph"
+  },
+  "taskState": {
+    "queued": "Queued",
+    "preflight_running": "Preflight",
+    "self_healing_proposed": "Approval Needed",
+    "executing": "Executing",
+    "completed": "Completed",
+    "failed": "Failed",
+    "stale": "STALE",
+    "rejected": "Rejected"
+  },
+  "dag": {
+    "title": "Decision-Evidence DAG",
+    "staleGuardBanner": "Hallucination Guard Active: {{count}} outdated Evidence node(s) quarantined. Agent reasoning is deterministically blocked from citing STALE metrics.",
+    "nodeKind": {
+      "decision": "Decision",
+      "artifact": "Artifact",
+      "evidence": "Evidence"
+    },
+    "freshness": {
+      "fresh": "FRESH",
+      "stale": "STALE",
+      "pending_verify": "VERIFYING"
+    },
+    "edgeKind": {
+      "informs": "informs",
+      "produced_from": "produced_from",
+      "supersedes": "supersedes",
+      "derived_from": "derived_from"
+    },
+    "citationBlocked": "Agent citation blocked",
+    "dirtyTree": "Dirty tree",
+    "cleanTree": "Clean tree",
+    "changedFiles": "{{count}} file(s)",
+    "dock": {
+      "recordDecision": "Record Decision",
+      "dispatchTask": "Dispatch Preset",
+      "simulateEdit": "Trigger STALE",
+      "showStale": "Show STALE",
+      "hideStale": "Hide STALE",
+      "fitView": "Fit View"
+    },
+    "emptyTitle": "No DAG nodes in workspace",
+    "emptyDesc": "Record an engineering decision or dispatch an experiment preset to start tracking provenance."
+  },
+  "inspector": {
+    "nodeTab": "Node Inspector",
+    "approvalTab": "Self-Healing Diff",
+    "close": "Close drawer",
+    "provenanceAlertTitle": "Evidence Invalidated (STALE)",
+    "provenanceAlertBody": "Upstream node {{causedBy}} changed: {{reason}}. Downstream metrics cannot be cited until re-executed on the latest commit.",
+    "rationale": "Decision Rationale",
+    "constraints": "Active Constraints",
+    "commitSha": "Git Commit SHA",
+    "envFingerprint": "Environment Fingerprint",
+    "changedFiles": "Changed Files",
+    "metrics": "Structured Metrics",
+    "logBlobHash": "BLAKE3 Log Blob",
+    "deviceOrigin": "Origin Device",
+    "updatedAt": "Updated",
+    "worktreeShield": "Isolated git worktree · Zero main-tree pollution",
+    "patchKindUv": "uv Lockfile / Dependency Fix",
+    "patchKindCode": "Isolated Code Diff Patch",
+    "branchLabel": "Preview Branch",
+    "proposedDiff": "Verified Patch Diff",
+    "smokeProof": "Smoke Preflight Verification",
+    "smokePassed": "PASSED",
+    "smokePending": "PENDING",
+    "rejectPatch": "Reject Proposal",
+    "approveAndExecute": "Approve & Execute",
+    "noPendingApproval": "No patch proposals awaiting confirmation.",
+    "selectNodePrompt": "Select any Decision, Artifact, or Evidence node on the canvas to inspect its provenance."
+  },
+  "modals": {
+    "decision": {
+      "title": "Record Decision Node",
+      "subtitle": "Capture design rationale and constraints directly into the Decision-Evidence DAG.",
+      "labelField": "Decision Title",
+      "labelPlaceholder": "e.g., Switch EWMA alpha from 0.35 to 0.50",
+      "rationaleField": "Engineering Rationale",
+      "rationalePlaceholder": "Why was this change chosen over alternatives?",
+      "constraintsField": "Constraints (comma-separated)",
+      "constraintsPlaceholder": "e.g., latency < 2s, reproducible uv.lock, no cloud leak",
+      "cancel": "Cancel",
+      "submit": "Add to DAG"
+    },
+    "task": {
+      "title": "Dispatch Whitelisted Experiment",
+      "subtitle": "Only presets declared in <repo>/relay.toml can execute on the Host daemon.",
+      "presetField": "Command Preset (relay.toml)",
+      "windowsField": "Rolling Windows (--windows)",
+      "alphaField": "EWMA Smoothing (--alpha)",
+      "noteField": "Handoff Context Note",
+      "notePlaceholder": "e.g., Validate 3 window sizes on Windows GPU host after feature refactor",
+      "requireApproval": "Require human Elicitation approval before applying self-healing patches",
+      "cancel": "Cancel",
+      "submit": "Dispatch to Host"
+    }
+  }
+}
