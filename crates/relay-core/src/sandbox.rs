@@ -212,7 +212,43 @@ impl WorktreeSandbox {
         })
     }
 
-    fn task_worktree(&self, task_id: TaskId) -> RelayResult<(PathBuf, String)> {
+    pub(crate) async fn reopen_worktree(
+        &self,
+        task_id: TaskId,
+        base_commit_sha: &str,
+    ) -> RelayResult<Option<WorktreeHandle>> {
+        let (path, branch) = self.task_worktree(task_id)?;
+        if !tokio::fs::try_exists(&path).await? {
+            return Ok(None);
+        }
+        let handle = WorktreeHandle {
+            repo_root: std::path::absolute(&self.repo_root)?,
+            path,
+            branch,
+        };
+        self.validate_worktree_base(task_id, &handle, base_commit_sha).await?;
+        Ok(Some(handle))
+    }
+
+    pub(crate) async fn validate_worktree_base(
+        &self,
+        task_id: TaskId,
+        handle: &WorktreeHandle,
+        base_commit_sha: &str,
+    ) -> RelayResult<()> {
+        let path = handle.worktree_path();
+        self.validate_task_worktree(task_id, path, handle.branch_name()).await?;
+        let actual =
+            git_output(git_command(path).args(["rev-parse", "--verify", "HEAD"])).await?;
+        if output_text(&actual.stdout) != self.resolve_commit(base_commit_sha).await? {
+            return Err(RelayError::Git(
+                "task worktree no longer points to its base commit".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn task_worktree(&self, task_id: TaskId) -> RelayResult<(PathBuf, String)> {
         let id = task_id.simple().to_string();
         // The first half of a UUIDv7 is mostly a timestamp.
         let short_id = &id[16..];
@@ -270,7 +306,7 @@ impl WorktreeSandbox {
 }
 
 /// A task checkout and its dedicated branch. Call cleanup when the task finishes.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct WorktreeHandle {
     repo_root: PathBuf,
     path: PathBuf,
@@ -284,6 +320,10 @@ impl WorktreeHandle {
 
     pub fn branch_name(&self) -> &str {
         &self.branch
+    }
+
+    pub(crate) async fn diff(&self) -> RelayResult<String> {
+        working_diff(&self.path).await
     }
 
     pub async fn cleanup(&self) -> RelayResult<()> {

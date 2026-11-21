@@ -203,6 +203,13 @@ impl WorktreeSandbox {
                 &BTreeMap::new(),
             )
             .await?;
+        // Smoke can reconcile a tracked lockfile. Approval must cover the final diff.
+        let diff_preview = working_diff(&worktree_path).await?;
+        if diff_preview.is_empty() || diff_preview == diff_before {
+            return Err(RelayError::Internal(
+                "patch produced no lasting worktree diff".into(),
+            ));
+        }
         Ok(PatchProposal {
             patch_id: Uuid::now_v7().to_string(),
             task_id,

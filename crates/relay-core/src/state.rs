@@ -6,7 +6,7 @@ pub fn validate_transition(task_id: TaskId, from: TaskState, to: TaskState) -> R
 
     match (from, to) {
         (Queued, PreflightRunning | Executing | Failed | Rejected)
-        | (PreflightRunning, SelfHealingProposed | Executing | Completed | Failed)
+        | (PreflightRunning, SelfHealingProposed | Executing | Completed | Failed | Rejected)
         | (SelfHealingProposed, Executing | Rejected | Failed)
         | (Executing, Completed | Failed) => Ok(()),
         (_, Stale) if from != Rejected => Ok(()),
@@ -38,7 +38,10 @@ mod tests {
         let task_id = TaskId::now_v7();
         let allowed: [(TaskState, &[TaskState]); 8] = [
             (Queued, &[PreflightRunning, Executing, Failed, Stale, Rejected]),
-            (PreflightRunning, &[SelfHealingProposed, Executing, Completed, Failed, Stale]),
+            (
+                PreflightRunning,
+                &[SelfHealingProposed, Executing, Completed, Failed, Stale, Rejected],
+            ),
             (SelfHealingProposed, &[Executing, Rejected, Stale, Failed]),
             (Executing, &[Completed, Failed, Stale]),
             (Completed, &[Stale]),

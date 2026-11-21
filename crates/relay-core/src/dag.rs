@@ -101,6 +101,21 @@ impl DagEngine {
             .map(|(_, _, _, _, sha)| sha.clone());
     }
 
+    pub(crate) fn head_commit_sha(&self) -> Option<&str> {
+        self.head_commit_sha.as_deref()
+    }
+
+    pub(crate) fn artifact_id_for_commit(&self, sha: &str) -> Option<&str> {
+        self.graph
+            .node_weights()
+            .filter(|node| {
+                matches!(&node.payload, NodeKind::Artifact { git_commit_sha, .. } if git_commit_sha == sha)
+            })
+            .map(|node| (node.updated_at, node.created_at, node.id.as_str()))
+            .max()
+            .map(|(_, _, id)| id)
+    }
+
     pub(crate) fn artifact_commit(&self, node_id: &str) -> RelayResult<&str> {
         let node = self
             .get_node(node_id)

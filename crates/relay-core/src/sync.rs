@@ -151,6 +151,10 @@ impl RelayNode {
     }
 
     pub async fn shutdown(self) -> RelayResult<()> {
+        self.shutdown_shared().await
+    }
+
+    pub async fn shutdown_shared(&self) -> RelayResult<()> {
         self.router.shutdown().await.map_err(transport_error)
     }
 

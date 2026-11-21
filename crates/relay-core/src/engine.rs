@@ -20,6 +20,11 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use tokio::sync::{Mutex, MutexGuard, OwnedRwLockWriteGuard, RwLock, watch};
 use uuid::Uuid;
 
+enum EvidenceArtifact<'a> {
+    Existing(&'a str),
+    FromCommit(&'a GraphNode),
+}
+
 /// Coordinates Relay state for one repository.
 #[derive(Clone, Debug)]
 pub struct RelayEngine {
@@ -84,6 +89,10 @@ impl RelayEngine {
 
     pub async fn dag_snapshot(&self, include_stale: bool) -> DagSnapshot {
         self.dag.read().await.snapshot(include_stale)
+    }
+
+    pub(crate) async fn head_commit_sha(&self) -> Option<String> {
+        self.dag.read().await.head_commit_sha().map(str::to_owned)
     }
 
     pub async fn upsert_node_and_edges(
@@ -325,6 +334,26 @@ impl RelayEngine {
         .await
     }
 
+    pub(crate) async fn set_preflight_summary(
+        &self,
+        task_id: TaskId,
+        summary: String,
+    ) -> RelayResult<TaskRecord> {
+        self.edit_task(task_id, |record| {
+            if record.state != TaskState::PreflightRunning {
+                return Err(RelayError::InvalidStateTransition {
+                    task_id: task_id.to_string(),
+                    from: format!("{:?}", record.state),
+                    to: format!("{:?}", TaskState::PreflightRunning),
+                });
+            }
+            record.preflight_summary = Some(summary);
+            record.updated_at = record.updated_at.max(Utc::now());
+            Ok(())
+        })
+        .await
+    }
+
     pub async fn attach_patch_proposal(&self, proposal: PatchProposal) -> RelayResult<TaskRecord> {
         self.edit_task(proposal.task_id, |record| {
             move_task(record, TaskState::SelfHealingProposed)?;
@@ -363,6 +392,38 @@ impl RelayEngine {
         &self,
         task_id: TaskId,
         artifact_node_id: &str,
+        evidence_node: GraphNode,
+        raw_log: &str,
+    ) -> RelayResult<TaskRecord> {
+        self.record_evidence(
+            task_id,
+            EvidenceArtifact::Existing(artifact_node_id),
+            evidence_node,
+            raw_log,
+        )
+        .await
+    }
+
+    pub(crate) async fn record_worktree_evidence(
+        &self,
+        task_id: TaskId,
+        base_artifact: &GraphNode,
+        evidence_node: GraphNode,
+        raw_log: &str,
+    ) -> RelayResult<TaskRecord> {
+        self.record_evidence(
+            task_id,
+            EvidenceArtifact::FromCommit(base_artifact),
+            evidence_node,
+            raw_log,
+        )
+        .await
+    }
+
+    async fn record_evidence(
+        &self,
+        task_id: TaskId,
+        artifact: EvidenceArtifact<'_>,
         mut evidence_node: GraphNode,
         raw_log: &str,
     ) -> RelayResult<TaskRecord> {
@@ -383,7 +444,24 @@ impl RelayEngine {
         log_blob_hash.clone_from(&hash);
 
         let dag = self.dag.clone().write_owned().await;
-        dag.artifact_commit(artifact_node_id)?;
+        let (artifact_node_id, new_artifact) = match artifact {
+            EvidenceArtifact::Existing(id) => {
+                dag.artifact_commit(id)?;
+                (id, None)
+            }
+            EvidenceArtifact::FromCommit(node) => {
+                let NodeKind::Artifact { git_commit_sha, .. } = &node.payload else {
+                    return Err(RelayError::Internal(format!(
+                        "node {} is not an artifact",
+                        node.id,
+                    )));
+                };
+                match dag.artifact_id_for_commit(git_commit_sha) {
+                    Some(id) => (id, None),
+                    None => (node.id.as_str(), Some(node)),
+                }
+            }
+        };
         let edge = GraphEdge {
             id: format!("produced_from:{artifact_node_id}->{}", evidence_node.id),
             from: artifact_node_id.into(),
@@ -411,6 +489,11 @@ impl RelayEngine {
         }
 
         let mut staged = dag.clone();
+        if let Some(artifact) = new_artifact {
+            staged.upsert_node(artifact.clone());
+            staged.refresh_head_commit();
+            write_node(&mut tx, &self.repo_id, artifact).await?;
+        }
         staged.upsert_node(evidence_node.clone());
         staged.upsert_edge(edge.clone())?;
         task.evidence_node_id = Some(evidence_node.id.clone());

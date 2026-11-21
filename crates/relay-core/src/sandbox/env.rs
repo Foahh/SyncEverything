@@ -25,11 +25,7 @@ impl WorktreeSandbox {
         };
         let host = EnvFiles::read(self.repo_root())?;
         let mut target = if let Some(sha) = target_commit.as_deref() {
-            let (pyproject, uv_lock) = tokio::try_join!(
-                self.read_env_file_at_commit(sha, PYPROJECT),
-                self.read_env_file_at_commit(sha, UV_LOCK),
-            )?;
-            EnvFiles { pyproject, uv_lock }
+            self.env_files_at_commit(sha).await?
         } else {
             EnvFiles {
                 pyproject: None,
@@ -71,6 +67,19 @@ impl WorktreeSandbox {
             host_env_fingerprint,
             notes,
         })
+    }
+
+    pub(crate) async fn env_fingerprint_at_commit(&self, commit: &str) -> RelayResult<String> {
+        let sha = self.resolve_commit(commit).await?;
+        Ok(self.env_files_at_commit(&sha).await?.fingerprint())
+    }
+
+    async fn env_files_at_commit(&self, sha: &str) -> RelayResult<EnvFiles> {
+        let (pyproject, uv_lock) = tokio::try_join!(
+            self.read_env_file_at_commit(sha, PYPROJECT),
+            self.read_env_file_at_commit(sha, UV_LOCK),
+        )?;
+        Ok(EnvFiles { pyproject, uv_lock })
     }
 
     async fn env_diff_head(&self) -> RelayResult<Option<String>> {
