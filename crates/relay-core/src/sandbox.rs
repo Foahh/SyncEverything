@@ -57,6 +57,33 @@ impl WorktreeSandbox {
         self.resolve_commit("HEAD").await
     }
 
+    pub(crate) async fn branch_name(&self) -> RelayResult<String> {
+        let output = git_output(
+            git_command(&self.repo_root).args(["rev-parse", "--abbrev-ref", "HEAD"]),
+        )
+        .await?;
+        Ok(output_text(&output.stdout))
+    }
+
+    pub(crate) async fn git_bundle_head(&self, bundle_path: &Path) -> RelayResult<String> {
+        let path = std::path::absolute(bundle_path)?;
+        let output = git_output(
+            git_command(&self.repo_root)
+                .args(["bundle", "list-heads"])
+                .arg(path)
+                .arg("HEAD"),
+        )
+        .await?;
+        let heads = output_text(&output.stdout);
+        let sha = heads
+            .strip_suffix(" HEAD")
+            .filter(|sha| {
+                matches!(sha.len(), 40 | 64) && sha.bytes().all(|byte| byte.is_ascii_hexdigit())
+            })
+            .ok_or_else(|| RelayError::Git("bundle is missing a valid HEAD commit".into()))?;
+        Ok(sha.to_owned())
+    }
+
     async fn resolve_commit(&self, rev: &str) -> RelayResult<String> {
         let output = git_output(git_command(&self.repo_root).args([
             "rev-parse",

@@ -339,22 +339,24 @@ impl RelayStore {
     }
 
     pub async fn mark_outbox_delivered(&self, seq: i64) -> RelayResult<()> {
-        self.mark_repo_outbox_delivered(None, seq).await
+        self.mark_repo_outbox_delivered(None, seq).await?;
+        Ok(())
     }
 
     pub(crate) async fn mark_repo_outbox_delivered(
         &self,
         repo_id: Option<&str>,
         seq: i64,
-    ) -> RelayResult<()> {
-        sqlx::query(
-            "UPDATE sync_outbox SET delivered = 1 WHERE seq = ?1 AND (?2 IS NULL OR repo_id = ?2)",
+    ) -> RelayResult<bool> {
+        let result = sqlx::query(
+            "UPDATE sync_outbox SET delivered = 1
+             WHERE seq = ?1 AND delivered = 0 AND (?2 IS NULL OR repo_id = ?2)",
         )
         .bind(seq)
         .bind(repo_id)
         .execute(&self.pool)
         .await?;
-        Ok(())
+        Ok(result.rows_affected() != 0)
     }
 
     pub async fn count_pending_outbox(&self) -> RelayResult<u32> {

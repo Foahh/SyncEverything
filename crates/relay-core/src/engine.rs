@@ -16,7 +16,8 @@ use sqlx::{Sqlite, SqliteConnection, Transaction};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use tokio::sync::{OwnedRwLockWriteGuard, RwLock};
+use std::sync::atomic::{AtomicU32, Ordering};
+use tokio::sync::{Mutex, MutexGuard, OwnedRwLockWriteGuard, RwLock, watch};
 use uuid::Uuid;
 
 /// Coordinates Relay state for one repository.
@@ -25,7 +26,10 @@ pub struct RelayEngine {
     repo_id: String,
     store: RelayStore,
     dag: Arc<RwLock<DagEngine>>,
-    mode: Arc<RwLock<RuntimeMode>>,
+    mode: watch::Sender<RuntimeMode>,
+    pending_outbox: Arc<AtomicU32>,
+    metadata_writes: Arc<Mutex<()>>,
+    outbox_flush: Arc<Mutex<()>>,
     repo_root: Option<PathBuf>,
 }
 
@@ -61,11 +65,15 @@ impl RelayEngine {
             .get_runtime_mode(&repo_id)
             .await?
             .unwrap_or(RuntimeMode::Host);
+        let pending_outbox = store.count_repo_pending_outbox(Some(&repo_id)).await?;
         Ok(Self {
             repo_id,
             store,
             dag: Arc::new(RwLock::new(dag)),
-            mode: Arc::new(RwLock::new(mode)),
+            mode: watch::Sender::new(mode),
+            pending_outbox: Arc::new(AtomicU32::new(pending_outbox)),
+            metadata_writes: Arc::new(Mutex::new(())),
+            outbox_flush: Arc::new(Mutex::new(())),
             repo_root,
         })
     }
@@ -183,11 +191,11 @@ impl RelayEngine {
         for edge in &edges {
             write_edge(&mut tx, &self.repo_id, edge).await?;
         }
-        write_freshness(
-            &mut tx,
-            invalidated.difference(&changed_nodes).filter_map(|id| staged.get_node(id)),
-        )
-        .await?;
+        let invalidated_nodes: Vec<&GraphNode> = invalidated
+            .difference(&changed_nodes)
+            .filter_map(|id| staged.get_node(id))
+            .collect();
+        write_freshness(&mut tx, invalidated_nodes).await?;
         self.stale_tasks(&mut tx, &stale_commits).await?;
         let snapshot = staged.snapshot(true);
         commit_dag(tx, dag, staged).await?;
@@ -433,7 +441,18 @@ impl RelayEngine {
     }
 
     pub async fn enqueue_outbox(&self, payload: &Value) -> RelayResult<i64> {
-        self.store.enqueue_outbox(&self.repo_id, payload).await
+        let guard = self.metadata_writes.clone().lock_owned().await;
+        let engine = self.clone();
+        let payload = payload.clone();
+        // Once a write starts, publish its result even if its caller is cancelled.
+        tokio::spawn(async move {
+            let _guard = guard;
+            let seq = engine.store.enqueue_outbox(&engine.repo_id, &payload).await?;
+            engine.pending_outbox.fetch_add(1, Ordering::Relaxed);
+            Ok(seq)
+        })
+        .await
+        .map_err(|err| RelayError::Internal(err.to_string()))?
     }
 
     pub async fn pending_outbox_count(&self) -> RelayResult<u32> {
@@ -441,20 +460,62 @@ impl RelayEngine {
     }
 
     pub async fn mark_outbox_delivered(&self, seq: i64) -> RelayResult<()> {
-        self.store.mark_repo_outbox_delivered(Some(&self.repo_id), seq).await
+        let guard = self.metadata_writes.clone().lock_owned().await;
+        let engine = self.clone();
+        tokio::spawn(async move {
+            let _guard = guard;
+            if engine
+                .store
+                .mark_repo_outbox_delivered(Some(&engine.repo_id), seq)
+                .await?
+            {
+                let _ = engine
+                    .pending_outbox
+                    .try_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
+                        count.checked_sub(1)
+                    });
+            }
+            Ok(())
+        })
+        .await
+        .map_err(|err| RelayError::Internal(err.to_string()))?
+    }
+
+    pub(crate) async fn list_pending_outbox(&self) -> RelayResult<Vec<(i64, String, Value)>> {
+        let _guard = self.metadata_writes.lock().await;
+        let items = self.store.list_pending_outbox(Some(&self.repo_id)).await?;
+        let count = u32::try_from(items.len())
+            .map_err(|_| RelayError::Internal("pending outbox count exceeds u32".into()))?;
+        self.pending_outbox.store(count, Ordering::Relaxed);
+        Ok(items)
+    }
+
+    pub(crate) async fn lock_outbox_flush(&self) -> MutexGuard<'_, ()> {
+        self.outbox_flush.lock().await
+    }
+
+    pub(crate) fn observed_outbox_count(&self) -> u32 {
+        self.pending_outbox.load(Ordering::Relaxed)
     }
 
     pub async fn runtime_mode(&self) -> RuntimeMode {
-        *self.mode.read().await
+        let _guard = self.metadata_writes.lock().await;
+        self.observed_runtime_mode()
+    }
+
+    pub(crate) fn observed_runtime_mode(&self) -> RuntimeMode {
+        *self.mode.borrow()
     }
 
     pub async fn set_runtime_mode(&self, mode: RuntimeMode) -> RelayResult<()> {
-        let mut current = self.mode.clone().write_owned().await;
+        let guard = self.metadata_writes.clone().lock_owned().await;
+        let current = self.mode.clone();
         let repo_id = self.repo_id.clone();
         let store = self.store.clone();
         tokio::spawn(async move {
+            let _guard = guard;
             store.put_runtime_mode(&repo_id, mode).await?;
-            *current = mode;
+            current.send_replace(mode);
             Ok(())
         })
         .await
@@ -505,7 +566,7 @@ impl RelayEngine {
         Ok(())
     }
 
-    fn check_repo(&self, repo_id: &str) -> RelayResult<()> {
+    pub(crate) fn check_repo(&self, repo_id: &str) -> RelayResult<()> {
         if self.repo_id != repo_id {
             return Err(RelayError::Internal(format!(
                 "repository {repo_id} does not match engine repository {}",
