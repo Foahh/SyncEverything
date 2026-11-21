@@ -1,0 +1,9 @@
+[project]
+name = "relay-forecast-fixture"
+version = "0.1.0"
+description = "Reproducible time-series window forecasting fixture for Relay demos and Chaos Suite"
+requires-python = ">=3.11"
+dependencies = []
+
+[tool.uv]
+package = false

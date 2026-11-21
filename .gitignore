@@ -1,0 +1,40 @@
+# Rust build artifacts
+/target
+**/*.rs.bk
+
+# Frontend / Node / Vite+ / pnpm
+node_modules/
+dist/*
+!crates/relay-desktop/dist/.gitkeep
+.vite/
+*.local
+
+# Tauri generated artifacts
+crates/relay-desktop/src-tauri/gen/
+
+# Python / uv
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Local databases & runtime data
+*.db
+*.db-wal
+*.db-shm
+.relay/
+
+# Environment & secrets
+.env
+.env.*
+!.env.example
+
+# Workspace scratch / legacy temp
+.tmp/
+.agents/
+
+# OS & editor files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/*.log

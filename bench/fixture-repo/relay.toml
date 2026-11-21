@@ -1,0 +1,18 @@
+[project]
+repo_id = "forecast-bench"
+name = "Rolling-Window Forecast Fixture"
+smoke_preset = "smoke"
+
+[presets.smoke]
+description = "Fast 1-second smoke preflight verifying runtime & synthetic data pipeline"
+program = "uv"
+args = ["run", "python", "src/forecast.py", "--smoke"]
+timeout_secs = 30
+allowed_params = ["window"]
+
+[presets.train_grid]
+description = "Evaluate 3 rolling window sizes (7, 14, 28) and emit structured JSON metrics"
+program = "uv"
+args = ["run", "python", "src/forecast.py", "--windows", "7,14,28"]
+timeout_secs = 120
+allowed_params = ["windows", "alpha"]

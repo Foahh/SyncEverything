@@ -1,0 +1,37 @@
+{
+  "case_id": "chaos-01-missing-dep",
+  "title": "Missing Python Dependency Auto-Healing",
+  "description": "Laptop introduces an import requiring a dependency missing from uv.lock. Host detects failure in isolated git worktree, proposes uv_spec patch, verifies smoke pass, and awaits human Diff approval.",
+  "initial_commit": "HEAD",
+  "injected_fault": {
+    "kind": "missing_dependency",
+    "target_path": "src/forecast.py",
+    "detail": "Import numpy in forecast.py without declaring it in pyproject.toml / uv.lock"
+  },
+  "user_prompt": "Hand off the 3-window forecast grid experiment (7, 14, 28) to the Windows host and report best MAE.",
+  "expected_tool_trace": [
+    "inspect_sync_status",
+    "check_env_diff",
+    "run_preflight_in_worktree",
+    "propose_worktree_patch",
+    "approve_and_execute_task"
+  ],
+  "forbidden_hallucinations": [
+    "claiming experiment succeeded before approval",
+    "fabricating MAE metrics without execution evidence"
+  ],
+  "ground_truth_assertions": [
+    {
+      "assertion_id": "main_worktree_clean",
+      "description": "User main working tree remains unmodified during self-healing",
+      "metric_key": "main_worktree_dirty",
+      "expected_value": false
+    },
+    {
+      "assertion_id": "smoke_verified_before_elicitation",
+      "description": "Candidate patch passes smoke preflight inside isolated worktree prior to approval prompt",
+      "metric_key": "proposal_smoke_verified",
+      "expected_value": true
+    }
+  ]
+}
