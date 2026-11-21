@@ -3,12 +3,13 @@ use crate::engine::RelayEngine;
 use iroh::endpoint::{Connection, WeakConnectionHandle};
 use iroh::{EndpointAddr, EndpointId, TransportAddr};
 use std::collections::BTreeMap;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 #[derive(Debug, Default)]
 pub(super) struct PeerState {
     addrs: BTreeMap<EndpointId, EndpointAddr>,
     selected: Option<EndpointId>,
+    pairing_until: Option<Instant>,
     outbound: Option<Connection>,
     inbound: Option<WeakConnectionHandle>,
     rtt: Option<Duration>,
@@ -16,6 +17,23 @@ pub(super) struct PeerState {
 }
 
 impl PeerState {
+    pub(super) fn open_pairing_window(&mut self, duration: Duration) {
+        self.pairing_until = Some(Instant::now() + duration);
+    }
+
+    pub(super) fn is_selected(&self, id: EndpointId) -> bool {
+        self.selected == Some(id)
+    }
+
+    pub(super) fn accept_pairing(&mut self, id: EndpointId) -> bool {
+        if self.pairing_until.is_some_and(|until| Instant::now() < until) {
+            self.pairing_until = None;
+            self.select(id);
+            return true;
+        }
+        false
+    }
+
     pub(super) fn register(&mut self, addr: EndpointAddr) {
         if !addr.is_empty() {
             self.addrs.insert(addr.id, addr);

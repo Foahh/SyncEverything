@@ -400,3 +400,46 @@ async fn delta_updates_invalidate_evidence_and_reject_missing_edge_endpoints() {
         Err(RelayError::StaleEvidenceBlocked { .. }),
     ));
 }
+
+#[tokio::test]
+async fn desktop_mode_and_queued_peer_decisions_survive_restart() {
+    let db = TempDb::new();
+    let engine = RelayEngine::open_with_default_mode(
+        REPO,
+        db.path(),
+        None,
+        RuntimeMode::LocalDualSandbox,
+    )
+    .await
+    .unwrap();
+    assert_eq!(engine.runtime_mode().await, RuntimeMode::LocalDualSandbox);
+    engine.set_runtime_mode(RuntimeMode::Client).await.unwrap();
+
+    let id = Uuid::now_v7();
+    let spec = spec(id, "base");
+    let queued = engine.queue_peer_task(spec.clone()).await.unwrap();
+    assert_eq!(engine.queue_peer_task(spec).await.unwrap(), queued);
+    let decision = engine
+        .queue_peer_approval(id, None, ApprovalDecision::Rejected)
+        .await
+        .unwrap();
+    assert_eq!(decision.state, TaskState::Rejected);
+    assert_eq!(engine.observed_outbox_count(), 2);
+    close(engine).await;
+
+    let engine = db.open().await;
+    assert_eq!(engine.runtime_mode().await, RuntimeMode::Client);
+    assert_eq!(engine.get_task(id).await.unwrap(), Some(decision));
+    assert_eq!(engine.list_handoffs(10).await.unwrap().len(), 1);
+    let outbox = engine.list_pending_outbox().await.unwrap();
+    assert!(matches!(
+        serde_json::from_value::<WireRequest>(outbox[0].2.clone()).unwrap(),
+        WireRequest::SubmitTask { spec } if spec.task_id == id
+    ));
+    assert!(matches!(
+        serde_json::from_value::<WireRequest>(outbox[1].2.clone()).unwrap(),
+        WireRequest::ResolveApproval { task_id, decision: ApprovalDecision::Rejected, .. }
+            if task_id == id
+    ));
+    close(engine).await;
+}

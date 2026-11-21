@@ -1,4 +1,4 @@
-use super::{NodeState, RPC_TIMEOUT, TempBundle, transport_error};
+use super::{NodeState, RPC_TIMEOUT, RelayNodeEvent, TempBundle, transport_error};
 use crate::contracts::{GitSyncBundleMeta, WireRequest, WireResponse};
 use crate::error::{RelayError, RelayResult};
 use crate::sandbox::WorktreeSandbox;
@@ -56,7 +56,17 @@ impl RelayRpcHandler {
     async fn handle(&self, conn: &Connection, request: WireRequest) -> RelayResult<WireResponse> {
         let id = conn.remote_id();
         let engine = &self.node.engine;
-        self.node.peer().record_inbound(conn);
+        {
+            let mut peer = self.node.peer();
+            if self.node.events.is_some() && !peer.is_selected(id) {
+                if matches!(&request, WireRequest::Ping { .. }) && peer.accept_pairing(id) {
+                    self.notify(RelayNodeEvent::PeerPaired);
+                } else {
+                    return Ok(error_response("unpaired_peer", "peer is not paired".into()));
+                }
+            }
+            peer.record_inbound(conn);
+        }
         match request {
             WireRequest::Ping { sender_device, .. } => {
                 debug!(node_id = %id, %sender_device, "Received Relay ping");
@@ -74,11 +84,16 @@ impl RelayRpcHandler {
                 self.node
                     .peer()
                     .record_commit(id, snapshot.head_commit_sha.as_deref());
+                self.notify(RelayNodeEvent::DagChanged);
                 Ok(WireResponse::DagSnapshot(snapshot))
             }
             WireRequest::FetchDagSnapshot { repo_id } => {
                 engine.check_repo(&repo_id)?;
-                Ok(WireResponse::DagSnapshot(engine.dag_snapshot(true).await))
+                let snapshot = engine.dag_snapshot(true).await;
+                self.node
+                    .peer()
+                    .record_commit(id, snapshot.head_commit_sha.as_deref());
+                Ok(WireResponse::DagSnapshot(snapshot))
             }
             WireRequest::PushSyncBundle { meta, dag_delta } => {
                 engine.check_repo(&meta.repo_id)?;
@@ -88,12 +103,16 @@ impl RelayRpcHandler {
                 }
                 engine.apply_dag_delta(dag_delta).await?;
                 self.node.peer().record_commit(id, Some(&meta.base_commit_sha));
+                self.notify(RelayNodeEvent::DagChanged);
                 Ok(WireResponse::Ack {
                     message: "sync bundle applied".into(),
                 })
             }
             WireRequest::SubmitTask { spec } => {
-                let (record, _) = engine.submit_task(spec).await?;
+                let (record, inserted) = engine.submit_task(spec).await?;
+                if inserted {
+                    self.notify(RelayNodeEvent::TaskSubmitted(record.spec.task_id));
+                }
                 Ok(WireResponse::TaskState(record))
             }
             WireRequest::ResolveApproval {
@@ -102,9 +121,17 @@ impl RelayRpcHandler {
                 decision,
                 ..
             } => {
-                let record = engine
-                    .resolve_approval(task_id, patch_id.as_deref(), decision)
-                    .await?;
+                let record = if self.node.events.is_some() {
+                    let (record, changed) = engine
+                        .resolve_peer_approval(task_id, patch_id.as_deref(), decision)
+                        .await?;
+                    if changed {
+                        self.notify(RelayNodeEvent::ApprovalResolved(task_id, decision));
+                    }
+                    record
+                } else {
+                    engine.resolve_approval(task_id, patch_id.as_deref(), decision).await?
+                };
                 Ok(WireResponse::TaskState(record))
             }
             WireRequest::FetchTaskState { task_id } => {
@@ -114,6 +141,12 @@ impl RelayRpcHandler {
                     .ok_or_else(|| RelayError::TaskNotFound(task_id.to_string()))?;
                 Ok(WireResponse::TaskState(record))
             }
+        }
+    }
+
+    fn notify(&self, event: RelayNodeEvent) {
+        if let Some(events) = &self.node.events {
+            let _ = events.send(event);
         }
     }
 

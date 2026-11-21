@@ -310,15 +310,8 @@ impl RelayStore {
     }
 
     pub async fn enqueue_outbox(&self, repo_id: &str, payload: &Value) -> RelayResult<i64> {
-        let result = sqlx::query(
-            "INSERT INTO sync_outbox (repo_id, payload_json, created_at) VALUES (?, ?, ?)",
-        )
-        .bind(repo_id)
-        .bind(Json(payload))
-        .bind(timestamp(Utc::now()))
-        .execute(&self.pool)
-        .await?;
-        Ok(result.last_insert_rowid())
+        let mut conn = self.pool.acquire().await?;
+        write_outbox(&mut conn, repo_id, payload).await
     }
 
     pub async fn list_pending_outbox(
@@ -451,6 +444,22 @@ pub(crate) async fn write_freshness<'a>(
         }
     }
     Ok(())
+}
+
+pub(crate) async fn write_outbox(
+    conn: &mut SqliteConnection,
+    repo_id: &str,
+    payload: &Value,
+) -> RelayResult<i64> {
+    let result = sqlx::query(
+        "INSERT INTO sync_outbox (repo_id, payload_json, created_at) VALUES (?, ?, ?)",
+    )
+    .bind(repo_id)
+    .bind(Json(payload))
+    .bind(timestamp(Utc::now()))
+    .execute(conn)
+    .await?;
+    Ok(result.last_insert_rowid())
 }
 
 pub(crate) async fn insert_task(

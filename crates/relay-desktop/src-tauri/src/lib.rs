@@ -1,18 +1,19 @@
+mod runtime;
+
 use chrono::Utc;
 use relay_core::contracts::{
-    ApprovalDecision, DagSnapshot, Freshness, GraphEdge, GraphNode, HandoffSummary, NodeKind,
-    PeerStatus, RuntimeMode, StalePropagationReport, TaskRecord, TaskSpec, TaskState,
-    TransportPath,
+    ApprovalDecision, DagSnapshot, GraphEdge, GraphNode, HandoffSummary, PeerStatus, RuntimeMode,
+    StalePropagationReport, TaskRecord, TaskSpec,
 };
-use relay_core::dag::DagEngine;
+use runtime::DesktopRuntime;
 use serde::{Deserialize, Serialize};
 use specta::Type;
 use specta_typescript::Typescript;
 use std::path::Path;
 use std::sync::Arc;
-use tauri::State;
+use tauri::{AppHandle, Manager, State};
 use tauri_specta::{Builder, Event, collect_commands, collect_events};
-use tokio::sync::RwLock;
+use tokio::sync::OnceCell;
 use uuid::Uuid;
 
 #[derive(Clone, Debug, Serialize, Deserialize, Type, Event)]
@@ -27,159 +28,179 @@ pub struct DagStaleAlertEvent {
     pub report: StalePropagationReport,
 }
 
-pub struct AppState {
-    pub mode: RwLock<RuntimeMode>,
-    pub dag: Arc<RwLock<DagEngine>>,
-    pub tasks: RwLock<Vec<TaskRecord>>,
+type RuntimeState = OnceCell<Arc<DesktopRuntime>>;
+
+async fn live_runtime<'a>(
+    app: &AppHandle,
+    state: &'a RuntimeState,
+) -> Result<&'a Arc<DesktopRuntime>, String> {
+    state
+        .get_or_try_init(|| DesktopRuntime::open(app.clone()))
+        .await
+        .map_err(|error| error.to_string())
 }
 
-impl Default for AppState {
-    fn default() -> Self {
-        Self {
-            mode: RwLock::new(RuntimeMode::LocalDualSandbox),
-            dag: Arc::new(RwLock::new(DagEngine::new("forecast-bench"))),
-            tasks: RwLock::new(Vec::new()),
-        }
+fn emit_state(app: &AppHandle, kind: &str, message: impl Into<String>) {
+    let event = RelayStateChangedEvent {
+        kind: kind.into(),
+        message: message.into(),
+        timestamp: Utc::now().to_rfc3339(),
+    };
+    if let Err(error) = event.emit(app) {
+        tracing::warn!(%error, kind, "Unable to emit Relay state change");
     }
 }
 
 #[tauri::command]
 #[specta::specta]
-async fn get_runtime_status(state: State<'_, AppState>) -> Result<PeerStatus, String> {
-    let mode = *state.mode.read().await;
-    let snap = state.dag.read().await.snapshot(true);
-    Ok(PeerStatus {
-        mode,
-        local_node_id: "pending-iroh-node-id".into(),
-        remote_node_id: None,
-        transport_path: match mode {
-            RuntimeMode::LocalDualSandbox => TransportPath::Loopback,
-            _ => TransportPath::Offline,
-        },
-        connected: matches!(mode, RuntimeMode::LocalDualSandbox),
-        rtt_ms: Some(1),
-        last_synced_commit: snap.head_commit_sha,
-        pending_outbox_count: 0,
-    })
+async fn get_runtime_status(
+    app: AppHandle,
+    state: State<'_, RuntimeState>,
+) -> Result<PeerStatus, String> {
+    Ok(live_runtime(&app, &state).await?.status().await)
 }
 
 #[tauri::command]
 #[specta::specta]
 async fn switch_runtime_mode(
-    state: State<'_, AppState>,
+    app: AppHandle,
+    state: State<'_, RuntimeState>,
     mode: RuntimeMode,
 ) -> Result<RuntimeMode, String> {
-    let mut guard = state.mode.write().await;
-    *guard = mode;
-    Ok(mode)
+    live_runtime(&app, &state)
+        .await?
+        .switch_mode(mode)
+        .await
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
 #[specta::specta]
 async fn get_dag_snapshot(
-    state: State<'_, AppState>,
+    app: AppHandle,
+    state: State<'_, RuntimeState>,
     include_stale: bool,
 ) -> Result<DagSnapshot, String> {
-    Ok(state.dag.read().await.snapshot(include_stale))
+    let runtime = live_runtime(&app, &state).await?;
+    Ok(runtime.engine.dag_snapshot(include_stale).await)
 }
 
 #[tauri::command]
 #[specta::specta]
-async fn list_tasks(state: State<'_, AppState>) -> Result<Vec<TaskRecord>, String> {
-    Ok(state.tasks.read().await.clone())
+async fn list_tasks(
+    app: AppHandle,
+    state: State<'_, RuntimeState>,
+) -> Result<Vec<TaskRecord>, String> {
+    live_runtime(&app, &state)
+        .await?
+        .engine
+        .list_tasks()
+        .await
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
 #[specta::specta]
-async fn list_handoffs(_state: State<'_, AppState>) -> Result<Vec<HandoffSummary>, String> {
-    Ok(Vec::new())
+async fn list_handoffs(
+    app: AppHandle,
+    state: State<'_, RuntimeState>,
+) -> Result<Vec<HandoffSummary>, String> {
+    live_runtime(&app, &state)
+        .await?
+        .engine
+        .list_handoffs(u32::MAX)
+        .await
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
 #[specta::specta]
 async fn submit_task(
-    state: State<'_, AppState>,
-    mut spec: TaskSpec,
+    app: AppHandle,
+    state: State<'_, RuntimeState>,
+    spec: TaskSpec,
 ) -> Result<TaskRecord, String> {
-    if spec.task_id.is_nil() {
-        spec.task_id = Uuid::now_v7();
-    }
-    let now = Utc::now();
-    let record = TaskRecord {
-        spec,
-        state: TaskState::Queued,
-        active_proposal: None,
-        preflight_summary: None,
-        evidence_node_id: None,
-        error_message: None,
-        created_at: now,
-        updated_at: now,
-    };
-    state.tasks.write().await.push(record.clone());
-    Ok(record)
+    live_runtime(&app, &state)
+        .await?
+        .submit(spec)
+        .await
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
 #[specta::specta]
 async fn resolve_patch_approval(
-    state: State<'_, AppState>,
+    app: AppHandle,
+    state: State<'_, RuntimeState>,
     task_id: Uuid,
     decision: ApprovalDecision,
 ) -> Result<TaskRecord, String> {
-    let mut tasks = state.tasks.write().await;
-    let task = tasks
-        .iter_mut()
-        .find(|t| t.spec.task_id == task_id)
-        .ok_or_else(|| format!("task not found: {task_id}"))?;
-    task.state = match decision {
-        ApprovalDecision::Approved => TaskState::Executing,
-        ApprovalDecision::Rejected => TaskState::Rejected,
-    };
-    task.updated_at = Utc::now();
-    Ok(task.clone())
+    live_runtime(&app, &state)
+        .await?
+        .resolve_approval(task_id, decision)
+        .await
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
 #[specta::specta]
 async fn simulate_artifact_update(
-    state: State<'_, AppState>,
+    app: AppHandle,
+    state: State<'_, RuntimeState>,
     old_artifact_id: String,
     new_commit_sha: String,
     reason: String,
 ) -> Result<StalePropagationReport, String> {
-    let now = Utc::now();
-    let new_node = GraphNode {
-        id: format!("artifact:{new_commit_sha}"),
-        label: format!("Commit {}", &new_commit_sha[..new_commit_sha.len().min(7)]),
-        payload: NodeKind::Artifact {
-            git_commit_sha: new_commit_sha,
-            env_fingerprint: "uv-lock-v1".into(),
-            working_tree_dirty: false,
-            changed_files: vec!["src/forecast.py".into()],
-        },
-        freshness: Freshness::Fresh,
-        device_origin: "laptop-client".into(),
-        created_at: now,
-        updated_at: now,
-    };
-    let mut dag = state.dag.write().await;
-    dag.supersede_artifact(&old_artifact_id, new_node, reason)
-        .map_err(|e| e.to_string())
+    live_runtime(&app, &state)
+        .await?
+        .supersede_artifact(&old_artifact_id, new_commit_sha, reason)
+        .await
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
 #[specta::specta]
 async fn upsert_dag_node(
-    state: State<'_, AppState>,
+    app: AppHandle,
+    state: State<'_, RuntimeState>,
     node: GraphNode,
     edges: Vec<GraphEdge>,
 ) -> Result<DagSnapshot, String> {
-    let mut dag = state.dag.write().await;
-    dag.upsert_node(node);
-    for edge in edges {
-        dag.add_edge(edge).map_err(|e| e.to_string())?;
-    }
-    Ok(dag.snapshot(true))
+    let snapshot = live_runtime(&app, &state)
+        .await?
+        .engine
+        .upsert_node_and_edges(node, edges)
+        .await
+        .map_err(|error| error.to_string())?;
+    emit_state(&app, "dag_changed", "DAG node updated");
+    Ok(snapshot)
+}
+
+#[tauri::command]
+#[specta::specta]
+async fn get_pairing_ticket(
+    app: AppHandle,
+    state: State<'_, RuntimeState>,
+) -> Result<String, String> {
+    live_runtime(&app, &state)
+        .await?
+        .pairing_ticket()
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+#[specta::specta]
+async fn connect_peer_ticket(
+    app: AppHandle,
+    state: State<'_, RuntimeState>,
+    ticket_json: String,
+) -> Result<PeerStatus, String> {
+    live_runtime(&app, &state)
+        .await?
+        .connect_ticket(&ticket_json)
+        .await
+        .map_err(|error| error.to_string())
 }
 
 pub fn specta_builder() -> Builder<tauri::Wry> {
@@ -194,6 +215,8 @@ pub fn specta_builder() -> Builder<tauri::Wry> {
             resolve_patch_approval,
             simulate_artifact_update,
             upsert_dag_node,
+            get_pairing_ticket,
+            connect_peer_ticket,
         ])
         .events(collect_events![RelayStateChangedEvent, DagStaleAlertEvent])
 }
@@ -201,30 +224,29 @@ pub fn specta_builder() -> Builder<tauri::Wry> {
 pub fn export_bindings_to(path: &Path) -> Result<(), String> {
     specta_builder()
         .export(Typescript::default(), path)
-        .map_err(|e| e.to_string())
+        .map_err(|error| error.to_string())
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let builder = specta_builder();
 
-    // Only auto-export bindings in debug mode when frontend `../src` already exists
-    // (respecting custom frontend scaffolding via create app).
-    #[cfg(debug_assertions)]
-    {
-        let src_dir = Path::new("../src");
-        if src_dir.exists() {
-            builder
-                .export(Typescript::default(), src_dir.join("bindings.ts"))
-                .expect("failed to export TypeScript bindings via tauri-specta");
-        }
-    }
-
     tauri::Builder::default()
-        .manage(AppState::default())
+        .manage(RuntimeState::new())
         .invoke_handler(builder.invoke_handler())
         .setup(move |app| {
             builder.mount_events(app);
+            let app = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                let state = app.state::<RuntimeState>();
+                match live_runtime(&app, &state).await {
+                    Ok(_) => emit_state(&app, "runtime_ready", "Relay runtime started"),
+                    Err(error) => {
+                        tracing::error!(%error, "Unable to start Relay runtime");
+                        emit_state(&app, "runtime_start_failed", error);
+                    }
+                }
+            });
             Ok(())
         })
         .run(tauri::generate_context!())

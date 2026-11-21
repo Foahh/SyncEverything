@@ -19,7 +19,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::future::Future;
-use std::sync::{Arc, Weak};
+use std::sync::{Arc, RwLock, Weak};
 use std::time::Duration;
 use tokio::sync::{Mutex, OwnedMutexGuard};
 use uuid::Uuid;
@@ -27,7 +27,7 @@ use uuid::Uuid;
 struct RelayMcpContext {
     engine: Arc<RelayEngine>,
     sandbox: Option<WorktreeSandbox>,
-    node: Option<Arc<RelayNode>>,
+    node: RwLock<Option<Arc<RelayNode>>>,
     active_worktrees: Arc<Mutex<HashMap<TaskId, WorktreeHandle>>>,
     task_locks: Mutex<HashMap<TaskId, Weak<Mutex<()>>>>,
 }
@@ -62,7 +62,7 @@ impl RelayMcpServer {
             context: Arc::new(RelayMcpContext {
                 engine,
                 sandbox,
-                node,
+                node: RwLock::new(node),
                 active_worktrees: Arc::default(),
                 task_locks: Mutex::default(),
             }),
@@ -71,7 +71,7 @@ impl RelayMcpServer {
     }
 
     pub async fn handle_inspect_sync_status(&self) -> RelayResult<PeerStatus> {
-        if let Some(node) = &self.context.node {
+        if let Some(node) = self.context.node() {
             return Ok(node.peer_status());
         }
         let engine = &self.context.engine;
@@ -85,6 +85,35 @@ impl RelayMcpServer {
             last_synced_commit: engine.head_commit_sha().await,
             pending_outbox_count: engine.pending_outbox_count().await?,
         })
+    }
+
+    /// Update the transport while preserving task locks and tracked worktrees.
+    pub fn set_node(&self, node: Arc<RelayNode>) {
+        *self.context.node.write().expect("MCP node lock poisoned") = Some(node);
+    }
+
+    /// Execute or clean up a decision already persisted by the interactive runtime.
+    pub async fn finish_ui_approval(
+        &self,
+        task_id: TaskId,
+        decision: ApprovalDecision,
+    ) -> RelayResult<TaskRecord> {
+        let context = self.context.clone();
+        finish_operation(async move {
+            let _guard = context.lock_task(task_id).await;
+            let task = context.task(task_id).await?;
+            match (decision, task.state) {
+                (ApprovalDecision::Rejected, TaskState::Rejected) => {
+                    context.cleanup_worktree(&task).await?;
+                }
+                (ApprovalDecision::Approved, TaskState::Executing) => {
+                    context.finish_approval(task, decision).await?;
+                }
+                _ => return Ok(task),
+            }
+            context.task(task_id).await
+        })
+        .await
     }
 
     pub async fn handle_list_handoffs(
@@ -226,6 +255,10 @@ impl RelayMcpServer {
 }
 
 impl RelayMcpContext {
+    fn node(&self) -> Option<Arc<RelayNode>> {
+        self.node.read().expect("MCP node lock poisoned").clone()
+    }
+
     fn sandbox(&self) -> RelayResult<&WorktreeSandbox> {
         self.sandbox.as_ref().ok_or_else(|| {
             RelayError::Internal("no worktree sandbox is configured for this server".into())
@@ -459,8 +492,7 @@ impl RelayMcpContext {
         )?;
         let now = Utc::now();
         let device_origin = self
-            .node
-            .as_ref()
+            .node()
             .map_or_else(|| "local".into(), |node| node.id().to_string());
         let artifact = GraphNode {
             id: format!("artifact:{}", Uuid::now_v7()),

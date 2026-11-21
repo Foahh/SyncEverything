@@ -314,3 +314,61 @@ async fn offline_outbox_flushes_when_peer_comes_online() {
     client.shutdown().await.unwrap();
     host.shutdown().await.unwrap();
 }
+
+#[tokio::test]
+async fn interactive_host_accepts_one_ticket_and_emits_each_rpc_mutation_once() {
+    let temp = TempDir::new();
+    let engine = Arc::new(RelayEngine::in_memory(REPO, None).await.unwrap());
+    let (events, mut changes) = mpsc::unbounded_channel();
+    let host = RelayNode::start_with_events(
+        &temp.join("interactive-host"),
+        engine,
+        RelayNodeConfig { profile: NetworkProfile::LocalOnly, sandbox: None },
+        events,
+    )
+    .await
+    .unwrap();
+    let (client, _) = start_local(&temp, "pairing-client", None).await;
+    let spec = TaskSpec {
+        task_id: Uuid::now_v7(),
+        repo_id: REPO.into(),
+        base_commit_sha: COMMIT.into(),
+        command_preset: "smoke".into(),
+        params: BTreeMap::new(),
+        require_approval: true,
+        requested_by_device: "client".into(),
+        user_note: None,
+    };
+    assert!(client.submit_remote_task(host.addr(), spec.clone()).await.is_err());
+    assert!(changes.try_recv().is_err());
+
+    host.open_pairing_window(Duration::from_secs(30));
+    let ticket = serde_json::to_string(&host.addr()).unwrap();
+    let address = serde_json::from_str::<EndpointAddr>(&ticket).unwrap();
+    client.ping_peer(address.clone(), "client").await.unwrap();
+    assert!(matches!(changes.try_recv().unwrap(), RelayNodeEvent::PeerPaired));
+
+    for _ in 0..2 {
+        client.submit_remote_task(address.clone(), spec.clone()).await.unwrap();
+    }
+    assert!(matches!(
+        changes.try_recv().unwrap(),
+        RelayNodeEvent::TaskSubmitted(id) if id == spec.task_id
+    ));
+
+    for _ in 0..2 {
+        let task = client
+            .resolve_remote_approval(address.clone(), spec.task_id, None, ApprovalDecision::Rejected)
+            .await
+            .unwrap();
+        assert_eq!(task.state, TaskState::Rejected);
+    }
+    assert!(matches!(
+        changes.try_recv().unwrap(),
+        RelayNodeEvent::ApprovalResolved(id, ApprovalDecision::Rejected) if id == spec.task_id
+    ));
+    assert!(changes.try_recv().is_err());
+
+    host.shutdown().await.unwrap();
+    client.shutdown().await.unwrap();
+}

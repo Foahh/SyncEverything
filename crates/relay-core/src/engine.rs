@@ -1,14 +1,14 @@
 use crate::contracts::{
     ApprovalDecision, DagDelta, DagSnapshot, EdgeKind, Freshness, GraphEdge, GraphNode,
     HandoffSummary, NodeKind, PatchProposal, RuntimeMode, StalePropagationReport, TaskId,
-    TaskRecord, TaskSpec, TaskState,
+    TaskRecord, TaskSpec, TaskState, WireRequest,
 };
 use crate::dag::{DagEngine, supersedes_edge};
 use crate::error::{RelayError, RelayResult};
 use crate::state::{is_active, validate_transition};
 use crate::storage::{
     RelayStore, fetch_task, fetch_tasks, insert_task, write_edge, write_freshness, write_handoff,
-    write_log_blob, write_node, write_task,
+    write_log_blob, write_node, write_outbox, write_task,
 };
 use chrono::Utc;
 use serde_json::Value;
@@ -44,8 +44,17 @@ impl RelayEngine {
         db_path: impl AsRef<Path>,
         repo_root: Option<PathBuf>,
     ) -> RelayResult<Self> {
+        Self::open_with_default_mode(repo_id, db_path, repo_root, RuntimeMode::Host).await
+    }
+
+    pub async fn open_with_default_mode(
+        repo_id: impl Into<String>,
+        db_path: impl AsRef<Path>,
+        repo_root: Option<PathBuf>,
+        default_mode: RuntimeMode,
+    ) -> RelayResult<Self> {
         let store = RelayStore::connect(db_path.as_ref()).await?;
-        Self::load(repo_id.into(), store, repo_root).await
+        Self::load(repo_id.into(), store, repo_root, default_mode).await
     }
 
     pub async fn in_memory(
@@ -53,10 +62,15 @@ impl RelayEngine {
         repo_root: Option<PathBuf>,
     ) -> RelayResult<Self> {
         let store = RelayStore::connect_in_memory().await?;
-        Self::load(repo_id.into(), store, repo_root).await
+        Self::load(repo_id.into(), store, repo_root, RuntimeMode::Host).await
     }
 
-    async fn load(repo_id: String, store: RelayStore, repo_root: Option<PathBuf>) -> RelayResult<Self> {
+    async fn load(
+        repo_id: String,
+        store: RelayStore,
+        repo_root: Option<PathBuf>,
+        default_mode: RuntimeMode,
+    ) -> RelayResult<Self> {
         let (nodes, edges) = store.load_dag(&repo_id).await?;
         let mut dag = DagEngine::new(&repo_id);
         for node in nodes {
@@ -69,7 +83,7 @@ impl RelayEngine {
         let mode = store
             .get_runtime_mode(&repo_id)
             .await?
-            .unwrap_or(RuntimeMode::Host);
+            .unwrap_or(default_mode);
         let pending_outbox = store.count_repo_pending_outbox(Some(&repo_id)).await?;
         Ok(Self {
             repo_id,
@@ -229,14 +243,12 @@ impl RelayEngine {
         let mut tx = self.store.begin_write().await?;
         write_node(&mut tx, &self.repo_id, new_node).await?;
         write_edge(&mut tx, &self.repo_id, &edge).await?;
-        write_freshness(
-            &mut tx,
-            report
-                .invalidated_evidence_ids
-                .iter()
-                .filter_map(|id| staged.get_node(id)),
-        )
-        .await?;
+        let invalidated_nodes: Vec<&GraphNode> = report
+            .invalidated_evidence_ids
+            .iter()
+            .filter_map(|id| staged.get_node(id))
+            .collect();
+        write_freshness(&mut tx, invalidated_nodes).await?;
         if old_sha != staged.artifact_commit(&edge.from)? {
             self.stale_tasks(&mut tx, &BTreeMap::from([(old_sha, report.reason.clone())]))
                 .await?;
@@ -270,27 +282,56 @@ impl RelayEngine {
         Ok((node.clone(), tail.join("\n")))
     }
 
-    pub async fn submit_task(&self, mut spec: TaskSpec) -> RelayResult<(TaskRecord, bool)> {
-        self.check_repo(&spec.repo_id)?;
-        if spec.task_id.is_nil() {
-            spec.task_id = Uuid::now_v7();
-        }
-        let now = Utc::now();
-        let queued = TaskRecord {
-            spec,
-            state: TaskState::Queued,
-            active_proposal: None,
-            preflight_summary: None,
-            evidence_node_id: None,
-            error_message: None,
-            created_at: now,
-            updated_at: now,
-        };
+    pub async fn submit_task(&self, spec: TaskSpec) -> RelayResult<(TaskRecord, bool)> {
+        self.persist_submitted_task(&queued_task(spec), false, None)
+            .await
+    }
 
+    /// Record an offline submission and its replay request in the same SQLite transaction.
+    pub async fn queue_peer_task(&self, spec: TaskSpec) -> RelayResult<TaskRecord> {
+        let record = queued_task(spec);
+        let payload = serde_json::to_value(WireRequest::SubmitTask {
+            spec: record.spec.clone(),
+        })?;
+        let guard = self.metadata_writes.clone().lock_owned().await;
+        let engine = self.clone();
+        tokio::spawn(async move {
+            let _guard = guard;
+            let (record, inserted) = engine
+                .persist_submitted_task(&record, false, Some(&payload))
+                .await?;
+            if inserted {
+                engine.pending_outbox.fetch_add(1, Ordering::Relaxed);
+            }
+            Ok(record)
+        })
+        .await
+        .map_err(|err| RelayError::Internal(err.to_string()))?
+    }
+
+    /// Store the task state returned by the paired host, including its original timestamps.
+    pub async fn mirror_peer_task(&self, record: &TaskRecord) -> RelayResult<bool> {
+        self.persist_submitted_task(record, true, None)
+            .await
+            .map(|(_, changed)| changed)
+    }
+
+    async fn persist_submitted_task(
+        &self,
+        incoming: &TaskRecord,
+        from_peer: bool,
+        outbox: Option<&Value>,
+    ) -> RelayResult<(TaskRecord, bool)> {
+        self.check_repo(&incoming.spec.repo_id)?;
         let dag = self.dag.read().await;
         let mut tx = self.store.begin_write().await?;
-        let (record, inserted) = insert_task(&mut tx, &queued).await?;
+        let (mut record, inserted) = insert_task(&mut tx, incoming).await?;
         self.check_repo(&record.spec.repo_id)?;
+        let updated = from_peer && &record != incoming;
+        if updated {
+            write_task(&mut tx, incoming).await?;
+            record = incoming.clone();
+        }
         if inserted {
             let tasks = fetch_tasks(&mut tx, Some(&self.repo_id)).await?;
             let handoff = HandoffSummary {
@@ -311,9 +352,12 @@ impl RelayEngine {
                 created_at: record.created_at,
             };
             write_handoff(&mut tx, &handoff).await?;
+            if let Some(payload) = outbox {
+                write_outbox(&mut tx, &self.repo_id, payload).await?;
+            }
         }
         tx.commit().await?;
-        Ok((record, inserted))
+        Ok((record, inserted || updated))
     }
 
     pub async fn transition_task(
@@ -370,22 +414,90 @@ impl RelayEngine {
         decision: ApprovalDecision,
     ) -> RelayResult<TaskRecord> {
         self.edit_task(task_id, |record| {
-            if let Some(patch_id) = patch_id
-                && record
-                    .active_proposal
-                    .as_ref()
-                    .map(|patch| patch.patch_id.as_str())
-                    != Some(patch_id)
-            {
-                return Err(RelayError::ProposalNotFound(patch_id.into()));
-            }
-            let next_state = match decision {
-                ApprovalDecision::Approved => TaskState::Executing,
-                ApprovalDecision::Rejected => TaskState::Rejected,
-            };
-            move_task(record, next_state)
+            validate_approval_patch(record, patch_id, false)?;
+            move_task(record, approval_state(decision))
         })
         .await
+    }
+
+    /// Resolve the exact proposal observed by the UI, including approval without a proposal.
+    pub async fn resolve_ui_approval(
+        &self,
+        task_id: TaskId,
+        patch_id: Option<&str>,
+        decision: ApprovalDecision,
+    ) -> RelayResult<TaskRecord> {
+        self.resolve_ui_approval_inner(task_id, patch_id, decision, None, false)
+            .await
+            .map(|(record, _)| record)
+    }
+
+    /// Accept a previously applied decision when an outbox sender retries it.
+    pub(crate) async fn resolve_peer_approval(
+        &self,
+        task_id: TaskId,
+        patch_id: Option<&str>,
+        decision: ApprovalDecision,
+    ) -> RelayResult<(TaskRecord, bool)> {
+        self.resolve_ui_approval_inner(task_id, patch_id, decision, None, true)
+            .await
+    }
+
+    /// Queue the Client's decision after any pending submission for the same task.
+    pub async fn queue_peer_approval(
+        &self,
+        task_id: TaskId,
+        patch_id: Option<&str>,
+        decision: ApprovalDecision,
+    ) -> RelayResult<TaskRecord> {
+        let patch_id = patch_id.map(str::to_owned);
+        let payload = serde_json::to_value(WireRequest::ResolveApproval {
+            task_id,
+            patch_id: patch_id.clone(),
+            decision,
+            comment: None,
+        })?;
+        let guard = self.metadata_writes.clone().lock_owned().await;
+        let engine = self.clone();
+        tokio::spawn(async move {
+            let _guard = guard;
+            let (record, _) = engine
+                .resolve_ui_approval_inner(task_id, patch_id.as_deref(), decision, Some(&payload), false)
+                .await?;
+            engine.pending_outbox.fetch_add(1, Ordering::Relaxed);
+            Ok(record)
+        })
+        .await
+        .map_err(|err| RelayError::Internal(err.to_string()))?
+    }
+
+    async fn resolve_ui_approval_inner(
+        &self,
+        task_id: TaskId,
+        patch_id: Option<&str>,
+        decision: ApprovalDecision,
+        outbox: Option<&Value>,
+        allow_replay: bool,
+    ) -> RelayResult<(TaskRecord, bool)> {
+        let mut tx = self.store.begin_write().await?;
+        let mut record = self.require_task(&mut tx, task_id).await?;
+        validate_approval_patch(&record, patch_id, true)?;
+        if allow_replay
+            && matches!(
+                (decision, record.state),
+                (ApprovalDecision::Approved, TaskState::Executing | TaskState::Completed | TaskState::Failed)
+                    | (ApprovalDecision::Rejected, TaskState::Rejected)
+            )
+        {
+            return Ok((record, false));
+        }
+        move_task(&mut record, approval_state(decision))?;
+        write_task(&mut tx, &record).await?;
+        if let Some(payload) = outbox {
+            write_outbox(&mut tx, &self.repo_id, payload).await?;
+        }
+        tx.commit().await?;
+        Ok((record, true))
     }
 
     pub async fn record_evidence_result(
@@ -657,6 +769,47 @@ impl RelayEngine {
             )));
         }
         Ok(())
+    }
+}
+
+fn validate_approval_patch(
+    record: &TaskRecord,
+    patch_id: Option<&str>,
+    exact_patch: bool,
+) -> RelayResult<()> {
+    let active_id = record
+        .active_proposal
+        .as_ref()
+        .map(|patch| patch.patch_id.as_str());
+    if (exact_patch || patch_id.is_some()) && active_id != patch_id {
+        return Err(RelayError::ProposalNotFound(
+            patch_id.unwrap_or("no proposal").into(),
+        ));
+    }
+    Ok(())
+}
+
+fn approval_state(decision: ApprovalDecision) -> TaskState {
+    match decision {
+        ApprovalDecision::Approved => TaskState::Executing,
+        ApprovalDecision::Rejected => TaskState::Rejected,
+    }
+}
+
+fn queued_task(mut spec: TaskSpec) -> TaskRecord {
+    if spec.task_id.is_nil() {
+        spec.task_id = Uuid::now_v7();
+    }
+    let now = Utc::now();
+    TaskRecord {
+        spec,
+        state: TaskState::Queued,
+        active_proposal: None,
+        preflight_summary: None,
+        evidence_node_id: None,
+        error_message: None,
+        created_at: now,
+        updated_at: now,
     }
 }
 

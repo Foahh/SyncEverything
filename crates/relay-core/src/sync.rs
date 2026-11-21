@@ -22,6 +22,7 @@ use std::net::Ipv4Addr;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
+use tokio::sync::mpsc;
 use tracing::info;
 use uuid::Uuid;
 
@@ -41,6 +42,15 @@ pub struct RelayNodeConfig {
     pub sandbox: Option<WorktreeSandbox>,
 }
 
+/// A mutation committed by an incoming Relay RPC.
+#[derive(Debug)]
+pub enum RelayNodeEvent {
+    TaskSubmitted(TaskId),
+    ApprovalResolved(TaskId, ApprovalDecision),
+    DagChanged,
+    PeerPaired,
+}
+
 /// One iroh endpoint serving the Relay RPC and BLAKE3 blob protocols.
 pub struct RelayNode {
     shared: Arc<NodeState>,
@@ -55,6 +65,7 @@ struct NodeState {
     blob_dir: PathBuf,
     profile: NetworkProfile,
     peer: Mutex<PeerState>,
+    events: Option<mpsc::UnboundedSender<RelayNodeEvent>>,
 }
 
 impl RelayNode {
@@ -77,6 +88,25 @@ impl RelayNode {
         blob_dir: &Path,
         engine: Arc<RelayEngine>,
         config: RelayNodeConfig,
+    ) -> RelayResult<Self> {
+        Self::start_inner(blob_dir, engine, config, None).await
+    }
+
+    /// Start an interactive node. Incoming mutations require a paired peer.
+    pub async fn start_with_events(
+        blob_dir: &Path,
+        engine: Arc<RelayEngine>,
+        config: RelayNodeConfig,
+        events: mpsc::UnboundedSender<RelayNodeEvent>,
+    ) -> RelayResult<Self> {
+        Self::start_inner(blob_dir, engine, config, Some(events)).await
+    }
+
+    async fn start_inner(
+        blob_dir: &Path,
+        engine: Arc<RelayEngine>,
+        config: RelayNodeConfig,
+        events: Option<mpsc::UnboundedSender<RelayNodeEvent>>,
     ) -> RelayResult<Self> {
         let blob_dir = std::path::absolute(blob_dir)?;
         tokio::fs::create_dir_all(&blob_dir).await?;
@@ -102,6 +132,7 @@ impl RelayNode {
             blob_dir,
             profile: config.profile,
             peer: Mutex::default(),
+            events,
         });
         let router = Router::builder(endpoint)
             .accept(iroh_blobs::ALPN, blobs)
@@ -143,6 +174,11 @@ impl RelayNode {
         let mut peer = self.shared.peer();
         peer.select(addr.id);
         peer.register(addr);
+    }
+
+    /// Allow the next incoming ping to establish a pairing during a user-opened window.
+    pub fn open_pairing_window(&self, duration: Duration) {
+        self.shared.peer().open_pairing_window(duration);
     }
 
     /// Supply a return route for the authenticated sender of an offline bundle announcement.
@@ -187,7 +223,10 @@ impl RelayNode {
         match response {
             Ok(response) => {
                 let commit = match (&request, &response) {
-                    (WireRequest::SyncDagDelta { .. }, WireResponse::DagSnapshot(snapshot)) => {
+                    (
+                        WireRequest::SyncDagDelta { .. } | WireRequest::FetchDagSnapshot { .. },
+                        WireResponse::DagSnapshot(snapshot),
+                    ) => {
                         snapshot.head_commit_sha.as_deref()
                     }
                     (WireRequest::PushSyncBundle { meta, .. }, WireResponse::Ack { .. }) => {
