@@ -87,3 +87,17 @@ When scaffolding `crates/relay-desktop` with your preferred `create app` setup (
 - Build output: `crates/relay-desktop/dist`
 - Generated Rust bindings target: `crates/relay-desktop/src/bindings.ts`
 - Localization files: `crates/relay-desktop/src/i18n/locales/en.json` and `zh-CN.json`
+
+---
+
+## 5. Product UX Refactor Backlog (User Feedback — To Apply After Core Backend)
+
+The initial UI read too much like an academic demo harness rather than an everyday product for real users. In the UI polish pass:
+1. **Remove demo-harness chrome from primary UI**: Eliminate `"Live Demo Triggers"`, `"Simulate Upstream Edit"`, and `"Reset Demo Graph"` from the main sidebar/dock; if needed for dev/testing, tuck sandbox actions inside a discreet Developer/Sandbox popover.
+2. **Replace internal/academic jargon with natural user language** (keep Rust/paper terminology in `relay-core` & docs only):
+   - `Decision` → **Plan / Note** (`思路 / 记录`)
+   - `Artifact` → **Code Version** (`代码版本`)
+   - `Evidence` → **Run Result** (`实验结果`)
+   - `STALE` → **Outdated** (`已过期 · 需重跑`)
+   - `Self-Healing Diff` → **Suggested Fix** (`自动修复建议`)
+3. **Cut text density & clarify first-time workflow**: Make the primary user flow immediately obvious at a glance (1. Connect Host → 2. Pick/Run Task → 3. Review Fix or View Result), collapsing hashes, fingerprints, and raw JSON behind progressive disclosure.

@@ -113,6 +113,7 @@ let builder = Builder::<tauri::Wry>::new()
 builder.export(Typescript::default(), "../src/bindings.ts")?;
 ```
 
-> **Windows & Specta v2 Notes:**
+> **Windows, `sqlx 0.9` & Specta v2 Notes:**
 > 1. `tauri_build::build()` embeds the Windows ComCtl32 v6 manifest into `[[bin]]` targets, not `lib` unit-test harnesses. Export bindings via `cargo run -p relay-desktop --bin export_bindings -- crates/relay-desktop/src/bindings.ts` and keep unit tests in `relay-core` / `relay-daemon`.
 > 2. `specta-typescript 0.0.15` forbids `BigInt`-sized integers (`i64`/`u64`/`usize`, including `serde_json::Value`). Use `relay_core::contracts::JsonValue` (backed by `f64`) and `u32` in all `#[derive(specta::Type)]` structs!
+> 3. `sqlx 0.9.1` enforces `SqlSafeStr`: always pass `&'static str` literals (or `const &str`) to `sqlx::query` / `sqlx::query_as`, never `format!(...)` strings.
