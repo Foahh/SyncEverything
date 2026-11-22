@@ -4,6 +4,7 @@ import type {
   ApprovalDecision,
   GraphEdge,
   GraphNode,
+  LlmSettingsUpdate_Deserialize,
   RuntimeMode,
   TaskSpec_Deserialize,
 } from "../bindings";
@@ -12,6 +13,8 @@ import { relayApi, resetBrowserPreviewState } from "./relayApi";
 export const relayKeys = {
   all: ["relay"] as const,
   status: () => [...relayKeys.all, "status"] as const,
+  workspace: () => [...relayKeys.all, "workspace"] as const,
+  llm: () => [...relayKeys.all, "llm"] as const,
   dag: (includeStale: boolean) => [...relayKeys.all, "dag", includeStale] as const,
   tasks: () => [...relayKeys.all, "tasks"] as const,
   handoffs: () => [...relayKeys.all, "handoffs"] as const,
@@ -53,6 +56,50 @@ export function useRuntimeStatus() {
     queryKey: relayKeys.status(),
     queryFn: () => relayApi.getRuntimeStatus(),
     refetchInterval: 4000,
+  });
+}
+
+export function useWorkspaceInfo() {
+  return useQuery({
+    queryKey: relayKeys.workspace(),
+    queryFn: () => relayApi.getWorkspaceInfo(),
+  });
+}
+
+export function useLlmSettings() {
+  return useQuery({
+    queryKey: relayKeys.llm(),
+    queryFn: () => relayApi.getLlmSettings(),
+  });
+}
+
+export function useOpenWorkspaceRepo() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (repoPath: string) => relayApi.openWorkspaceRepo(repoPath),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: relayKeys.all });
+    },
+  });
+}
+
+export function useRefreshGitHead() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: () => relayApi.refreshGitHead(),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: relayKeys.all });
+    },
+  });
+}
+
+export function useSaveLlmSettings() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (update: LlmSettingsUpdate_Deserialize) => relayApi.saveLlmSettings(update),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: relayKeys.llm() });
+    },
   });
 }
 

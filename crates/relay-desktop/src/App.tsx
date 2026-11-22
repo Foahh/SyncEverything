@@ -11,6 +11,10 @@ import {
 import { PairDeviceModal } from "./components/modals/PairDeviceModal";
 import { RecordDecisionModal } from "./components/modals/RecordDecisionModal";
 import {
+  WorkspaceSettingsModal,
+  type SettingsTab,
+} from "./components/modals/WorkspaceSettingsModal";
+import {
   useDagSnapshot,
   useRelayEventSync,
   useResetPreviewDemo,
@@ -21,6 +25,7 @@ import {
   useSwitchRuntimeMode,
   useTasks,
   useUpsertDagNode,
+  useWorkspaceInfo,
 } from "./lib/queries";
 
 const THEME_STORAGE_KEY = "relay.theme";
@@ -55,8 +60,11 @@ export default function App() {
   const [decisionModalOpen, setDecisionModalOpen] = useState(false);
   const [taskModalOpen, setTaskModalOpen] = useState(false);
   const [pairModalOpen, setPairModalOpen] = useState(false);
+  const [settingsModalOpen, setSettingsModalOpen] = useState(false);
+  const [settingsTab, setSettingsTab] = useState<SettingsTab>("repo");
 
   const { data: status } = useRuntimeStatus();
+  const { data: workspace } = useWorkspaceInfo();
   const { data: dag } = useDagSnapshot(includeStale);
   const { data: tasks = [] } = useTasks();
 
@@ -208,15 +216,19 @@ export default function App() {
   const handleDispatchTask = (values: DispatchTaskFormValues) => {
     submitTask.mutate({
       task_id: crypto.randomUUID(),
-      repo_id: dag?.repo_id ?? "forecast-bench",
+      repo_id: workspace?.repo_id ?? dag?.repo_id ?? "forecast-bench",
       base_commit_sha: dag?.head_commit_sha ?? "HEAD",
       command_preset: values.preset,
-      params:
-        values.preset === "train_grid" ? { windows: values.windows, alpha: values.alpha } : {},
+      params: values.params,
       require_approval: values.requireApproval,
       requested_by_device: status?.mode === "host" ? "Workstation" : "Laptop",
       user_note: values.userNote.trim() || null,
     });
+  };
+
+  const handleOpenSettings = (tab: SettingsTab) => {
+    setSettingsTab(tab);
+    setSettingsModalOpen(true);
   };
 
   const handleResolveApproval = (taskId: string, decision: ApprovalDecision) => {
@@ -239,13 +251,15 @@ export default function App() {
     <div className="flex h-screen w-screen flex-col overflow-hidden bg-background text-foreground">
       <TopTelemetryBar
         status={status}
-        repoId={dag?.repo_id ?? "forecast-bench"}
+        repoId={workspace?.repo_id ?? dag?.repo_id ?? "forecast-bench"}
         headCommitSha={dag?.head_commit_sha ?? null}
         staleCount={dag?.stale_count ?? 0}
         theme={theme}
         onToggleTheme={handleToggleTheme}
         onOpenPairModal={() => setPairModalOpen(true)}
         onOpenRunTask={() => setTaskModalOpen(true)}
+        onOpenRepoSettings={() => handleOpenSettings("repo")}
+        onOpenLlmSettings={() => handleOpenSettings("llm")}
       />
 
       <main className="flex min-h-0 flex-1 overflow-hidden">
@@ -300,11 +314,19 @@ export default function App() {
         isOpen={taskModalOpen}
         onOpenChange={setTaskModalOpen}
         headCommitSha={dag?.head_commit_sha ?? "HEAD"}
+        presets={workspace?.presets ?? []}
         onDispatch={handleDispatchTask}
         isSubmitting={submitTask.isPending}
       />
 
       <PairDeviceModal isOpen={pairModalOpen} onOpenChange={setPairModalOpen} />
+
+      <WorkspaceSettingsModal
+        isOpen={settingsModalOpen}
+        onOpenChange={setSettingsModalOpen}
+        activeTab={settingsTab}
+        onTabChange={setSettingsTab}
+      />
     </div>
   );
 }

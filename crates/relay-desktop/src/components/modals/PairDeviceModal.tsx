@@ -55,8 +55,14 @@ export function PairDeviceModal({ isOpen, onOpenChange }: PairDeviceModalProps) 
         setFeedback({ ok: true, text: t("modals.pair.connectedSuccess") });
         setRemoteInput("");
       },
-      onError: () => {
-        setFeedback({ ok: false, text: t("modals.pair.invalidCode") });
+      onError: (err) => {
+        const detail =
+          err instanceof Error && err.message
+            ? err.message
+            : typeof err === "string" && err
+              ? err
+              : t("modals.pair.invalidCode");
+        setFeedback({ ok: false, text: detail });
       },
     });
   };
@@ -146,6 +152,9 @@ export function PairDeviceModal({ isOpen, onOpenChange }: PairDeviceModalProps) 
                   value={remoteInput}
                   onChange={(e) => setRemoteInput(e.target.value)}
                   placeholder={t("modals.pair.pastePlaceholder")}
+                  autoCorrect="off"
+                  autoCapitalize="none"
+                  spellCheck={false}
                   className="font-mono-tech text-[11.5px]"
                 />
               </Field>

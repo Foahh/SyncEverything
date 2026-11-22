@@ -177,6 +177,11 @@
   text-box: normal;
 }
 
+/* Defer validation error border styling until after blur or submit (:user-invalid). */
+:is(input, textarea):user-invalid {
+  border-color: var(--destructive);
+}
+
 ::-webkit-scrollbar {
   width: 6px;
   height: 6px;

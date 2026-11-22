@@ -1,19 +1,20 @@
 mod runtime;
 
 use chrono::Utc;
+use relay_core::agent::{InferenceTier, LlmProbeResult, LlmSettingsView};
 use relay_core::contracts::{
     ApprovalDecision, DagSnapshot, GraphEdge, GraphNode, HandoffSummary, PeerStatus, RuntimeMode,
     StalePropagationReport, TaskRecord, TaskSpec,
 };
-use runtime::DesktopRuntime;
+use runtime::{DesktopRuntime, validate_user_repo};
 use serde::{Deserialize, Serialize};
 use specta::Type;
 use specta_typescript::Typescript;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tauri::{AppHandle, Manager, State};
 use tauri_specta::{Builder, Event, collect_commands, collect_events};
-use tokio::sync::OnceCell;
+use tokio::sync::{Mutex, RwLock};
 use uuid::Uuid;
 
 #[derive(Clone, Debug, Serialize, Deserialize, Type, Event)]
@@ -28,16 +29,84 @@ pub struct DagStaleAlertEvent {
     pub report: StalePropagationReport,
 }
 
-type RuntimeState = OnceCell<Arc<DesktopRuntime>>;
+#[derive(Clone, Debug, Serialize, Deserialize, Type)]
+pub struct PresetInfo {
+    pub name: String,
+    pub description: String,
+    pub program: String,
+    pub args: Vec<String>,
+    pub allowed_params: Vec<String>,
+}
 
-async fn live_runtime<'a>(
-    app: &AppHandle,
-    state: &'a RuntimeState,
-) -> Result<&'a Arc<DesktopRuntime>, String> {
-    state
-        .get_or_try_init(|| DesktopRuntime::open(app.clone()))
-        .await
-        .map_err(|error| error.to_string())
+#[derive(Clone, Debug, Serialize, Deserialize, Type)]
+pub struct WorkspaceInfo {
+    pub repo_id: String,
+    pub name: String,
+    pub repo_root: Option<String>,
+    pub is_git_repo: bool,
+    pub has_manifest: bool,
+    pub smoke_preset: String,
+    pub presets: Vec<PresetInfo>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, Type)]
+pub struct LlmSettingsUpdate {
+    pub tier: InferenceTier,
+    pub base_url: String,
+    pub model: String,
+    pub api_key_env: Option<String>,
+    /// `None` keeps any stored key; `Some("")` clears it; `Some(key)` replaces it.
+    pub api_key: Option<String>,
+}
+
+#[derive(Default)]
+struct RuntimeManager {
+    current: RwLock<Option<Arc<DesktopRuntime>>>,
+    lifecycle: Mutex<()>,
+}
+
+impl RuntimeManager {
+    async fn get_or_init(&self, app: &AppHandle) -> Result<Arc<DesktopRuntime>, String> {
+        if let Some(runtime) = self.current.read().await.clone() {
+            return Ok(runtime);
+        }
+        let _guard = self.lifecycle.lock().await;
+        if let Some(runtime) = self.current.read().await.clone() {
+            return Ok(runtime);
+        }
+        let opened = DesktopRuntime::open(app.clone(), None)
+            .await
+            .map_err(|error| error.to_string())?;
+        *self.current.write().await = Some(opened.clone());
+        Ok(opened)
+    }
+
+    async fn switch_repo(
+        &self,
+        app: &AppHandle,
+        repo_path: String,
+    ) -> Result<WorkspaceInfo, String> {
+        let validated =
+            validate_user_repo(&PathBuf::from(repo_path.trim())).map_err(|error| error.to_string())?;
+        let _guard = self.lifecycle.lock().await;
+        let next = DesktopRuntime::open(app.clone(), Some(validated.clone()))
+            .await
+            .map_err(|error| error.to_string())?;
+        if let Err(error) = next.persist_repo_preference(&validated) {
+            tracing::warn!(%error, "Unable to persist selected workspace repository");
+        }
+        let info = next.workspace_info();
+        let previous = self.current.write().await.replace(next);
+        if let Some(previous) = previous {
+            previous.shutdown().await;
+        }
+        emit_state(
+            app,
+            "workspace_changed",
+            format!("Opened repository {}", info.repo_id),
+        );
+        Ok(info)
+    }
 }
 
 fn emit_state(app: &AppHandle, kind: &str, message: impl Into<String>) {
@@ -55,19 +124,102 @@ fn emit_state(app: &AppHandle, kind: &str, message: impl Into<String>) {
 #[specta::specta]
 async fn get_runtime_status(
     app: AppHandle,
-    state: State<'_, RuntimeState>,
+    state: State<'_, RuntimeManager>,
 ) -> Result<PeerStatus, String> {
-    Ok(live_runtime(&app, &state).await?.status().await)
+    Ok(state.get_or_init(&app).await?.status().await)
+}
+
+#[tauri::command]
+#[specta::specta]
+async fn get_workspace_info(
+    app: AppHandle,
+    state: State<'_, RuntimeManager>,
+) -> Result<WorkspaceInfo, String> {
+    Ok(state.get_or_init(&app).await?.workspace_info())
+}
+
+#[tauri::command]
+#[specta::specta]
+async fn pick_repository_folder() -> Result<Option<String>, String> {
+    let folder = rfd::AsyncFileDialog::new()
+        .set_title("Select Git Repository with relay.toml")
+        .pick_folder()
+        .await;
+    Ok(folder.map(|handle| handle.path().to_string_lossy().into_owned()))
+}
+
+#[tauri::command]
+#[specta::specta]
+async fn open_workspace_repo(
+    app: AppHandle,
+    state: State<'_, RuntimeManager>,
+    repo_path: String,
+) -> Result<WorkspaceInfo, String> {
+    state.switch_repo(&app, repo_path).await
+}
+
+#[tauri::command]
+#[specta::specta]
+async fn refresh_git_head(
+    app: AppHandle,
+    state: State<'_, RuntimeManager>,
+) -> Result<bool, String> {
+    state
+        .get_or_init(&app)
+        .await?
+        .check_git_head()
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+#[specta::specta]
+async fn get_llm_settings(
+    app: AppHandle,
+    state: State<'_, RuntimeManager>,
+) -> Result<LlmSettingsView, String> {
+    Ok(state.get_or_init(&app).await?.llm_settings_view().await)
+}
+
+#[tauri::command]
+#[specta::specta]
+async fn save_llm_settings(
+    app: AppHandle,
+    state: State<'_, RuntimeManager>,
+    update: LlmSettingsUpdate,
+) -> Result<LlmSettingsView, String> {
+    state
+        .get_or_init(&app)
+        .await?
+        .save_llm_settings(update)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+#[specta::specta]
+async fn test_llm_connection(
+    app: AppHandle,
+    state: State<'_, RuntimeManager>,
+    update: Option<LlmSettingsUpdate>,
+) -> Result<LlmProbeResult, String> {
+    state
+        .get_or_init(&app)
+        .await?
+        .test_llm_connection(update)
+        .await
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
 #[specta::specta]
 async fn switch_runtime_mode(
     app: AppHandle,
-    state: State<'_, RuntimeState>,
+    state: State<'_, RuntimeManager>,
     mode: RuntimeMode,
 ) -> Result<RuntimeMode, String> {
-    live_runtime(&app, &state)
+    state
+        .get_or_init(&app)
         .await?
         .switch_mode(mode)
         .await
@@ -78,10 +230,10 @@ async fn switch_runtime_mode(
 #[specta::specta]
 async fn get_dag_snapshot(
     app: AppHandle,
-    state: State<'_, RuntimeState>,
+    state: State<'_, RuntimeManager>,
     include_stale: bool,
 ) -> Result<DagSnapshot, String> {
-    let runtime = live_runtime(&app, &state).await?;
+    let runtime = state.get_or_init(&app).await?;
     Ok(runtime.engine.dag_snapshot(include_stale).await)
 }
 
@@ -89,9 +241,10 @@ async fn get_dag_snapshot(
 #[specta::specta]
 async fn list_tasks(
     app: AppHandle,
-    state: State<'_, RuntimeState>,
+    state: State<'_, RuntimeManager>,
 ) -> Result<Vec<TaskRecord>, String> {
-    live_runtime(&app, &state)
+    state
+        .get_or_init(&app)
         .await?
         .engine
         .list_tasks()
@@ -103,9 +256,10 @@ async fn list_tasks(
 #[specta::specta]
 async fn list_handoffs(
     app: AppHandle,
-    state: State<'_, RuntimeState>,
+    state: State<'_, RuntimeManager>,
 ) -> Result<Vec<HandoffSummary>, String> {
-    live_runtime(&app, &state)
+    state
+        .get_or_init(&app)
         .await?
         .engine
         .list_handoffs(u32::MAX)
@@ -117,10 +271,11 @@ async fn list_handoffs(
 #[specta::specta]
 async fn submit_task(
     app: AppHandle,
-    state: State<'_, RuntimeState>,
+    state: State<'_, RuntimeManager>,
     spec: TaskSpec,
 ) -> Result<TaskRecord, String> {
-    live_runtime(&app, &state)
+    state
+        .get_or_init(&app)
         .await?
         .submit(spec)
         .await
@@ -131,11 +286,12 @@ async fn submit_task(
 #[specta::specta]
 async fn resolve_patch_approval(
     app: AppHandle,
-    state: State<'_, RuntimeState>,
+    state: State<'_, RuntimeManager>,
     task_id: Uuid,
     decision: ApprovalDecision,
 ) -> Result<TaskRecord, String> {
-    live_runtime(&app, &state)
+    state
+        .get_or_init(&app)
         .await?
         .resolve_approval(task_id, decision)
         .await
@@ -146,12 +302,13 @@ async fn resolve_patch_approval(
 #[specta::specta]
 async fn simulate_artifact_update(
     app: AppHandle,
-    state: State<'_, RuntimeState>,
+    state: State<'_, RuntimeManager>,
     old_artifact_id: String,
     new_commit_sha: String,
     reason: String,
 ) -> Result<StalePropagationReport, String> {
-    live_runtime(&app, &state)
+    state
+        .get_or_init(&app)
         .await?
         .supersede_artifact(&old_artifact_id, new_commit_sha, reason)
         .await
@@ -162,11 +319,12 @@ async fn simulate_artifact_update(
 #[specta::specta]
 async fn upsert_dag_node(
     app: AppHandle,
-    state: State<'_, RuntimeState>,
+    state: State<'_, RuntimeManager>,
     node: GraphNode,
     edges: Vec<GraphEdge>,
 ) -> Result<DagSnapshot, String> {
-    let snapshot = live_runtime(&app, &state)
+    let snapshot = state
+        .get_or_init(&app)
         .await?
         .engine
         .upsert_node_and_edges(node, edges)
@@ -180,9 +338,10 @@ async fn upsert_dag_node(
 #[specta::specta]
 async fn get_pairing_ticket(
     app: AppHandle,
-    state: State<'_, RuntimeState>,
+    state: State<'_, RuntimeManager>,
 ) -> Result<String, String> {
-    live_runtime(&app, &state)
+    state
+        .get_or_init(&app)
         .await?
         .pairing_ticket()
         .await
@@ -193,10 +352,11 @@ async fn get_pairing_ticket(
 #[specta::specta]
 async fn connect_peer_ticket(
     app: AppHandle,
-    state: State<'_, RuntimeState>,
+    state: State<'_, RuntimeManager>,
     ticket_json: String,
 ) -> Result<PeerStatus, String> {
-    live_runtime(&app, &state)
+    state
+        .get_or_init(&app)
         .await?
         .connect_ticket(&ticket_json)
         .await
@@ -207,6 +367,13 @@ pub fn specta_builder() -> Builder<tauri::Wry> {
     Builder::<tauri::Wry>::new()
         .commands(collect_commands![
             get_runtime_status,
+            get_workspace_info,
+            pick_repository_folder,
+            open_workspace_repo,
+            refresh_git_head,
+            get_llm_settings,
+            save_llm_settings,
+            test_llm_connection,
             switch_runtime_mode,
             get_dag_snapshot,
             list_tasks,
@@ -232,14 +399,14 @@ pub fn run() {
     let builder = specta_builder();
 
     tauri::Builder::default()
-        .manage(RuntimeState::new())
+        .manage(RuntimeManager::default())
         .invoke_handler(builder.invoke_handler())
         .setup(move |app| {
             builder.mount_events(app);
             let app = app.handle().clone();
             tauri::async_runtime::spawn(async move {
-                let state = app.state::<RuntimeState>();
-                match live_runtime(&app, &state).await {
+                let state = app.state::<RuntimeManager>();
+                match state.get_or_init(&app).await {
                     Ok(_) => emit_state(&app, "runtime_ready", "Relay runtime started"),
                     Err(error) => {
                         tracing::error!(%error, "Unable to start Relay runtime");

@@ -1,4 +1,3 @@
-use super::REPO_ID;
 use iroh::EndpointAddr;
 use relay_core::contracts::{DagSnapshot, RuntimeMode, WireRequest, WireResponse};
 use relay_core::engine::RelayEngine;
@@ -56,7 +55,7 @@ impl Network {
                 remote: None,
                 last_remote_dag: None,
             };
-            network.sync_loopback_head().await;
+            network.sync_loopback_head(engine.repo_id()).await;
             return Ok((network, vec![host_events, client_events]));
         }
 
@@ -64,12 +63,20 @@ impl Network {
             RuntimeMode::Host => ("host", "host-offline", sandbox),
             _ => ("client", "client-offline", None),
         };
-        let standard =
-            start_node(data_dir, online_dir, engine, sandbox.clone(), NetworkProfile::StandardN0)
-                .await;
+        let standard = start_node(
+            data_dir,
+            online_dir,
+            engine,
+            sandbox.clone(),
+            NetworkProfile::StandardN0,
+        )
+        .await;
         let online = match standard {
             Ok((node, events)) => {
-                if time::timeout(RELAY_READY_TIMEOUT, node.endpoint().online()).await.is_ok() {
+                if time::timeout(RELAY_READY_TIMEOUT, node.endpoint().online())
+                    .await
+                    .is_ok()
+                {
                     Some((node, events))
                 } else {
                     shutdown_node(&node).await;
@@ -83,11 +90,25 @@ impl Network {
         };
         let (local, events) = match online {
             Some(started) => started,
-            None => start_node(data_dir, offline_dir, engine, sandbox, NetworkProfile::LocalOnly)
-                .await?,
+            None => {
+                start_node(
+                    data_dir,
+                    offline_dir,
+                    engine,
+                    sandbox,
+                    NetworkProfile::LocalOnly,
+                )
+                .await?
+            }
         };
         Ok((
-            Self { mode, local, loopback_host: None, remote: None, last_remote_dag: None },
+            Self {
+                mode,
+                local,
+                loopback_host: None,
+                remote: None,
+                last_remote_dag: None,
+            },
             vec![events],
         ))
     }
@@ -96,9 +117,9 @@ impl Network {
         self.loopback_host.as_ref().unwrap_or(&self.local)
     }
 
-    pub(super) async fn sync_loopback_head(&self) {
+    pub(super) async fn sync_loopback_head(&self, repo_id: &str) {
         if let Some(host) = &self.loopback_host
-            && let Err(error) = fetch_dag(&self.local, host.addr()).await
+            && let Err(error) = fetch_dag(&self.local, host.addr(), repo_id).await
         {
             tracing::warn!(%error, "Unable to read the loopback Host DAG");
         }
@@ -134,8 +155,14 @@ async fn shutdown_node(node: &RelayNode) {
     }
 }
 
-pub(super) async fn fetch_dag(node: &RelayNode, address: EndpointAddr) -> RelayResult<DagSnapshot> {
-    let request = WireRequest::FetchDagSnapshot { repo_id: REPO_ID.into() };
+pub(super) async fn fetch_dag(
+    node: &RelayNode,
+    address: EndpointAddr,
+    repo_id: &str,
+) -> RelayResult<DagSnapshot> {
+    let request = WireRequest::FetchDagSnapshot {
+        repo_id: repo_id.to_owned(),
+    };
     match node.send_rpc(address, request).await? {
         WireResponse::DagSnapshot(snapshot) => Ok(snapshot),
         response => Err(rpc_error(response, "DAG snapshot")),

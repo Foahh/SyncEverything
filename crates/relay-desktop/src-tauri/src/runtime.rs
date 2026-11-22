@@ -1,86 +1,131 @@
 mod network;
 
-use crate::{DagStaleAlertEvent, emit_state};
+use crate::{
+    DagStaleAlertEvent, LlmSettingsUpdate, PresetInfo, WorkspaceInfo, emit_state,
+};
 use chrono::Utc;
-use iroh::EndpointAddr;
 use network::{Network, NodeEvents, fetch_dag, rpc_error};
-use relay_core::agent::{LlmClient, LlmEndpointConfig, SelfHealingAgent, build_safe_dag_context};
+use relay_core::agent::{
+    HostTaskOutcome, LlmClient, LlmEndpointConfig, LlmProbeResult, LlmSettingsView,
+    load_llm_config, run_host_task_pipeline, save_llm_config,
+};
 use relay_core::contracts::{
-    ApprovalDecision, DagDelta, Freshness, GraphNode, NodeKind, PatchKind, PeerStatus,
-    ProposeWorktreePatchArgs, RunPreflightArgs, RuntimeMode, StalePropagationReport, TaskId,
-    TaskRecord, TaskSpec, TaskState, WireRequest, WireResponse,
+    ApprovalDecision, DagDelta, Freshness, GraphNode, NodeKind, PeerStatus, RuntimeMode,
+    StalePropagationReport, TaskId, TaskRecord, TaskSpec, WireRequest, WireResponse,
 };
 use relay_core::engine::RelayEngine;
 use relay_core::error::{RelayError, RelayResult};
 use relay_core::mcp::RelayMcpServer;
-use relay_core::sandbox::{WorktreeSandbox, compute_env_fingerprint, load_manifest};
-use relay_core::sync::RelayNodeEvent;
+use relay_core::sandbox::{
+    HeadSyncOutcome, WorktreeSandbox, build_git_artifact_node, load_manifest,
+    sync_git_head_into_engine,
+};
+use relay_core::sync::{RelayNodeEvent, parse_pairing_ticket};
+use serde::{Deserialize, Serialize};
 use std::env;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 use tauri::AppHandle;
 use tauri_specta::Event;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, RwLock, watch};
 use tokio::time::{self, MissedTickBehavior};
 use uuid::Uuid;
 
-const REPO_ID: &str = "forecast-bench";
+const DEFAULT_REPO_ID: &str = "forecast-bench";
 const FIXTURE_PATH: &str = "bench/fixture-repo";
 const PAIRING_WINDOW: Duration = Duration::from_secs(120);
 const PEER_SYNC_INTERVAL: Duration = Duration::from_secs(3);
+const GIT_WATCH_INTERVAL: Duration = Duration::from_secs(2);
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct WorkspacePrefs {
+    repo_root: Option<String>,
+}
 
 pub(crate) struct DesktopRuntime {
     pub(crate) engine: Arc<RelayEngine>,
     app: AppHandle,
-    data_dir: PathBuf,
+    base_data_dir: PathBuf,
+    repo_data_dir: PathBuf,
     sandbox: Option<WorktreeSandbox>,
+    workspace: WorkspaceInfo,
     mcp: Arc<RelayMcpServer>,
-    network: Mutex<Network>,
+    network: Mutex<Option<Network>>,
+    llm_config: RwLock<LlmEndpointConfig>,
+    shutdown: watch::Sender<bool>,
 }
 
 impl DesktopRuntime {
-    pub(crate) async fn open(app: AppHandle) -> RelayResult<Arc<Self>> {
+    pub(crate) async fn open(
+        app: AppHandle,
+        explicit_repo_root: Option<PathBuf>,
+    ) -> RelayResult<Arc<Self>> {
         let cwd = env::current_dir().ok();
         let starts = cwd
             .as_deref()
             .into_iter()
             .chain([Path::new(env!("CARGO_MANIFEST_DIR"))]);
         let ancestors: Vec<_> = starts.flat_map(Path::ancestors).collect();
-        let workspace = ancestors
+        let workspace_dir = ancestors
             .iter()
             .copied()
             .find(|dir| dir.join(FIXTURE_PATH).join("relay.toml").is_file());
-        let repo_root = match env_path("RELAY_REPO_ROOT") {
-            Some(root) if root.is_dir() => Some(std::path::absolute(root)?),
-            Some(root) => {
+        let base_data_dir = resolve_base_data_dir(workspace_dir.or(cwd.as_deref())).await?;
+
+        let repo_root = if let Some(explicit) = explicit_repo_root {
+            let abs = std::path::absolute(explicit)?;
+            if !abs.is_dir() {
                 return Err(RelayError::Internal(format!(
-                    "RELAY_REPO_ROOT is not a directory: {}",
-                    root.display()
+                    "Repository path is not a directory: {}",
+                    abs.display()
                 )));
             }
-            None => workspace
+            Some(abs)
+        } else if let Some(env_root) = env_path("RELAY_REPO_ROOT") {
+            if !env_root.is_dir() {
+                return Err(RelayError::Internal(format!(
+                    "RELAY_REPO_ROOT is not a directory: {}",
+                    env_root.display()
+                )));
+            }
+            Some(std::path::absolute(env_root)?)
+        } else if let Some(saved) = load_workspace_prefs(&base_data_dir)
+            .repo_root
+            .map(PathBuf::from)
+            .filter(|path| path.is_dir())
+        {
+            Some(saved)
+        } else {
+            workspace_dir
                 .map(|dir| dir.join(FIXTURE_PATH))
                 .or_else(|| {
-                    ancestors.iter().find_map(|dir| {
-                        dir.join("relay.toml").is_file().then(|| dir.to_path_buf())
-                    })
-                }),
+                    ancestors
+                        .iter()
+                        .find_map(|dir| dir.join("relay.toml").is_file().then(|| dir.to_path_buf()))
+                })
         };
-        let data_dir = resolve_data_dir(workspace.or(repo_root.as_deref()).or(cwd.as_deref())).await?;
+
+        let workspace_info = inspect_workspace(repo_root.as_deref());
+        let repo_id = workspace_info.repo_id.clone();
+        let repo_data_dir = base_data_dir
+            .join("repos")
+            .join(sanitize_repo_dir(&repo_id));
+        tokio::fs::create_dir_all(&repo_data_dir).await?;
+
         let engine = Arc::new(
             RelayEngine::open_with_default_mode(
-                REPO_ID,
-                data_dir.join("relay.db"),
+                &repo_id,
+                repo_data_dir.join("relay.db"),
                 repo_root.clone(),
                 RuntimeMode::LocalDualSandbox,
             )
             .await?,
         );
 
-        // A fixture inside a parent Git checkout can supply metadata, but its
-        // worktree would check out the parent and lack relay.toml at the root.
-        let repo = repo_root.map(|root| WorktreeSandbox::new(root, data_dir.join("worktrees")));
+        let repo = repo_root
+            .as_ref()
+            .map(|root| WorktreeSandbox::new(root, repo_data_dir.join("worktrees")));
         let head = if let Some(repo) = &repo {
             match repo.head_commit_sha().await {
                 Ok(head) => Some(head),
@@ -100,73 +145,186 @@ impl DesktopRuntime {
                     && load_manifest(repo.repo_root()).is_ok()
             })
             .cloned();
-        let mode = engine.runtime_mode().await;
-        let (network, events) = Network::start(mode, &data_dir, &engine, sandbox.clone()).await?;
 
-        if let (Some(repo), Some(head)) = (&repo, head)
+        let mode = engine.runtime_mode().await;
+        let (network, events) =
+            Network::start(mode, &repo_data_dir, &engine, sandbox.clone()).await?;
+
+        let origin = network.executor_node().id().to_string();
+        if let Some(sb) = &sandbox {
+            match sync_git_head_into_engine(&engine, sb, origin).await {
+                Ok(HeadSyncOutcome::Seeded { .. } | HeadSyncOutcome::Superseded { .. }) => {
+                    network.sync_loopback_head(engine.repo_id()).await;
+                }
+                Ok(HeadSyncOutcome::Unchanged) => {}
+                Err(error) => {
+                    tracing::warn!(%error, "Unable to sync initial repository HEAD artifact");
+                }
+            }
+        } else if let (Some(repo), Some(head)) = (&repo, head)
             && engine.dag_snapshot(true).await.nodes.is_empty()
         {
-            let origin = network.executor_node().id().to_string();
             let seed = async {
-                let node = artifact_node(repo, head, origin).await?;
+                let node = build_git_artifact_node(repo, head, origin).await?;
                 engine.upsert_node_and_edges(node, Vec::new()).await?;
                 Ok::<_, RelayError>(())
             };
             if let Err(error) = seed.await {
                 tracing::warn!(%error, "Unable to seed the repository HEAD artifact");
             }
-            network.sync_loopback_head().await;
+            network.sync_loopback_head(engine.repo_id()).await;
         }
 
+        let llm_config = load_llm_config(&base_data_dir.join("llm-settings.json"))
+            .unwrap_or_else(|_| LlmEndpointConfig::from_env_or_default());
         let mcp = Arc::new(RelayMcpServer::new(
             engine.clone(),
             sandbox.clone(),
             Some(network.executor_node().clone()),
         ));
+        let (shutdown, _) = watch::channel(false);
         let runtime = Arc::new(Self {
             engine,
             app,
-            data_dir,
+            base_data_dir,
+            repo_data_dir,
             sandbox,
+            workspace: workspace_info,
             mcp,
-            network: Mutex::new(network),
+            network: Mutex::new(Some(network)),
+            llm_config: RwLock::new(llm_config),
+            shutdown,
         });
         runtime.listen(events, mode);
         runtime.start_peer_sync();
+        runtime.start_git_head_watcher();
         Ok(runtime)
     }
 
+    pub(crate) async fn shutdown(&self) {
+        let _ = self.shutdown.send(true);
+        if let Some(network) = self.network.lock().await.take() {
+            network.shutdown().await;
+        }
+    }
+
+    pub(crate) fn workspace_info(&self) -> WorkspaceInfo {
+        self.workspace.clone()
+    }
+
+    pub(crate) fn persist_repo_preference(&self, repo_root: &Path) -> RelayResult<()> {
+        let prefs = WorkspacePrefs {
+            repo_root: Some(repo_root.to_string_lossy().into_owned()),
+        };
+        let path = self.base_data_dir.join("workspace.json");
+        std::fs::write(path, serde_json::to_string_pretty(&prefs)?)?;
+        Ok(())
+    }
+
+    pub(crate) async fn llm_settings_view(&self) -> LlmSettingsView {
+        self.llm_config.read().await.redacted_view()
+    }
+
+    pub(crate) async fn save_llm_settings(
+        &self,
+        update: LlmSettingsUpdate,
+    ) -> RelayResult<LlmSettingsView> {
+        let next = self.merge_llm_update(update).await;
+        // Validate URL & env syntax before saving.
+        let _ = LlmClient::new(next.clone(), Duration::from_secs(5))?;
+        save_llm_config(&self.base_data_dir.join("llm-settings.json"), &next)?;
+        let view = next.redacted_view();
+        *self.llm_config.write().await = next;
+        emit_state(&self.app, "llm_settings_changed", "LLM settings saved");
+        Ok(view)
+    }
+
+    pub(crate) async fn test_llm_connection(
+        &self,
+        update: Option<LlmSettingsUpdate>,
+    ) -> RelayResult<LlmProbeResult> {
+        let cfg = match update {
+            Some(update) => self.merge_llm_update(update).await,
+            None => self.llm_config.read().await.clone(),
+        };
+        let client = LlmClient::new(cfg, Duration::from_secs(12))?;
+        Ok(client.probe().await)
+    }
+
+    async fn merge_llm_update(&self, update: LlmSettingsUpdate) -> LlmEndpointConfig {
+        let current = self.llm_config.read().await.clone();
+        let api_key = match update.api_key {
+            None => current.api_key,
+            Some(ref value) if value.trim().is_empty() => None,
+            Some(value) => Some(value.trim().to_owned()),
+        };
+        let api_key_env = update
+            .api_key_env
+            .map(|s| s.trim().to_owned())
+            .filter(|s| !s.is_empty());
+        LlmEndpointConfig {
+            tier: update.tier,
+            base_url: update.base_url.trim().to_owned(),
+            model: update.model.trim().to_owned(),
+            api_key_env,
+            api_key,
+        }
+    }
+
     pub(crate) async fn status(&self) -> PeerStatus {
-        let network = self.network.lock().await;
+        let guard = self.network.lock().await;
+        let Some(network) = guard.as_ref() else {
+            return PeerStatus {
+                mode: self.engine.runtime_mode().await,
+                local_node_id: String::new(),
+                remote_node_id: None,
+                transport_path: relay_core::contracts::TransportPath::Offline,
+                connected: false,
+                rtt_ms: None,
+                last_synced_commit: None,
+                pending_outbox_count: self.engine.pending_outbox_count().await.unwrap_or(0),
+            };
+        };
         let status = network.local.peer_status();
         if status.connected || network.loopback_host.is_none() {
             return status;
         }
-
-        // Restore an idle loopback connection before reporting its current status.
-        network.sync_loopback_head().await;
+        network.sync_loopback_head(self.engine.repo_id()).await;
         network.local.peer_status()
     }
 
     pub(crate) async fn switch_mode(self: &Arc<Self>, mode: RuntimeMode) -> RelayResult<RuntimeMode> {
         let runtime = self.clone();
         tokio::spawn(async move {
-            let mut network = runtime.network.lock().await;
-            if network.mode == mode {
+            let mut guard = runtime.network.lock().await;
+            let Some(current) = guard.as_ref() else {
+                return Err(RelayError::Transport("Runtime is shutting down".into()));
+            };
+            if current.mode == mode {
                 return Ok(mode);
             }
-            let (next, events) =
-                Network::start(mode, &runtime.data_dir, &runtime.engine, runtime.sandbox.clone())
-                    .await?;
+            let (next, events) = Network::start(
+                mode,
+                &runtime.repo_data_dir,
+                &runtime.engine,
+                runtime.sandbox.clone(),
+            )
+            .await?;
             if let Err(error) = runtime.engine.set_runtime_mode(mode).await {
                 next.shutdown().await;
                 return Err(error);
             }
             runtime.mcp.set_node(next.executor_node().clone());
-            let previous = std::mem::replace(&mut *network, next);
+            let previous = guard.replace(next);
             runtime.listen(events, mode);
-            previous.shutdown().await;
-            emit_state(&runtime.app, "runtime_mode_changed", format!("Runtime mode is {mode:?}"));
+            if let Some(previous) = previous {
+                previous.shutdown().await;
+            }
+            emit_state(
+                &runtime.app,
+                "runtime_mode_changed",
+                format!("Runtime mode is {mode:?}"),
+            );
             Ok(mode)
         })
         .await
@@ -174,7 +332,10 @@ impl DesktopRuntime {
     }
 
     pub(crate) async fn pairing_ticket(&self) -> RelayResult<String> {
-        let network = self.network.lock().await;
+        let guard = self.network.lock().await;
+        let network = guard
+            .as_ref()
+            .ok_or_else(|| RelayError::Transport("Runtime is shutting down".into()))?;
         let ticket = serde_json::to_string(&network.local.addr())?;
         if network.mode != RuntimeMode::LocalDualSandbox {
             network.local.open_pairing_window(PAIRING_WINDOW);
@@ -183,15 +344,20 @@ impl DesktopRuntime {
     }
 
     pub(crate) async fn connect_ticket(&self, ticket_json: &str) -> RelayResult<PeerStatus> {
-        let address: EndpointAddr = serde_json::from_str(ticket_json)?;
-        let mut network = self.network.lock().await;
+        let address = parse_pairing_ticket(ticket_json)?;
+        let mut guard = self.network.lock().await;
+        let network = guard
+            .as_mut()
+            .ok_or_else(|| RelayError::Transport("Runtime is shutting down".into()))?;
         if network.mode == RuntimeMode::LocalDualSandbox {
             return Err(RelayError::Transport(
                 "Switch to Client or Host mode to pair with another machine".into(),
             ));
         }
         if address.id == network.local.id() {
-            return Err(RelayError::Transport("This ticket belongs to the local node".into()));
+            return Err(RelayError::Transport(
+                "This ticket belongs to the local node".into(),
+            ));
         }
 
         let local_id = network.local.id().to_string();
@@ -209,10 +375,14 @@ impl DesktopRuntime {
 
         let delivered = network.local.flush_outbox(address).await?;
         if delivered > 0 {
-            emit_state(&self.app, "outbox_flushed", format!("Delivered {delivered} queued requests"));
+            emit_state(
+                &self.app,
+                "outbox_flushed",
+                format!("Delivered {delivered} queued requests"),
+            );
         }
         if network.mode == RuntimeMode::Client {
-            self.refresh_from_host(&mut network).await?;
+            self.refresh_from_host(network).await?;
         }
         Ok(network.local.peer_status())
     }
@@ -221,12 +391,17 @@ impl DesktopRuntime {
         if spec.task_id.is_nil() {
             spec.task_id = Uuid::now_v7();
         }
-        let network = self.network.lock().await;
+        if spec.repo_id.trim().is_empty() {
+            spec.repo_id = self.engine.repo_id().to_owned();
+        }
+        let guard = self.network.lock().await;
+        let network = guard
+            .as_ref()
+            .ok_or_else(|| RelayError::Transport("Runtime is shutting down".into()))?;
         let id = spec.task_id;
         let result = match network.mode {
             RuntimeMode::LocalDualSandbox => {
                 let host = network.loopback_host.as_ref().expect("loopback host");
-                // The Host's incoming RPC notification starts the preflight.
                 return network.local.submit_remote_task(host.addr(), spec).await;
             }
             RuntimeMode::Host => {
@@ -265,13 +440,19 @@ impl DesktopRuntime {
         task_id: TaskId,
         decision: ApprovalDecision,
     ) -> RelayResult<TaskRecord> {
-        let network = self.network.lock().await;
+        let guard = self.network.lock().await;
+        let network = guard
+            .as_ref()
+            .ok_or_else(|| RelayError::Transport("Runtime is shutting down".into()))?;
         let task = self
             .engine
             .get_task(task_id)
             .await?
             .ok_or_else(|| RelayError::TaskNotFound(task_id.to_string()))?;
-        let patch_id = task.active_proposal.as_ref().map(|patch| patch.patch_id.as_str());
+        let patch_id = task
+            .active_proposal
+            .as_ref()
+            .map(|patch| patch.patch_id.as_str());
         let remote = if let Some(host) = &network.loopback_host {
             Some(host.addr())
         } else if network.mode == RuntimeMode::Client {
@@ -284,7 +465,12 @@ impl DesktopRuntime {
             if network.mode == RuntimeMode::LocalDualSandbox {
                 return network
                     .local
-                    .resolve_remote_approval(address, task_id, patch_id.map(str::to_owned), decision)
+                    .resolve_remote_approval(
+                        address,
+                        task_id,
+                        patch_id.map(str::to_owned),
+                        decision,
+                    )
                     .await;
             }
             let request = WireRequest::ResolveApproval {
@@ -307,9 +493,13 @@ impl DesktopRuntime {
             }
         }
         let record = if network.mode == RuntimeMode::Client {
-            self.engine.queue_peer_approval(task_id, patch_id, decision).await?
+            self.engine
+                .queue_peer_approval(task_id, patch_id, decision)
+                .await?
         } else {
-            self.engine.resolve_ui_approval(task_id, patch_id, decision).await?
+            self.engine
+                .resolve_ui_approval(task_id, patch_id, decision)
+                .await?
         };
         self.approval_resolved(task_id, decision, network.mode == RuntimeMode::Host);
         Ok(record)
@@ -321,49 +511,140 @@ impl DesktopRuntime {
         new_commit_sha: String,
         reason: String,
     ) -> RelayResult<StalePropagationReport> {
-        let origin = self.network.lock().await.local.id().to_string();
+        let origin = self
+            .network
+            .lock()
+            .await
+            .as_ref()
+            .map_or_else(|| "local".into(), |net| net.local.id().to_string());
         let node = if let Some(root) = self.engine.repo_root() {
-            let repo = WorktreeSandbox::new(root, self.data_dir.join("worktrees"));
-            artifact_node(&repo, new_commit_sha, origin).await?
+            let repo = WorktreeSandbox::new(root, self.repo_data_dir.join("worktrees"));
+            match build_git_artifact_node(&repo, new_commit_sha.clone(), origin.clone()).await {
+                Ok(node) => node,
+                Err(_) => fallback_artifact(&self.engine, old_artifact_id, new_commit_sha, origin).await?,
+            }
         } else {
-            let snapshot = self.engine.dag_snapshot(true).await;
-            let fingerprint = snapshot.nodes.into_iter().find_map(|node| match node.payload {
-                NodeKind::Artifact { env_fingerprint, .. } if node.id == old_artifact_id => {
-                    Some(env_fingerprint)
-                }
-                _ => None,
-            });
-            let fingerprint =
-                fingerprint.ok_or_else(|| RelayError::NodeNotFound(old_artifact_id.into()))?;
-            make_artifact(new_commit_sha, fingerprint, false, Vec::new(), origin)
+            fallback_artifact(&self.engine, old_artifact_id, new_commit_sha, origin).await?
         };
-        let report = self.engine.supersede_artifact(old_artifact_id, node, reason).await?;
-        if let Err(error) = (DagStaleAlertEvent { report: report.clone() }).emit(&self.app) {
+        let report = self
+            .engine
+            .supersede_artifact(old_artifact_id, node, reason)
+            .await?;
+        if let Err(error) = (DagStaleAlertEvent {
+            report: report.clone(),
+        })
+        .emit(&self.app)
+        {
             tracing::warn!(%error, "Unable to emit DAG staleness event");
         }
         emit_state(&self.app, "dag_changed", "Artifact superseded");
         Ok(report)
     }
 
+    pub(crate) async fn check_git_head(&self) -> RelayResult<bool> {
+        let Some(sandbox) = &self.sandbox else {
+            return Ok(false);
+        };
+        let origin = self
+            .network
+            .lock()
+            .await
+            .as_ref()
+            .map_or_else(|| "local".into(), |net| net.local.id().to_string());
+
+        match sync_git_head_into_engine(&self.engine, sandbox, origin).await? {
+            HeadSyncOutcome::Unchanged => Ok(false),
+            HeadSyncOutcome::Seeded { commit_sha } => {
+                let short_sha: String = commit_sha.chars().take(7).collect();
+                emit_state(
+                    &self.app,
+                    "dag_changed",
+                    format!("Synced Git HEAD {short_sha}"),
+                );
+                Ok(true)
+            }
+            HeadSyncOutcome::Superseded { commit_sha, report } => {
+                let short_sha: String = commit_sha.chars().take(7).collect();
+                if let Err(error) = (DagStaleAlertEvent {
+                    report: report.clone(),
+                })
+                .emit(&self.app)
+                {
+                    tracing::warn!(%error, "Unable to emit DAG staleness event");
+                }
+                emit_state(
+                    &self.app,
+                    "dag_changed",
+                    format!("Detected new Git commit {short_sha}"),
+                );
+                self.push_local_commit_if_client(sandbox).await;
+                Ok(true)
+            }
+        }
+    }
+
+    async fn push_local_commit_if_client(&self, sandbox: &WorktreeSandbox) {
+        let Ok(guard) = self.network.try_lock() else {
+            return;
+        };
+        let Some(network) = guard.as_ref() else {
+            return;
+        };
+        if network.mode != RuntimeMode::Client {
+            return;
+        }
+        let Some(remote) = network.remote.clone() else {
+            return;
+        };
+        let local = network.local.clone();
+        drop(guard);
+
+        let snapshot = self.engine.dag_snapshot(true).await;
+        let delta = DagDelta {
+            repo_id: snapshot.repo_id.clone(),
+            upsert_nodes: snapshot.nodes,
+            upsert_edges: snapshot.edges,
+        };
+        if let Err(error) = local
+            .push_sync_bundle(remote, self.engine.repo_id(), sandbox, delta)
+            .await
+        {
+            tracing::debug!(%error, "Unable to push new Git commit bundle to paired host");
+        }
+    }
+
     fn listen(self: &Arc<Self>, listeners: Vec<NodeEvents>, mode: RuntimeMode) {
         for mut events in listeners {
             let runtime = Arc::downgrade(self);
+            let mut shutdown_rx = self.shutdown.subscribe();
             tauri::async_runtime::spawn(async move {
-                while let Some(event) = events.recv().await {
-                    let Some(runtime) = runtime.upgrade() else {
-                        break;
-                    };
-                    let execute = mode != RuntimeMode::Client;
-                    match event {
-                        RelayNodeEvent::TaskSubmitted(id) => runtime.task_submitted(id, execute),
-                        RelayNodeEvent::ApprovalResolved(id, decision) => {
-                            runtime.approval_resolved(id, decision, execute);
+                loop {
+                    tokio::select! {
+                        _ = shutdown_rx.changed() => {
+                            if *shutdown_rx.borrow() {
+                                break;
+                            }
                         }
-                        RelayNodeEvent::DagChanged => {
-                            emit_state(&runtime.app, "dag_changed", "DAG updated by peer");
-                        }
-                        RelayNodeEvent::PeerPaired => {
-                            emit_state(&runtime.app, "peer_paired", "Peer connected");
+                        maybe_event = events.recv() => {
+                            let Some(event) = maybe_event else {
+                                break;
+                            };
+                            let Some(runtime) = runtime.upgrade() else {
+                                break;
+                            };
+                            let execute = mode != RuntimeMode::Client;
+                            match event {
+                                RelayNodeEvent::TaskSubmitted(id) => runtime.task_submitted(id, execute),
+                                RelayNodeEvent::ApprovalResolved(id, decision) => {
+                                    runtime.approval_resolved(id, decision, execute);
+                                }
+                                RelayNodeEvent::DagChanged => {
+                                    emit_state(&runtime.app, "dag_changed", "DAG updated by peer");
+                                }
+                                RelayNodeEvent::PeerPaired => {
+                                    emit_state(&runtime.app, "peer_paired", "Peer connected");
+                                }
+                            }
                         }
                     }
                 }
@@ -376,80 +657,65 @@ impl DesktopRuntime {
         if execute && self.sandbox.is_some() {
             let runtime = self.clone();
             tauri::async_runtime::spawn(async move {
-                if let Err(error) = runtime.preflight(id).await {
-                    tracing::warn!(task_id = %id, %error, "Task preflight or diagnosis failed");
-                    emit_state(&runtime.app, "task_preflight_failed", format!("Task {id}: {error}"));
+                let llm_config = runtime.llm_config.read().await.clone();
+                emit_state(
+                    &runtime.app,
+                    "task_preflight_started",
+                    format!("Preflight started for task {id}"),
+                );
+                match run_host_task_pipeline(&runtime.engine, &runtime.mcp, llm_config, id).await {
+                    Ok(HostTaskOutcome::Completed | HostTaskOutcome::HealedAndCompleted) => {
+                        emit_state(&runtime.app, "task_updated", format!("Task {id} completed"));
+                        emit_state(&runtime.app, "dag_changed", "Recorded new run result");
+                    }
+                    Ok(HostTaskOutcome::PatchProposed) => {
+                        emit_state(
+                            &runtime.app,
+                            "patch_proposed",
+                            format!("Verified fix ready for task {id}"),
+                        );
+                    }
+                    Ok(HostTaskOutcome::Skipped) => {
+                        emit_state(&runtime.app, "task_updated", format!("Task {id} skipped"));
+                    }
+                    Err(error) => {
+                        tracing::warn!(task_id = %id, %error, "Task preflight or diagnosis failed");
+                        emit_state(
+                            &runtime.app,
+                            "task_preflight_failed",
+                            format!("Task {id}: {error}"),
+                        );
+                    }
                 }
             });
         }
     }
 
-    async fn preflight(&self, id: TaskId) -> RelayResult<()> {
-        self.engine
-            .transition_task(id, TaskState::PreflightRunning, None, None)
-            .await?;
+    fn approval_resolved(self: &Arc<Self>, id: TaskId, decision: ApprovalDecision, execute: bool) {
         emit_state(
             &self.app,
-            "task_preflight_started",
-            format!("Preflight started for task {id}"),
+            "approval_resolved",
+            format!("Task {id}: {decision:?}"),
         );
-        let task_id = id.to_string();
-        let report = self
-            .mcp
-            .handle_run_preflight(RunPreflightArgs { task_id: task_id.clone() })
-            .await?;
-        emit_state(&self.app, "task_preflight", format!("Preflight finished for task {id}"));
-        if !report.smoke_passed {
-            let task = self
-                .engine
-                .get_task(id)
-                .await?
-                .ok_or_else(|| RelayError::TaskNotFound(task_id.clone()))?;
-            if task.state != TaskState::PreflightRunning {
-                return Ok(());
-            }
-            let context = format!(
-                "Repository {}\nBase commit {}\nRequested preset {}\n{}",
-                task.spec.repo_id,
-                task.spec.base_commit_sha,
-                task.spec.command_preset,
-                build_safe_dag_context(&self.engine.dag_snapshot(true).await),
-            );
-            let llm = LlmClient::new(LlmEndpointConfig::default(), Duration::from_secs(30))?;
-            let proposal = SelfHealingAgent::new(llm)
-                .diagnose_preflight_failure(&report, &context)
-                .await?;
-            let patch_kind = match proposal.patch_kind {
-                PatchKind::UvSpec => "uv_spec",
-                PatchKind::CodeDiff => "code_diff",
-            };
-            self.mcp
-                .handle_propose_patch(ProposeWorktreePatchArgs {
-                    task_id,
-                    patch_kind: patch_kind.into(),
-                    summary: proposal.summary,
-                    content: proposal.content,
-                })
-                .await?;
-            emit_state(&self.app, "patch_proposed", format!("Verified patch for task {id}"));
-        }
-        Ok(())
-    }
-
-    fn approval_resolved(self: &Arc<Self>, id: TaskId, decision: ApprovalDecision, execute: bool) {
-        emit_state(&self.app, "approval_resolved", format!("Task {id}: {decision:?}"));
         if execute && self.sandbox.is_some() {
             let runtime = self.clone();
             tauri::async_runtime::spawn(async move {
                 match runtime.mcp.finish_ui_approval(id, decision).await {
-                    Ok(record) => emit_state(
-                        &runtime.app,
-                        "task_updated",
-                        format!("Task {id}: {:?}", record.state),
-                    ),
+                    Ok(record) => {
+                        emit_state(
+                            &runtime.app,
+                            "task_updated",
+                            format!("Task {id}: {:?}", record.state),
+                        );
+                        emit_state(&runtime.app, "dag_changed", "Task execution finished");
+                    }
                     Err(error) => {
                         tracing::warn!(task_id = %id, %error, "Task approval could not finish");
-                        emit_state(&runtime.app, "task_execution_failed", format!("Task {id}: {error}"));
+                        emit_state(
+                            &runtime.app,
+                            "task_execution_failed",
+                            format!("Task {id}: {error}"),
+                        );
                     }
                 }
             });
@@ -458,28 +724,69 @@ impl DesktopRuntime {
 
     fn start_peer_sync(self: &Arc<Self>) {
         let runtime = Arc::downgrade(self);
+        let mut shutdown_rx = self.shutdown.subscribe();
         tauri::async_runtime::spawn(async move {
             let mut interval = time::interval(PEER_SYNC_INTERVAL);
             interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
             loop {
-                interval.tick().await;
-                let Some(runtime) = runtime.upgrade() else {
-                    break;
-                };
-                let Ok(mut network) = runtime.network.try_lock() else {
-                    continue;
-                };
-                if network.mode == RuntimeMode::Client && network.remote.is_some() {
-                    let status_before = network.local.peer_status();
-                    if let Err(error) = runtime.refresh_from_host(&mut network).await {
-                        tracing::debug!(%error, "Unable to refresh state from the paired host");
+                tokio::select! {
+                    _ = shutdown_rx.changed() => {
+                        if *shutdown_rx.borrow() {
+                            break;
+                        }
                     }
-                    let status_after = network.local.peer_status();
-                    if status_before.connected != status_after.connected
-                        || status_before.transport_path != status_after.transport_path
-                        || status_before.pending_outbox_count != status_after.pending_outbox_count
-                    {
-                        emit_state(&runtime.app, "peer_status_changed", "Peer status changed");
+                    _ = interval.tick() => {
+                        let Some(runtime) = runtime.upgrade() else {
+                            break;
+                        };
+                        let Ok(mut guard) = runtime.network.try_lock() else {
+                            continue;
+                        };
+                        let Some(network) = guard.as_mut() else {
+                            break;
+                        };
+                        if network.mode == RuntimeMode::Client && network.remote.is_some() {
+                            let status_before = network.local.peer_status();
+                            if let Err(error) = runtime.refresh_from_host(network).await {
+                                tracing::debug!(%error, "Unable to refresh state from the paired host");
+                            }
+                            let status_after = network.local.peer_status();
+                            if status_before.connected != status_after.connected
+                                || status_before.transport_path != status_after.transport_path
+                                || status_before.pending_outbox_count != status_after.pending_outbox_count
+                            {
+                                emit_state(&runtime.app, "peer_status_changed", "Peer status changed");
+                            }
+                        }
+                    }
+                }
+            }
+        });
+    }
+
+    fn start_git_head_watcher(self: &Arc<Self>) {
+        if self.sandbox.is_none() {
+            return;
+        }
+        let runtime = Arc::downgrade(self);
+        let mut shutdown_rx = self.shutdown.subscribe();
+        tauri::async_runtime::spawn(async move {
+            let mut interval = time::interval(GIT_WATCH_INTERVAL);
+            interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
+            loop {
+                tokio::select! {
+                    _ = shutdown_rx.changed() => {
+                        if *shutdown_rx.borrow() {
+                            break;
+                        }
+                    }
+                    _ = interval.tick() => {
+                        let Some(runtime) = runtime.upgrade() else {
+                            break;
+                        };
+                        if let Err(error) = runtime.check_git_head().await {
+                            tracing::debug!(%error, "Git HEAD check failed");
+                        }
                     }
                 }
             }
@@ -493,7 +800,7 @@ impl DesktopRuntime {
         if network.local.peer_status().pending_outbox_count != 0 {
             network.local.flush_outbox(address.clone()).await?;
         }
-        let snapshot = fetch_dag(&network.local, address.clone()).await?;
+        let snapshot = fetch_dag(&network.local, address.clone(), self.engine.repo_id()).await?;
         if network.last_remote_dag.as_ref().is_none_or(|previous| {
             previous.nodes != snapshot.nodes || previous.edges != snapshot.edges
         }) {
@@ -512,7 +819,9 @@ impl DesktopRuntime {
         }
         let mut changed = false;
         for task in self.engine.list_tasks().await? {
-            let request = WireRequest::FetchTaskState { task_id: task.spec.task_id };
+            let request = WireRequest::FetchTaskState {
+                task_id: task.spec.task_id,
+            };
             match network.local.send_rpc(address.clone(), request).await? {
                 WireResponse::TaskState(record) => {
                     changed |= self.engine.mirror_peer_task(&record).await?;
@@ -528,6 +837,141 @@ impl DesktopRuntime {
     }
 }
 
+pub(crate) fn validate_user_repo(path: &Path) -> RelayResult<PathBuf> {
+    let abs = std::path::absolute(path)?;
+    if !abs.is_dir() {
+        return Err(RelayError::Internal(format!(
+            "Folder does not exist: {}",
+            abs.display()
+        )));
+    }
+    if !abs.join(".git").exists() {
+        return Err(RelayError::Internal(
+            "Selected folder is not a Git repository (missing .git). Run `git init` first.".into(),
+        ));
+    }
+    if !abs.join("relay.toml").is_file() {
+        return Err(RelayError::Internal(
+            "Selected repository is missing relay.toml at its root.".into(),
+        ));
+    }
+    let _ = load_manifest(&abs)?;
+    Ok(abs)
+}
+
+fn inspect_workspace(repo_root: Option<&Path>) -> WorkspaceInfo {
+    let Some(root) = repo_root else {
+        return WorkspaceInfo {
+            repo_id: DEFAULT_REPO_ID.into(),
+            name: "Relay Workspace".into(),
+            repo_root: None,
+            is_git_repo: false,
+            has_manifest: false,
+            smoke_preset: "smoke".into(),
+            presets: Vec::new(),
+        };
+    };
+    let is_git_repo = root.join(".git").exists();
+    match load_manifest(root) {
+        Ok(manifest) => {
+            let presets = manifest
+                .presets
+                .into_iter()
+                .map(|(name, preset)| PresetInfo {
+                    name,
+                    description: preset.description,
+                    program: preset.program,
+                    args: preset.args,
+                    allowed_params: preset.allowed_params,
+                })
+                .collect();
+            WorkspaceInfo {
+                repo_id: manifest.project.repo_id,
+                name: manifest.project.name,
+                repo_root: Some(root.to_string_lossy().into_owned()),
+                is_git_repo,
+                has_manifest: true,
+                smoke_preset: manifest.project.smoke_preset,
+                presets,
+            }
+        }
+        Err(_) => {
+            let fallback_name = root
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_else(|| DEFAULT_REPO_ID.into());
+            WorkspaceInfo {
+                repo_id: DEFAULT_REPO_ID.into(),
+                name: fallback_name,
+                repo_root: Some(root.to_string_lossy().into_owned()),
+                is_git_repo,
+                has_manifest: false,
+                smoke_preset: "smoke".into(),
+                presets: Vec::new(),
+            }
+        }
+    }
+}
+
+fn load_workspace_prefs(base_data_dir: &Path) -> WorkspacePrefs {
+    let path = base_data_dir.join("workspace.json");
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|raw| serde_json::from_str(&raw).ok())
+        .unwrap_or_default()
+}
+
+fn sanitize_repo_dir(repo_id: &str) -> String {
+    let cleaned: String = repo_id
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_') {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if cleaned.is_empty() {
+        DEFAULT_REPO_ID.into()
+    } else {
+        cleaned
+    }
+}
+
+async fn fallback_artifact(
+    engine: &RelayEngine,
+    old_artifact_id: &str,
+    new_commit_sha: String,
+    device_origin: String,
+) -> RelayResult<GraphNode> {
+    let snapshot = engine.dag_snapshot(true).await;
+    let fingerprint = snapshot.nodes.into_iter().find_map(|node| match node.payload {
+        NodeKind::Artifact {
+            env_fingerprint, ..
+        } if node.id == old_artifact_id => Some(env_fingerprint),
+        _ => None,
+    });
+    let fingerprint =
+        fingerprint.ok_or_else(|| RelayError::NodeNotFound(old_artifact_id.into()))?;
+    let now = Utc::now();
+    let short_sha: String = new_commit_sha.chars().take(7).collect();
+    Ok(GraphNode {
+        id: format!("artifact:{new_commit_sha}"),
+        label: format!("Commit {short_sha}"),
+        payload: NodeKind::Artifact {
+            git_commit_sha: new_commit_sha,
+            env_fingerprint: fingerprint,
+            working_tree_dirty: false,
+            changed_files: Vec::new(),
+        },
+        freshness: Freshness::Fresh,
+        device_origin,
+        created_at: now,
+        updated_at: now,
+    })
+}
+
 fn task_response(response: WireResponse) -> RelayResult<TaskRecord> {
     match response {
         WireResponse::TaskState(record) => Ok(record),
@@ -536,17 +980,23 @@ fn task_response(response: WireResponse) -> RelayResult<TaskRecord> {
 }
 
 fn env_path(name: &str) -> Option<PathBuf> {
-    env::var_os(name).filter(|value| !value.is_empty()).map(PathBuf::from)
+    env::var_os(name)
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
 }
 
-async fn resolve_data_dir(parent: Option<&Path>) -> RelayResult<PathBuf> {
+async fn resolve_base_data_dir(parent: Option<&Path>) -> RelayResult<PathBuf> {
     let dir = if let Some(dir) = env_path("RELAY_DATA_DIR") {
         dir
     } else if let Some(parent) = parent {
         let dir = parent.join(".relay").join("desktop");
         match tokio::fs::create_dir_all(&dir).await {
             Ok(()) => return Ok(std::path::absolute(dir)?),
-            Err(error) => tracing::debug!(%error, path = %dir.display(), "Workspace data directory unavailable"),
+            Err(error) => tracing::debug!(
+                %error,
+                path = %dir.display(),
+                "Workspace data directory unavailable"
+            ),
         }
         env::temp_dir().join("relay-desktop")
     } else {
@@ -555,46 +1005,4 @@ async fn resolve_data_dir(parent: Option<&Path>) -> RelayResult<PathBuf> {
     let dir = std::path::absolute(dir)?;
     tokio::fs::create_dir_all(&dir).await?;
     Ok(dir)
-}
-
-async fn artifact_node(
-    repo: &WorktreeSandbox,
-    commit_sha: String,
-    device_origin: String,
-) -> RelayResult<GraphNode> {
-    let fingerprint = compute_env_fingerprint(repo.repo_root())?;
-    let (changed_files, dirty) =
-        tokio::join!(repo.changed_files_in_commit(&commit_sha), repo.is_working_tree_dirty());
-    Ok(make_artifact(
-        commit_sha,
-        fingerprint,
-        dirty.unwrap_or_default(),
-        changed_files.unwrap_or_default(),
-        device_origin,
-    ))
-}
-
-fn make_artifact(
-    commit_sha: String,
-    env_fingerprint: String,
-    working_tree_dirty: bool,
-    changed_files: Vec<String>,
-    device_origin: String,
-) -> GraphNode {
-    let now = Utc::now();
-    let short_sha: String = commit_sha.chars().take(7).collect();
-    GraphNode {
-        id: format!("artifact:{commit_sha}"),
-        label: format!("Commit {short_sha}"),
-        payload: NodeKind::Artifact {
-            git_commit_sha: commit_sha,
-            env_fingerprint,
-            working_tree_dirty,
-            changed_files,
-        },
-        freshness: Freshness::Fresh,
-        device_origin,
-        created_at: now,
-        updated_at: now,
-    }
 }

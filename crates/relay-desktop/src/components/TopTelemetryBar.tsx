@@ -2,7 +2,16 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Separator } from "@/components/ui/separator";
 import { cn } from "@/lib/utils";
-import { AlertCircle, GitBranch, Globe, Link2, Moon, Play, Sun } from "lucide-react";
+import {
+  AlertCircle,
+  GitBranch,
+  Globe,
+  Link2,
+  Moon,
+  Play,
+  SlidersHorizontal,
+  Sun,
+} from "lucide-react";
 import { useTranslation } from "react-i18next";
 import type { PeerStatus_Serialize } from "../bindings";
 import { setRelayLocale, type RelayLocale } from "../i18n";
@@ -16,6 +25,8 @@ interface TopTelemetryBarProps {
   onToggleTheme: () => void;
   onOpenPairModal: () => void;
   onOpenRunTask: () => void;
+  onOpenRepoSettings: () => void;
+  onOpenLlmSettings: () => void;
 }
 
 export function TopTelemetryBar({
@@ -27,6 +38,8 @@ export function TopTelemetryBar({
   onToggleTheme,
   onOpenPairModal,
   onOpenRunTask,
+  onOpenRepoSettings,
+  onOpenLlmSettings,
 }: TopTelemetryBarProps) {
   const { t, i18n } = useTranslation();
   const currentLang: RelayLocale = i18n.language === "zh-CN" ? "zh-CN" : "en";
@@ -35,7 +48,7 @@ export function TopTelemetryBar({
 
   return (
     <header className="flex h-12 shrink-0 items-center justify-between gap-3 border-b border-border bg-background px-4">
-      <div className="flex min-w-0 items-center gap-2.5">
+      <div className="flex min-w-0 items-center gap-2">
         <div className="flex items-center gap-2">
           <div className="flex size-7 shrink-0 items-center justify-center rounded-md bg-primary text-primary-foreground shadow-xs">
             <svg
@@ -63,12 +76,16 @@ export function TopTelemetryBar({
           /
         </span>
 
-        <div className="flex min-w-0 items-center gap-2">
-          <GitBranch className="size-3.5 shrink-0 text-muted-foreground" />
-          <span
-            lang="en"
-            className="relay-text-trim truncate text-xs leading-none font-medium text-foreground"
-          >
+        <Button
+          variant="ghost"
+          size="default"
+          onClick={onOpenRepoSettings}
+          title={t("topbar.switchRepo")}
+          aria-label={t("topbar.switchRepo")}
+          className="min-w-0 gap-2 px-2"
+        >
+          <GitBranch data-icon="inline-start" className="text-muted-foreground" />
+          <span lang="en" className="truncate text-xs leading-snug font-medium text-foreground">
             {repoId}
           </span>
           {headCommitSha && (
@@ -79,7 +96,7 @@ export function TopTelemetryBar({
               {headCommitSha.slice(0, 7)}
             </span>
           )}
-        </div>
+        </Button>
       </div>
 
       <div className="flex items-center gap-2">
@@ -127,6 +144,16 @@ export function TopTelemetryBar({
           >
             {currentLang === "en" ? "中文" : "EN"}
           </span>
+        </Button>
+
+        <Button
+          variant="ghost"
+          size="icon"
+          aria-label={t("topbar.openSettings")}
+          title={t("topbar.openSettings")}
+          onClick={onOpenLlmSettings}
+        >
+          <SlidersHorizontal />
         </Button>
 
         <Button

@@ -7,6 +7,13 @@ import * as __TAURI_EVENT from "@tauri-apps/api/event";
 /** Commands */
 export const commands = {
 	getRuntimeStatus: (options?: InvokeOptions) => __TAURI_INVOKE<PeerStatus_Serialize>("get_runtime_status", undefined, options),
+	getWorkspaceInfo: (options?: InvokeOptions) => __TAURI_INVOKE<WorkspaceInfo_Serialize>("get_workspace_info", undefined, options),
+	pickRepositoryFolder: (options?: InvokeOptions) => __TAURI_INVOKE<string | null>("pick_repository_folder", undefined, options),
+	openWorkspaceRepo: (repoPath: string, options?: InvokeOptions) => __TAURI_INVOKE<WorkspaceInfo_Serialize>("open_workspace_repo", { repoPath }, options),
+	refreshGitHead: (options?: InvokeOptions) => __TAURI_INVOKE<boolean>("refresh_git_head", undefined, options),
+	getLlmSettings: (options?: InvokeOptions) => __TAURI_INVOKE<LlmSettingsView_Serialize>("get_llm_settings", undefined, options),
+	saveLlmSettings: (update: LlmSettingsUpdate_Deserialize, options?: InvokeOptions) => __TAURI_INVOKE<LlmSettingsView_Serialize>("save_llm_settings", { update }, options),
+	testLlmConnection: (update: LlmSettingsUpdate_Deserialize | null, options?: InvokeOptions) => __TAURI_INVOKE<LlmProbeResult>("test_llm_connection", { update }, options),
 	switchRuntimeMode: (mode: RuntimeMode, options?: InvokeOptions) => __TAURI_INVOKE<RuntimeMode>("switch_runtime_mode", { mode }, options),
 	getDagSnapshot: (includeStale: boolean, options?: InvokeOptions) => __TAURI_INVOKE<DagSnapshot_Serialize>("get_dag_snapshot", { includeStale }, options),
 	listTasks: (options?: InvokeOptions) => __TAURI_INVOKE<TaskRecord_Serialize[]>("list_tasks", undefined, options),
@@ -84,8 +91,61 @@ export type HandoffSummary = {
 	created_at: string,
 };
 
+export type InferenceTier = "edge_fast_path" | "host_local_ollama" | "cloud_open_ai_compat";
+
 /**  Specta-safe JSON value using `f64` numbers (avoids Specta BigInt export error on `serde_json::Value`). */
 export type JsonValue = null | boolean | number | null | string | JsonValue[] | { [key in string]: JsonValue };
+
+export type LlmProbeResult = {
+	ok: boolean,
+	latency_ms: number,
+	endpoint: string,
+	model: string,
+	message: string,
+};
+
+export type LlmSettingsUpdate = LlmSettingsUpdate_Serialize | LlmSettingsUpdate_Deserialize;
+
+export type LlmSettingsUpdate_Deserialize = {
+	tier: InferenceTier,
+	base_url: string,
+	model: string,
+	api_key_env?: string | null,
+	/**  `None` keeps any stored key; `Some("")` clears it; `Some(key)` replaces it. */
+	api_key?: string | null,
+};
+
+export type LlmSettingsUpdate_Serialize = {
+	tier: InferenceTier,
+	base_url: string,
+	model: string,
+	api_key_env: string | null,
+	/**  `None` keeps any stored key; `Some("")` clears it; `Some(key)` replaces it. */
+	api_key: string | null,
+};
+
+/**  Safe summary sent to desktop UI without exposing raw API secrets. */
+export type LlmSettingsView = LlmSettingsView_Serialize | LlmSettingsView_Deserialize;
+
+/**  Safe summary sent to desktop UI without exposing raw API secrets. */
+export type LlmSettingsView_Deserialize = {
+	tier: InferenceTier,
+	base_url: string,
+	model: string,
+	api_key_env?: string | null,
+	has_api_key: boolean,
+	api_key_hint?: string | null,
+};
+
+/**  Safe summary sent to desktop UI without exposing raw API secrets. */
+export type LlmSettingsView_Serialize = {
+	tier: InferenceTier,
+	base_url: string,
+	model: string,
+	api_key_env: string | null,
+	has_api_key: boolean,
+	api_key_hint: string | null,
+};
 
 export type NodeKind = { kind: "decision"; rationale: string; constraints: string[] } | { kind: "artifact"; git_commit_sha: string; env_fingerprint: string; working_tree_dirty: boolean; changed_files: string[] } | { kind: "evidence"; task_id: string; preset: string; metrics_json: JsonValue; log_blob_hash: string };
 
@@ -125,6 +185,14 @@ export type PeerStatus_Serialize = {
 	rtt_ms: number | null,
 	last_synced_commit: string | null,
 	pending_outbox_count: number,
+};
+
+export type PresetInfo = {
+	name: string,
+	description: string,
+	program: string,
+	args: string[],
+	allowed_params: string[],
 };
 
 export type RelayStateChangedEvent = {
@@ -192,6 +260,28 @@ export type TaskSpec_Serialize = {
 export type TaskState = "queued" | "preflight_running" | "self_healing_proposed" | "executing" | "completed" | "failed" | "stale" | "rejected";
 
 export type TransportPath = "direct_lan" | "relay" | "loopback" | "offline";
+
+export type WorkspaceInfo = WorkspaceInfo_Serialize | WorkspaceInfo_Deserialize;
+
+export type WorkspaceInfo_Deserialize = {
+	repo_id: string,
+	name: string,
+	repo_root?: string | null,
+	is_git_repo: boolean,
+	has_manifest: boolean,
+	smoke_preset: string,
+	presets: PresetInfo[],
+};
+
+export type WorkspaceInfo_Serialize = {
+	repo_id: string,
+	name: string,
+	repo_root: string | null,
+	is_git_repo: boolean,
+	has_manifest: boolean,
+	smoke_preset: string,
+	presets: PresetInfo[],
+};
 
 /* Tauri Specta runtime */
 type EventEmit<T> = [T] extends [null] ? () => Promise<void> : (payload: T) => Promise<void>;

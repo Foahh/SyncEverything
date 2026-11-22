@@ -7,12 +7,16 @@ import {
   type GraphEdge,
   type GraphNode,
   type HandoffSummary,
+  type LlmProbeResult,
+  type LlmSettingsUpdate_Deserialize,
+  type LlmSettingsView_Serialize,
   type PeerStatus_Serialize,
   type RelayStateChangedEvent,
   type RuntimeMode,
   type StalePropagationReport,
   type TaskRecord_Serialize,
   type TaskSpec_Deserialize,
+  type WorkspaceInfo_Serialize,
 } from "../bindings";
 
 export function isTauriRuntime(): boolean {
@@ -21,6 +25,8 @@ export function isTauriRuntime(): boolean {
 
 interface MockWorkspaceState {
   status: PeerStatus_Serialize;
+  workspace: WorkspaceInfo_Serialize;
+  llm: LlmSettingsView_Serialize;
   dag: DagSnapshot_Serialize;
   tasks: TaskRecord_Serialize[];
   handoffs: HandoffSummary[];
@@ -200,6 +206,39 @@ function createInitialMockState(): MockWorkspaceState {
       last_synced_commit: "a91f0c2",
       pending_outbox_count: 0,
     },
+    workspace: {
+      repo_id: "forecast-bench",
+      name: "Rolling-Window Forecast Fixture",
+      repo_root: "bench/fixture-repo",
+      is_git_repo: false,
+      has_manifest: true,
+      smoke_preset: "smoke",
+      presets: [
+        {
+          name: "train_grid",
+          description:
+            "Evaluate 3 rolling window sizes (7, 14, 28) and emit structured JSON metrics",
+          program: "uv",
+          args: ["run", "python", "src/forecast.py", "--windows", "7,14,28"],
+          allowed_params: ["windows", "alpha"],
+        },
+        {
+          name: "smoke",
+          description: "Fast 1-second smoke preflight verifying runtime & synthetic data pipeline",
+          program: "uv",
+          args: ["run", "python", "src/forecast.py", "--smoke"],
+          allowed_params: ["window"],
+        },
+      ],
+    },
+    llm: {
+      tier: "host_local_ollama",
+      base_url: "http://127.0.0.1:11434/v1",
+      model: "qwen3.5:4b",
+      api_key_env: null,
+      has_api_key: false,
+      api_key_hint: null,
+    },
     dag: {
       repo_id: "forecast-bench",
       head_commit_sha: "a91f0c28e4b71a2d9012f",
@@ -225,6 +264,95 @@ export const relayApi = {
       return commands.getRuntimeStatus();
     }
     return structuredClone(mockState.status);
+  },
+
+  async getWorkspaceInfo(): Promise<WorkspaceInfo_Serialize> {
+    if (isTauriRuntime()) {
+      return commands.getWorkspaceInfo();
+    }
+    return structuredClone(mockState.workspace);
+  },
+
+  async pickRepositoryFolder(): Promise<string | null> {
+    if (isTauriRuntime()) {
+      return commands.pickRepositoryFolder();
+    }
+    return null;
+  },
+
+  async openWorkspaceRepo(repoPath: string): Promise<WorkspaceInfo_Serialize> {
+    if (isTauriRuntime()) {
+      return commands.openWorkspaceRepo(repoPath);
+    }
+    const trimmed = repoPath.trim();
+    if (!trimmed) {
+      throw new Error("Repository path cannot be empty.");
+    }
+    const slug = trimmed.split(/[\\/]/).filter(Boolean).pop() ?? "custom-repo";
+    mockState.workspace = {
+      ...mockState.workspace,
+      repo_id: slug,
+      name: slug,
+      repo_root: trimmed,
+      is_git_repo: true,
+    };
+    mockState.dag.repo_id = slug;
+    return structuredClone(mockState.workspace);
+  },
+
+  async refreshGitHead(): Promise<boolean> {
+    if (isTauriRuntime()) {
+      return commands.refreshGitHead();
+    }
+    return false;
+  },
+
+  async getLlmSettings(): Promise<LlmSettingsView_Serialize> {
+    if (isTauriRuntime()) {
+      return commands.getLlmSettings();
+    }
+    return structuredClone(mockState.llm);
+  },
+
+  async saveLlmSettings(update: LlmSettingsUpdate_Deserialize): Promise<LlmSettingsView_Serialize> {
+    if (isTauriRuntime()) {
+      return commands.saveLlmSettings(update);
+    }
+    const nextKey = update.api_key;
+    const hasKey =
+      nextKey === undefined || nextKey === null
+        ? mockState.llm.has_api_key
+        : nextKey.trim().length > 0;
+    const hint =
+      nextKey && nextKey.trim().length > 0
+        ? `${nextKey.trim().slice(0, 3)}••••${nextKey.trim().slice(-4)}`
+        : nextKey === ""
+          ? null
+          : mockState.llm.api_key_hint;
+    mockState.llm = {
+      tier: update.tier,
+      base_url: update.base_url.trim(),
+      model: update.model.trim(),
+      api_key_env: update.api_key_env?.trim() || null,
+      has_api_key: hasKey || Boolean(update.api_key_env?.trim()),
+      api_key_hint: hint,
+    };
+    return structuredClone(mockState.llm);
+  },
+
+  async testLlmConnection(update: LlmSettingsUpdate_Deserialize | null): Promise<LlmProbeResult> {
+    if (isTauriRuntime()) {
+      return commands.testLlmConnection(update);
+    }
+    const base = update?.base_url ?? mockState.llm.base_url;
+    const model = update?.model ?? mockState.llm.model;
+    return {
+      ok: true,
+      latency_ms: 14,
+      endpoint: base,
+      model,
+      message: `Preview OK (14 ms) — run in Tauri desktop to probe live ${base}`,
+    };
   },
 
   async switchRuntimeMode(mode: RuntimeMode): Promise<RuntimeMode> {
