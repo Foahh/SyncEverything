@@ -20,7 +20,7 @@ interface InspectorDrawerProps {
 function UnifiedDiffViewer({ diff }: { diff: string }) {
   const lines = diff.split("\n");
   return (
-    <div className="relay-code-dark font-mono-tech overflow-x-auto rounded-xl border border-border bg-[#0e131b] text-[11.5px] leading-relaxed text-slate-200">
+    <div className="relay-code-dark font-mono-tech overflow-x-auto rounded-lg border border-border bg-[#0e131b] text-[11.5px] leading-relaxed text-slate-200">
       <div className="flex flex-col gap-0.5 p-2.5">
         {lines.map((line, index) => {
           const isAdd = line.startsWith("+") && !line.startsWith("+++");
@@ -32,7 +32,7 @@ function UnifiedDiffViewer({ diff }: { diff: string }) {
             <div
               key={`${index}-${line.slice(0, 12)}`}
               className={cn(
-                "flex gap-2.5 rounded px-1.5 whitespace-pre",
+                "flex gap-2.5 rounded-sm px-1.5 whitespace-pre",
                 isAdd
                   ? "bg-emerald-500/18 text-emerald-300"
                   : isDel
@@ -97,11 +97,13 @@ function FixProposalBody({ proposal }: { proposal: ActiveProposal }) {
         <UnifiedDiffViewer diff={proposal.diff_preview} />
       </div>
 
-      <details className="group rounded-xl border border-border bg-muted/40">
+      <details className="group rounded-lg border border-border bg-muted/40">
         <summary className="flex cursor-pointer list-none items-center justify-between px-3 py-2 text-xs font-medium text-foreground">
           <span className="inline-flex items-center gap-1.5">
-            <CheckCircle2 className="size-3.5 text-emerald-600 dark:text-emerald-400" />
-            {proposal.smoke_verified ? t("detail.fixCheckPassed") : t("detail.fixCheckLog")}
+            <CheckCircle2 className="size-3.5 shrink-0 text-emerald-600 dark:text-emerald-400" />
+            <span className="relay-text-trim leading-none">
+              {proposal.smoke_verified ? t("detail.fixCheckPassed") : t("detail.fixCheckLog")}
+            </span>
           </span>
           <ChevronRight className="size-3.5 text-muted-foreground transition-transform group-open:rotate-90" />
         </summary>
@@ -133,7 +135,7 @@ function NodePayloadSection({ node }: { node: GraphNode }) {
             <div className="flex flex-wrap gap-1.5">
               {payload.constraints.map((rule) => (
                 <Badge key={rule} variant="secondary" className="h-auto py-0.5 text-[11px]">
-                  {rule}
+                  <span className="relay-text-trim leading-none">{rule}</span>
                 </Badge>
               ))}
             </div>
@@ -151,7 +153,7 @@ function NodePayloadSection({ node }: { node: GraphNode }) {
           {payload.changed_files.map((file) => (
             <li
               key={file}
-              className="font-mono-tech rounded-lg border border-border bg-muted/60 px-2.5 py-1.5 text-xs text-foreground"
+              className="font-mono-tech rounded-md border border-border bg-muted/60 px-2.5 py-1.5 text-xs text-foreground"
             >
               {file}
             </li>
@@ -166,7 +168,7 @@ function NodePayloadSection({ node }: { node: GraphNode }) {
       <div className="text-[11.5px] font-medium text-muted-foreground">{t("detail.metrics")}</div>
       <div className="grid grid-cols-2 gap-2">
         {metricEntries(payload.metrics_json).map(([label, val]) => (
-          <div key={label} className="rounded-xl border border-border bg-muted/50 p-2.5">
+          <div key={label} className="rounded-lg border border-border bg-muted/50 p-2.5">
             <div className="text-[11px] text-muted-foreground">{label}</div>
             <div className="font-mono-tech mt-0.5 text-sm font-semibold text-foreground">{val}</div>
           </div>
@@ -179,9 +181,9 @@ function NodePayloadSection({ node }: { node: GraphNode }) {
 function NodeTechnicalDetails({ node }: { node: GraphNode }) {
   const { t } = useTranslation();
   return (
-    <details className="group rounded-xl border border-border bg-muted/40">
+    <details className="group rounded-lg border border-border bg-muted/40">
       <summary className="flex cursor-pointer list-none items-center justify-between px-3 py-2 text-[11.5px] font-medium text-muted-foreground">
-        <span>{t("detail.techDetails")}</span>
+        <span className="relay-text-trim leading-none">{t("detail.techDetails")}</span>
         <ChevronRight className="size-3.5 transition-transform group-open:rotate-90" />
       </summary>
       <div className="flex flex-col gap-2 border-t border-border px-3 py-2.5 text-[11.5px]">
@@ -298,7 +300,7 @@ export function InspectorDrawer({
             disabled={isResolvingApproval}
             onClick={() => onResolveApproval(pendingFixTask.spec.task_id, "rejected")}
           >
-            {t("detail.dismissFix")}
+            <span className="relay-text-trim leading-none">{t("detail.dismissFix")}</span>
           </Button>
           <Button
             variant="default"
@@ -308,7 +310,7 @@ export function InspectorDrawer({
             onClick={() => onResolveApproval(pendingFixTask.spec.task_id, "approved")}
           >
             <CheckCircle2 data-icon="inline-start" />
-            {t("detail.applyAndRun")}
+            <span className="relay-text-trim leading-none">{t("detail.applyAndRun")}</span>
           </Button>
         </div>
       )}

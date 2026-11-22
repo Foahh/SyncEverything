@@ -66,7 +66,7 @@ export function PairDeviceModal({ isOpen, onOpenChange }: PairDeviceModalProps) 
       <DialogContent className="sm:max-w-lg">
         <DialogHeader>
           <div className="flex items-center gap-2.5">
-            <div className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary">
+            <div className="flex size-8 shrink-0 items-center justify-center rounded-md bg-primary/10 text-primary">
               <Link2 className="size-4" />
             </div>
             <div className="flex flex-col gap-0.5">
@@ -82,8 +82,12 @@ export function PairDeviceModal({ isOpen, onOpenChange }: PairDeviceModalProps) 
           className="gap-3"
         >
           <TabsList className="grid w-full grid-cols-2">
-            <TabsTrigger value="share">{t("modals.pair.shareTab")}</TabsTrigger>
-            <TabsTrigger value="connect">{t("modals.pair.connectTab")}</TabsTrigger>
+            <TabsTrigger value="share">
+              <span className="relay-text-trim leading-none">{t("modals.pair.shareTab")}</span>
+            </TabsTrigger>
+            <TabsTrigger value="connect">
+              <span className="relay-text-trim leading-none">{t("modals.pair.connectTab")}</span>
+            </TabsTrigger>
           </TabsList>
 
           <TabsContent value="share" className="flex flex-col gap-3">
@@ -93,7 +97,7 @@ export function PairDeviceModal({ isOpen, onOpenChange }: PairDeviceModalProps) 
 
             {ticket ? (
               <div className="flex flex-col gap-2">
-                <pre className="font-mono-tech max-h-40 overflow-auto rounded-lg border border-border bg-muted/60 p-3 text-[11px] leading-relaxed text-foreground">
+                <pre className="font-mono-tech max-h-40 overflow-auto rounded-md border border-border bg-muted/60 p-3 text-[11px] leading-relaxed text-foreground">
                   {ticket}
                 </pre>
                 <div className="flex gap-2">
@@ -103,7 +107,9 @@ export function PairDeviceModal({ isOpen, onOpenChange }: PairDeviceModalProps) 
                     ) : (
                       <Copy data-icon="inline-start" />
                     )}
-                    {copied ? t("modals.pair.copiedBtn") : t("modals.pair.copyBtn")}
+                    <span className="relay-text-trim leading-none">
+                      {copied ? t("modals.pair.copiedBtn") : t("modals.pair.copyBtn")}
+                    </span>
                   </Button>
                   <Button
                     size="lg"
@@ -111,7 +117,9 @@ export function PairDeviceModal({ isOpen, onOpenChange }: PairDeviceModalProps) 
                     disabled={getTicket.isPending}
                     onClick={handleGenerate}
                   >
-                    {t("modals.pair.generateBtn")}
+                    <span className="relay-text-trim leading-none">
+                      {t("modals.pair.generateBtn")}
+                    </span>
                   </Button>
                 </div>
               </div>
@@ -123,7 +131,7 @@ export function PairDeviceModal({ isOpen, onOpenChange }: PairDeviceModalProps) 
                 onClick={handleGenerate}
               >
                 <Sparkles data-icon="inline-start" />
-                {t("modals.pair.generateBtn")}
+                <span className="relay-text-trim leading-none">{t("modals.pair.generateBtn")}</span>
               </Button>
             )}
           </TabsContent>
@@ -172,14 +180,14 @@ export function PairDeviceModal({ isOpen, onOpenChange }: PairDeviceModalProps) 
               onClick={handleConnect}
             >
               <Link2 data-icon="inline-start" />
-              {t("modals.pair.connectBtn")}
+              <span className="relay-text-trim leading-none">{t("modals.pair.connectBtn")}</span>
             </Button>
           </TabsContent>
         </Tabs>
 
         <DialogFooter>
           <Button variant="outline" size="lg" onClick={() => onOpenChange(false)}>
-            {t("modals.pair.close")}
+            <span className="relay-text-trim leading-none">{t("modals.pair.close")}</span>
           </Button>
         </DialogFooter>
       </DialogContent>

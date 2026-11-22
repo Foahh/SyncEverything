@@ -77,7 +77,7 @@ export function EvidenceNode({ data, selected }: NodeProps<RelayFlowNode>) {
   return (
     <div
       className={cn(
-        "w-[264px] rounded-xl border px-4 py-3.5 transition-all duration-200",
+        "w-[264px] rounded-lg border px-4 py-3.5 transition-all duration-200",
         evidenceCardStyle(isStale, Boolean(selected)),
       )}
     >
@@ -88,12 +88,14 @@ export function EvidenceNode({ data, selected }: NodeProps<RelayFlowNode>) {
             isStale ? "text-destructive" : "text-emerald-700 dark:text-emerald-400",
           )}
         >
-          <BarChart3 className="size-3.5" />
-          {t("canvas.kind.evidence")}
+          <BarChart3 className="size-3.5 shrink-0" />
+          <span className="relay-text-trim leading-none">{t("canvas.kind.evidence")}</span>
         </span>
 
         <Badge variant={badge.variant} className={badge.className}>
-          {t(`canvas.status.${node.freshness.status}`)}
+          <span className="relay-text-trim leading-none">
+            {t(`canvas.status.${node.freshness.status}`)}
+          </span>
         </Badge>
       </div>
 
@@ -102,7 +104,7 @@ export function EvidenceNode({ data, selected }: NodeProps<RelayFlowNode>) {
       </h4>
 
       {metrics.length > 0 && (
-        <div className="mt-2.5 grid grid-cols-2 gap-2 rounded-lg bg-muted/80 px-3 py-2">
+        <div className="mt-2.5 grid grid-cols-2 gap-2 rounded-md bg-muted/80 px-3 py-2">
           {metrics.map(([label, val]) => (
             <div key={label} className="min-w-0">
               <div className="truncate text-[10.5px] text-muted-foreground">{label}</div>
@@ -124,7 +126,7 @@ export function EvidenceNode({ data, selected }: NodeProps<RelayFlowNode>) {
       {isStale && (
         <div className="mt-2 flex items-center gap-1.5 text-[11px] font-medium text-destructive">
           <AlertCircle className="size-3.5 shrink-0" />
-          <span>{t("canvas.outdatedHint")}</span>
+          <span className="relay-text-trim leading-none">{t("canvas.outdatedHint")}</span>
         </div>
       )}
 

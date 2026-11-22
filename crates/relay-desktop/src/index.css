@@ -169,6 +169,14 @@
   color-scheme: dark;
 }
 
+.relay-text-trim {
+  text-box: trim-both cap alphabetic;
+}
+
+.relay-text-trim:lang(zh) {
+  text-box: normal;
+}
+
 ::-webkit-scrollbar {
   width: 6px;
   height: 6px;

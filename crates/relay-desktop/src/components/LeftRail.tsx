@@ -89,19 +89,19 @@ export function LeftRail({
   return (
     <aside className="flex h-full w-[268px] shrink-0 flex-col border-r border-border bg-sidebar text-sidebar-foreground">
       <div className="flex flex-1 flex-col gap-5 overflow-y-auto p-3.5">
-        <Button size="lg" className="w-full justify-center font-medium" onClick={onOpenRunTask}>
+        <Button size="lg" className="w-full justify-center" onClick={onOpenRunTask}>
           <Play data-icon="inline-start" />
-          {t("sidebar.runOnHost")}
+          <span className="relay-text-trim leading-none">{t("sidebar.runOnHost")}</span>
         </Button>
 
         <section className="flex flex-col gap-2">
           <div className="text-[11px] font-medium text-muted-foreground">
             {t("sidebar.deviceSection")}
           </div>
-          <div className="flex flex-col gap-2.5 rounded-xl border border-border bg-card p-3">
+          <div className="flex flex-col gap-2.5 rounded-lg border border-border bg-card p-3">
             <div className="flex items-center justify-between gap-2">
               <div className="flex min-w-0 items-center gap-2">
-                <div className="flex size-7 shrink-0 items-center justify-center rounded-lg bg-muted text-primary">
+                <div className="flex size-7 shrink-0 items-center justify-center rounded-md bg-muted text-primary">
                   <Cpu className="size-3.5" />
                 </div>
                 <div className="min-w-0">
@@ -126,7 +126,7 @@ export function LeftRail({
 
             <Button variant="outline" size="default" className="w-full" onClick={onOpenPairModal}>
               <Link2 data-icon="inline-start" />
-              {t("topbar.pairDevice")}
+              <span className="relay-text-trim leading-none">{t("topbar.pairDevice")}</span>
             </Button>
           </div>
         </section>
@@ -144,7 +144,7 @@ export function LeftRail({
           </div>
 
           {tasks.length === 0 ? (
-            <div className="rounded-xl border border-dashed border-border px-3 py-5 text-center text-xs leading-relaxed text-muted-foreground">
+            <div className="rounded-lg border border-dashed border-border px-3 py-5 text-center text-xs leading-relaxed text-muted-foreground">
               {t("sidebar.noRuns")}
             </div>
           ) : (
@@ -158,7 +158,7 @@ export function LeftRail({
                   <div
                     key={task.spec.task_id}
                     className={cn(
-                      "rounded-xl border p-3 transition-colors",
+                      "rounded-lg border p-3 transition-colors",
                       needsFixReview
                         ? "border-primary/40 bg-[var(--relay-heal-soft)]"
                         : "border-border bg-card hover:border-foreground/20",
@@ -169,7 +169,9 @@ export function LeftRail({
                         {task.spec.command_preset}
                       </span>
                       <Badge variant={badge.variant} className={badge.className}>
-                        {t(`taskState.${task.state}`)}
+                        <span className="relay-text-trim leading-none">
+                          {t(`taskState.${task.state}`)}
+                        </span>
                       </Badge>
                     </div>
 
@@ -186,7 +188,9 @@ export function LeftRail({
                         onClick={() => onOpenApproval(task)}
                       >
                         <Sparkles data-icon="inline-start" />
-                        {t("sidebar.reviewFix")}
+                        <span className="relay-text-trim leading-none">
+                          {t("sidebar.reviewFix")}
+                        </span>
                         <ArrowRight data-icon="inline-end" />
                       </Button>
                     )}
@@ -197,8 +201,10 @@ export function LeftRail({
                         onClick={() => onSelectEvidenceNode(task.evidence_node_id!)}
                         className="mt-2 inline-flex cursor-pointer items-center gap-1 text-[11.5px] font-medium text-primary hover:underline"
                       >
-                        <CheckCircle2 className="size-3" />
-                        {t("sidebar.viewResult")}
+                        <CheckCircle2 className="size-3 shrink-0" />
+                        <span className="relay-text-trim leading-none">
+                          {t("sidebar.viewResult")}
+                        </span>
                       </button>
                     )}
                   </div>
@@ -214,22 +220,22 @@ export function LeftRail({
         <button
           type="button"
           onClick={() => setSettingsOpen((prev) => !prev)}
-          className="flex w-full cursor-pointer items-center justify-between rounded-lg px-2 py-1.5 text-[11.5px] font-medium text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+          className="flex w-full cursor-pointer items-center justify-between rounded-md px-2 py-1.5 text-[11.5px] font-medium text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
         >
           <span className="inline-flex items-center gap-1.5">
-            <Settings2 className="size-3.5" />
-            {t("sidebar.settingsButton")}
+            <Settings2 className="size-3.5 shrink-0" />
+            <span className="relay-text-trim leading-none">{t("sidebar.settingsButton")}</span>
           </span>
           {settingsOpen ? <ChevronDown className="size-3.5" /> : <ChevronUp className="size-3.5" />}
         </button>
 
         {settingsOpen && (
-          <div className="mt-2 flex flex-col gap-3 rounded-xl border border-border bg-card p-2.5">
+          <div className="mt-2 flex flex-col gap-3 rounded-lg border border-border bg-card p-2.5">
             <div className="flex flex-col gap-1.5">
               <div className="text-[10.5px] font-medium text-muted-foreground">
                 {t("sidebar.modeLabel")}
               </div>
-              <div className="grid grid-cols-3 gap-1 rounded-lg bg-muted p-0.5">
+              <div className="grid grid-cols-3 gap-1 rounded-md bg-muted p-0.5">
                 {RUNTIME_MODES.map((mode) => {
                   const active = mode === activeMode;
                   return (
@@ -238,7 +244,7 @@ export function LeftRail({
                       type="button"
                       onClick={() => onSwitchMode(mode)}
                       className={cn(
-                        "cursor-pointer rounded-md px-1.5 py-1 text-[10.5px] font-medium transition-all",
+                        "cursor-pointer rounded-sm px-1.5 py-1 text-[10.5px] font-medium transition-all",
                         active
                           ? "bg-background text-foreground shadow-2xs"
                           : "text-muted-foreground hover:text-foreground",
@@ -265,7 +271,9 @@ export function LeftRail({
                 onClick={onTriggerUpstreamEdit}
               >
                 <Zap data-icon="inline-start" className="text-amber-500" />
-                {t("sidebar.simulateCodeChange")}
+                <span className="relay-text-trim leading-none">
+                  {t("sidebar.simulateCodeChange")}
+                </span>
               </Button>
               {!isTauriRuntime() && (
                 <Button
@@ -275,7 +283,7 @@ export function LeftRail({
                   onClick={onResetDemo}
                 >
                   <RotateCcw data-icon="inline-start" />
-                  {t("sidebar.resetPreview")}
+                  <span className="relay-text-trim leading-none">{t("sidebar.resetPreview")}</span>
                 </Button>
               )}
             </div>

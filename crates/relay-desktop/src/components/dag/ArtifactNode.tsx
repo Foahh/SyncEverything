@@ -14,7 +14,7 @@ export function ArtifactNode({ data, selected }: NodeProps<RelayFlowNode>) {
   return (
     <div
       className={cn(
-        "w-[248px] rounded-xl border bg-card px-4 py-3.5 text-card-foreground transition-all duration-150",
+        "w-[248px] rounded-lg border bg-card px-4 py-3.5 text-card-foreground transition-all duration-150",
         selected
           ? "border-sky-500 ring-2 ring-sky-500/20 shadow-md"
           : "border-border shadow-xs hover:border-foreground/20 hover:shadow-sm",
@@ -22,10 +22,10 @@ export function ArtifactNode({ data, selected }: NodeProps<RelayFlowNode>) {
     >
       <div className="flex items-center justify-between gap-2">
         <span className="inline-flex items-center gap-1.5 text-[11px] font-medium text-sky-600 dark:text-sky-400">
-          <GitCommitHorizontal className="size-3.5" />
-          {t("canvas.kind.artifact")}
+          <GitCommitHorizontal className="size-3.5 shrink-0" />
+          <span className="relay-text-trim leading-none">{t("canvas.kind.artifact")}</span>
         </span>
-        <span className="font-mono-tech rounded-md bg-muted px-1.5 py-0.5 text-[11px] text-muted-foreground">
+        <span className="font-mono-tech relay-text-trim rounded-sm bg-muted px-1.5 py-1 text-[11px] leading-none text-muted-foreground">
           {shortSha}
         </span>
       </div>
@@ -38,8 +38,8 @@ export function ArtifactNode({ data, selected }: NodeProps<RelayFlowNode>) {
         <span>{t("canvas.filesCount", { count: node.payload.changed_files.length })}</span>
         {node.payload.working_tree_dirty && (
           <span className="inline-flex items-center gap-1 font-medium text-amber-600 dark:text-amber-400">
-            <span className="size-1.5 rounded-full bg-amber-500" />
-            {t("canvas.dirtyBadge")}
+            <span className="size-1.5 shrink-0 rounded-full bg-amber-500" />
+            <span className="relay-text-trim leading-none">{t("canvas.dirtyBadge")}</span>
           </span>
         )}
       </div>

@@ -37,7 +37,7 @@ export function TopTelemetryBar({
     <header className="flex h-12 shrink-0 items-center justify-between gap-3 border-b border-border bg-background px-4">
       <div className="flex min-w-0 items-center gap-2.5">
         <div className="flex items-center gap-2">
-          <div className="flex size-7 items-center justify-center rounded-lg bg-primary text-primary-foreground shadow-xs">
+          <div className="flex size-7 shrink-0 items-center justify-center rounded-md bg-primary text-primary-foreground shadow-xs">
             <svg
               viewBox="0 0 24 24"
               className="size-4"
@@ -51,18 +51,31 @@ export function TopTelemetryBar({
               <path d="M8.5 11.2L15.6 7.2M8.5 12.8L15.6 16.8" strokeLinecap="round" />
             </svg>
           </div>
-          <span className="text-sm font-semibold tracking-tight text-foreground">
+          <span
+            lang="en"
+            className="relay-text-trim text-sm leading-none font-semibold tracking-tight text-foreground"
+          >
             {t("app.name")}
           </span>
         </div>
 
-        <span className="text-border">/</span>
+        <span lang="en" className="relay-text-trim text-xs leading-none text-border select-none">
+          /
+        </span>
 
         <div className="flex min-w-0 items-center gap-2">
           <GitBranch className="size-3.5 shrink-0 text-muted-foreground" />
-          <span className="truncate text-xs font-medium text-foreground">{repoId}</span>
+          <span
+            lang="en"
+            className="relay-text-trim truncate text-xs leading-none font-medium text-foreground"
+          >
+            {repoId}
+          </span>
           {headCommitSha && (
-            <span className="font-mono-tech hidden rounded-md bg-muted px-1.5 py-0.5 text-[11px] text-muted-foreground sm:inline">
+            <span
+              lang="en"
+              className="font-mono-tech relay-text-trim hidden rounded-sm bg-muted px-1.5 py-1 text-[11px] leading-none text-muted-foreground sm:inline-flex sm:items-center"
+            >
               {headCommitSha.slice(0, 7)}
             </span>
           )}
@@ -71,22 +84,22 @@ export function TopTelemetryBar({
 
       <div className="flex items-center gap-2">
         {staleCount > 0 && (
-          <Badge variant="destructive" className="h-6 gap-1 px-2 text-[11px]">
+          <Badge variant="destructive" className="gap-1">
             <AlertCircle data-icon="inline-start" />
-            {t("topbar.outdatedCount", { count: staleCount })}
+            <span className="relay-text-trim leading-none">
+              {t("topbar.outdatedCount", { count: staleCount })}
+            </span>
           </Badge>
         )}
 
-        <Button
-          variant="outline"
-          size="default"
-          className="rounded-full px-2.5"
-          onClick={onOpenPairModal}
-        >
+        <Button variant="outline" size="default" onClick={onOpenPairModal}>
           <span
-            className={cn("size-2 rounded-full", isConnected ? "bg-emerald-500" : "bg-amber-500")}
+            className={cn(
+              "size-2 shrink-0 rounded-full",
+              isConnected ? "bg-emerald-500" : "bg-amber-500",
+            )}
           />
-          <span>
+          <span className="relay-text-trim leading-none">
             {isConnected
               ? `${t(`topbar.transport.${transport}`)}${status?.rtt_ms != null ? ` · ${status.rtt_ms}ms` : ""}`
               : t("topbar.pairDevice")}
@@ -94,12 +107,12 @@ export function TopTelemetryBar({
           <Link2 data-icon="inline-end" className="text-muted-foreground" />
         </Button>
 
-        <Button variant="default" size="default" className="px-3" onClick={onOpenRunTask}>
+        <Button variant="default" size="default" onClick={onOpenRunTask}>
           <Play data-icon="inline-start" />
-          {t("topbar.runTask")}
+          <span className="relay-text-trim leading-none">{t("topbar.runTask")}</span>
         </Button>
 
-        <Separator orientation="vertical" className="h-4" />
+        <Separator orientation="vertical" className="my-auto h-4 data-vertical:self-center" />
 
         <Button
           variant="ghost"
@@ -108,7 +121,12 @@ export function TopTelemetryBar({
           onClick={() => setRelayLocale(currentLang === "en" ? "zh-CN" : "en")}
         >
           <Globe data-icon="inline-start" />
-          {currentLang === "en" ? "中文" : "EN"}
+          <span
+            lang={currentLang === "en" ? "zh-CN" : "en"}
+            className="relay-text-trim leading-none"
+          >
+            {currentLang === "en" ? "中文" : "EN"}
+          </span>
         </Button>
 
         <Button

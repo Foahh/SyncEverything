@@ -23,9 +23,14 @@ function detectInitialLanguage(): RelayLocale {
   return navigator.language.toLowerCase().startsWith("zh") ? "zh-CN" : "en";
 }
 
+const initialLocale = detectInitialLanguage();
+if (typeof document !== "undefined") {
+  document.documentElement.lang = initialLocale;
+}
+
 void i18n.use(initReactI18next).init({
   resources,
-  lng: detectInitialLanguage(),
+  lng: initialLocale,
   fallbackLng: "en",
   defaultNS: "translation",
   returnNull: false,
@@ -38,6 +43,9 @@ export function setRelayLocale(locale: RelayLocale): void {
   void i18n.changeLanguage(locale);
   if (typeof window !== "undefined") {
     window.localStorage.setItem(STORAGE_KEY, locale);
+  }
+  if (typeof document !== "undefined") {
+    document.documentElement.lang = locale;
   }
 }
 

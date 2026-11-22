@@ -87,9 +87,11 @@ function DagCanvasInner({
     >
       {staleCount > 0 && (
         <div className="pointer-events-none absolute top-4 right-4 left-4 z-20 flex justify-center">
-          <div className="pointer-events-auto inline-flex items-center gap-2 rounded-full border border-destructive/30 bg-card/95 px-3.5 py-1.5 text-xs font-medium text-destructive shadow-sm backdrop-blur-md">
+          <div className="pointer-events-auto inline-flex items-center gap-2 rounded-lg border border-destructive/30 bg-card/95 px-3 py-1.5 text-xs font-medium text-destructive shadow-sm backdrop-blur-md">
             <AlertCircle className="size-3.5 shrink-0" />
-            <span>{t("canvas.outdatedBanner", { count: staleCount })}</span>
+            <span className="relay-text-trim leading-none">
+              {t("canvas.outdatedBanner", { count: staleCount })}
+            </span>
           </div>
         </div>
       )}
@@ -117,19 +119,19 @@ function DagCanvasInner({
 
       {nodes.length === 0 && (
         <div className="pointer-events-none absolute inset-0 flex items-center justify-center p-8">
-          <div className="pointer-events-auto max-w-sm rounded-2xl border border-border bg-card p-6 text-center shadow-sm">
+          <div className="pointer-events-auto max-w-sm rounded-lg border border-border bg-card p-6 text-center shadow-sm">
             <h3 className="text-sm font-semibold text-foreground">{t("canvas.emptyTitle")}</h3>
             <p className="mt-1.5 text-xs leading-relaxed text-muted-foreground">
               {t("canvas.emptyDesc")}
             </p>
             <div className="mt-4 flex justify-center gap-2">
-              <Button size="lg" onClick={onOpenDispatchTask}>
+              <Button size="default" onClick={onOpenDispatchTask}>
                 <Play data-icon="inline-start" />
-                {t("canvas.emptyCta")}
+                <span className="relay-text-trim leading-none">{t("canvas.emptyCta")}</span>
               </Button>
-              <Button variant="secondary" size="lg" onClick={onOpenRecordDecision}>
+              <Button variant="secondary" size="default" onClick={onOpenRecordDecision}>
                 <Plus data-icon="inline-start" />
-                {t("canvas.dock.addNote")}
+                <span className="relay-text-trim leading-none">{t("canvas.dock.addNote")}</span>
               </Button>
             </div>
           </div>
@@ -137,33 +139,38 @@ function DagCanvasInner({
       )}
 
       <div className="pointer-events-none absolute right-4 bottom-4 left-4 z-20 flex justify-center">
-        <div className="pointer-events-auto flex items-center gap-1 rounded-xl border border-border bg-card/95 p-1.5 shadow-lg backdrop-blur-md">
-          <Button variant="secondary" size="lg" onClick={onOpenRecordDecision}>
+        <div className="pointer-events-auto flex items-center gap-1 rounded-lg border border-border bg-card/95 p-1 shadow-md backdrop-blur-md">
+          <Button variant="secondary" size="default" onClick={onOpenRecordDecision}>
             <Plus data-icon="inline-start" />
-            {t("canvas.dock.addNote")}
+            <span className="relay-text-trim leading-none">{t("canvas.dock.addNote")}</span>
           </Button>
-          <Button variant="default" size="lg" onClick={onOpenDispatchTask}>
+          <Button variant="default" size="default" onClick={onOpenDispatchTask}>
             <Play data-icon="inline-start" />
-            {t("canvas.dock.runTask")}
+            <span className="relay-text-trim leading-none">{t("canvas.dock.runTask")}</span>
           </Button>
 
           {staleCount > 0 && (
             <>
-              <Separator orientation="vertical" className="mx-0.5 h-4" />
-              <Button variant="ghost" size="lg" onClick={onToggleIncludeStale}>
+              <Separator
+                orientation="vertical"
+                className="mx-0.5 my-auto h-4 data-vertical:self-center"
+              />
+              <Button variant="ghost" size="default" onClick={onToggleIncludeStale}>
                 {includeStale ? (
                   <Eye data-icon="inline-start" />
                 ) : (
                   <EyeOff data-icon="inline-start" />
                 )}
-                {includeStale ? t("canvas.dock.showOutdated") : t("canvas.dock.hideOutdated")}
+                <span className="relay-text-trim leading-none">
+                  {includeStale ? t("canvas.dock.showOutdated") : t("canvas.dock.hideOutdated")}
+                </span>
               </Button>
             </>
           )}
 
           <Button
             variant="ghost"
-            size="icon-lg"
+            size="icon"
             aria-label={t("canvas.dock.fitView")}
             onClick={() => void fitView({ padding: 0.18, maxZoom: 1.05, duration: 280 })}
           >

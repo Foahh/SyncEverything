@@ -62,7 +62,7 @@ export function DispatchTaskModal({
       <DialogContent className="sm:max-w-lg">
         <DialogHeader>
           <div className="flex items-center gap-2.5">
-            <div className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary">
+            <div className="flex size-8 shrink-0 items-center justify-center rounded-md bg-primary/10 text-primary">
               <Play className="size-4" />
             </div>
             <div className="flex flex-col gap-0.5">
@@ -88,7 +88,7 @@ export function DispatchTaskModal({
                       type="button"
                       onClick={() => setValue("preset", preset)}
                       className={cn(
-                        "cursor-pointer rounded-xl border px-3 py-2.5 text-left transition-all",
+                        "cursor-pointer rounded-lg border px-3 py-2.5 text-left transition-all",
                         active
                           ? "border-primary bg-primary/8 ring-1 ring-primary/25"
                           : "border-border bg-muted/40 hover:border-foreground/20",
@@ -143,7 +143,7 @@ export function DispatchTaskModal({
 
             <Field
               orientation="horizontal"
-              className="justify-between rounded-xl border border-border bg-muted/40 px-3 py-2.5"
+              className="justify-between rounded-lg border border-border bg-muted/40 px-3 py-2.5"
             >
               <FieldLabel htmlFor="task-ask-before-fix" className="cursor-pointer font-normal">
                 {t("modals.task.askBeforeFix")}
@@ -165,11 +165,11 @@ export function DispatchTaskModal({
 
           <DialogFooter>
             <Button type="button" variant="outline" size="lg" onClick={() => onOpenChange(false)}>
-              {t("modals.task.cancel")}
+              <span className="relay-text-trim leading-none">{t("modals.task.cancel")}</span>
             </Button>
             <Button type="submit" size="lg" disabled={isSubmitting}>
               <Play data-icon="inline-start" />
-              {t("modals.task.submit")}
+              <span className="relay-text-trim leading-none">{t("modals.task.submit")}</span>
             </Button>
           </DialogFooter>
         </form>

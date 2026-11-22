@@ -67,7 +67,7 @@ export function RecordDecisionModal({
       <DialogContent className="sm:max-w-lg">
         <DialogHeader>
           <div className="flex items-center gap-2.5">
-            <div className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary">
+            <div className="flex size-8 shrink-0 items-center justify-center rounded-md bg-primary/10 text-primary">
               <StickyNote className="size-4" />
             </div>
             <div className="flex flex-col gap-0.5">
@@ -118,10 +118,10 @@ export function RecordDecisionModal({
 
           <DialogFooter>
             <Button type="button" variant="outline" size="lg" onClick={() => onOpenChange(false)}>
-              {t("modals.note.cancel")}
+              <span className="relay-text-trim leading-none">{t("modals.note.cancel")}</span>
             </Button>
             <Button type="submit" size="lg" disabled={!isValid || isSubmitting}>
-              {t("modals.note.submit")}
+              <span className="relay-text-trim leading-none">{t("modals.note.submit")}</span>
             </Button>
           </DialogFooter>
         </form>
