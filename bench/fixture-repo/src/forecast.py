@@ -67,11 +67,15 @@ def run_sweep(windows: Iterable[int], alpha: float, smoke: bool) -> dict[str, ob
 def main() -> None:
     parser = argparse.ArgumentParser(description="Relay rolling-window forecast benchmark")
     parser.add_argument("--smoke", action="store_true", help="Run fast smoke preflight")
+    parser.add_argument("--window", type=int, default=None, help="Single smoke window size")
     parser.add_argument("--windows", default="7,14,28", help="Comma-separated window sizes")
     parser.add_argument("--alpha", type=float, default=0.35, help="EWMA smoothing factor")
     args = parser.parse_args()
 
-    windows = [7] if args.smoke else [int(w.strip()) for w in args.windows.split(",") if w.strip()]
+    if args.smoke:
+        windows = [args.window if args.window is not None else 7]
+    else:
+        windows = [int(w.strip()) for w in args.windows.split(",") if w.strip()]
     report = run_sweep(windows=windows, alpha=args.alpha, smoke=args.smoke)
     print(json.dumps(report, indent=2))
 
