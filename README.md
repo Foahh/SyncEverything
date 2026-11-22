@@ -6,6 +6,7 @@ COMP7608 Course Project — Tauri v2 + Rust Monorepo for cross-device local AI a
 
 ```text
 .
+├── AGENTS.md                      # Contributor & AI Agent rules, verification gates & Conventional Commits
 ├── Cargo.toml                     # Rust Workspace (edition 2024, latest stable pinned crates)
 ├── docs/
 │   ├── contracts.md               # Day 1 frozen contracts (MCP, DAG, TaskSpec, Wire RPC, ChaosCase)
@@ -25,15 +26,24 @@ COMP7608 Course Project — Tauri v2 + Rust Monorepo for cross-device local AI a
 
 ## Quick Verification
 
+> Contributors & AI agents: read [AGENTS.md](AGENTS.md) before opening a PR (covers 6-track ownership, Rust/Tauri/HeroUI invariants, and mandatory Conventional Commits).
+
 ```powershell
 # Verify full Rust workspace compiles
 cargo check --workspace
 
-# Run Rust core/daemon tests (including DAG STALE propagation tests)
+# Run Rust core/daemon tests (including DAG STALE, worktree self-healing, iroh P2P & MCP tests)
 cargo test -p relay-core -p relay-daemon
 
-# Export TypeScript bindings once crates/relay-desktop/src exists
-cargo run -p relay-desktop --bin export_bindings -- crates/relay-desktop/src/bindings.ts
+# Export TypeScript bindings after modifying src-tauri commands or contracts
+cd crates/relay-desktop
+pnpm gen:bindings
+
+# Run frontend lint, format check & build
+pnpm format:check && pnpm lint && pnpm build
+
+# Launch desktop workbench (defaults to LocalDualSandbox)
+pnpm tauri dev
 ```
 
 ## Local LLM Setup (Ollama)

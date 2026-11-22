@@ -23,6 +23,7 @@ __pycache__/
 *.db-wal
 *.db-shm
 .relay/
+.relay-desktop/
 
 # Environment & secrets
 .env
