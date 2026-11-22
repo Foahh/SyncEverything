@@ -1,5 +1,6 @@
 [package]
 name = "relay-desktop"
+default-run = "relay-desktop"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
