@@ -329,3 +329,76 @@ fn extracts_the_last_complete_metrics_object_from_stdout() {
     );
     assert_eq!(extract_metrics_json("true\n"), Some(JsonValue::Bool(true)));
 }
+
+#[tokio::test]
+async fn sync_git_head_seeds_and_invalidates_evidence_on_new_commit() {
+    use crate::contracts::{EdgeKind, GraphEdge};
+
+    let temp = TempDir::new();
+    let repo = temp.join("head-watch");
+    init_repo(&repo).await;
+    fs::write(repo.join("README.md"), "v1\n").unwrap();
+    let first_sha = create_initial_commit(&repo).await;
+
+    let engine = RelayEngine::in_memory("watch-repo", Some(repo.clone())).await.unwrap();
+    let sandbox = WorktreeSandbox::new(&repo, temp.join("worktrees"));
+
+    match sync_git_head_into_engine(&engine, &sandbox, "laptop").await.unwrap() {
+        HeadSyncOutcome::Seeded { commit_sha } => assert_eq!(commit_sha, first_sha),
+        other => panic!("expected Seeded, got {other:?}"),
+    }
+    assert!(matches!(
+        sync_git_head_into_engine(&engine, &sandbox, "laptop").await.unwrap(),
+        HeadSyncOutcome::Unchanged
+    ));
+
+    let artifact_id = format!("artifact:{first_sha}");
+    let now = Utc::now();
+    let evidence = GraphNode {
+        id: "ev-1".into(),
+        label: "Baseline".into(),
+        payload: NodeKind::Evidence {
+            task_id: "t-1".into(),
+            preset: "smoke".into(),
+            metrics_json: JsonValue::Number(1.0),
+            log_blob_hash: "hash".into(),
+        },
+        freshness: Freshness::Fresh,
+        device_origin: "host".into(),
+        created_at: now,
+        updated_at: now,
+    };
+    engine
+        .upsert_node_and_edges(
+            evidence,
+            vec![GraphEdge {
+                id: "edge-1".into(),
+                from: artifact_id,
+                to: "ev-1".into(),
+                kind: EdgeKind::ProducedFrom,
+            }],
+        )
+        .await
+        .unwrap();
+
+    fs::write(repo.join("README.md"), "v2\n").unwrap();
+    git(&repo, &["add", "README.md"]).await;
+    git(&repo, &["commit", "-m", "Update forecast logic"]).await;
+    let second_sha = sandbox.head_commit_sha().await.unwrap();
+
+    match sync_git_head_into_engine(&engine, &sandbox, "laptop").await.unwrap() {
+        HeadSyncOutcome::Superseded { commit_sha, report } => {
+            assert_eq!(commit_sha, second_sha);
+            assert_eq!(report.invalidated_evidence_ids, vec!["ev-1"]);
+        }
+        other => panic!("expected Superseded, got {other:?}"),
+    }
+    let snapshot = engine.dag_snapshot(true).await;
+    assert_eq!(snapshot.stale_count, 1);
+    let second_node = snapshot
+        .nodes
+        .iter()
+        .find(|n| n.id == format!("artifact:{second_sha}"))
+        .unwrap();
+    assert_eq!(second_node.label, "Update forecast logic");
+}

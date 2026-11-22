@@ -372,3 +372,28 @@ async fn interactive_host_accepts_one_ticket_and_emits_each_rpc_mutation_once() 
     host.shutdown().await.unwrap();
     client.shutdown().await.unwrap();
 }
+
+#[tokio::test]
+async fn parse_pairing_ticket_accepts_raw_and_daemon_formats() {
+    let temp = TempDir::new();
+    let (node, _) = start_local(&temp, "ticket-node", None).await;
+    let expected = node.addr();
+
+    let raw = serde_json::to_string(&expected).unwrap();
+    assert_eq!(parse_pairing_ticket(&raw).unwrap(), expected);
+
+    let daemon_wrapped = serde_json::json!({
+        "node_id": node.id().to_string(),
+        "addr": expected,
+    })
+    .to_string();
+    assert_eq!(parse_pairing_ticket(&daemon_wrapped).unwrap(), expected);
+
+    let nested_ticket = serde_json::json!({
+        "pairing_ticket": raw,
+    })
+    .to_string();
+    assert_eq!(parse_pairing_ticket(&nested_ticket).unwrap(), expected);
+
+    node.shutdown().await.unwrap();
+}

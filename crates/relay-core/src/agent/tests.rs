@@ -184,3 +184,65 @@ async fn agent_uses_structured_llm_diagnosis() {
     assert_eq!(body["response_format"]["type"], "json_object");
     assert!(body["messages"][1]["content"].as_str().unwrap().contains("Forecast fixture"));
 }
+
+#[tokio::test]
+async fn agent_parses_markdown_fenced_json_diagnosis() {
+    let fenced = "```json\n{\"patch_kind\":\"uv_spec\",\"summary\":\"Install scipy\",\"content\":\"scipy>=1.14\"}\n```";
+    let (url, server) = mock_completion(fenced.into()).await;
+    let proposal = SelfHealingAgent::new(endpoint(url))
+        .diagnose_preflight_failure(&failure("scipy"), "Fixture")
+        .await
+        .unwrap();
+    assert_eq!(proposal.patch_kind, PatchKind::UvSpec);
+    assert_eq!(proposal.content, "scipy>=1.14");
+    let _ = server.await.unwrap();
+}
+
+#[tokio::test]
+async fn llm_client_probe_and_config_persistence_work() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut buf = [0u8; 4096];
+        let count = socket.read(&mut buf).await.unwrap();
+        let req = std::str::from_utf8(&buf[..count]).unwrap().to_owned();
+        let body = r#"{"data":[{"id":"qwen3.5:9b"}]}"#;
+        let http = format!(
+            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+            body.len(),
+        );
+        socket.write_all(http.as_bytes()).await.unwrap();
+        req
+    });
+
+    let cfg = LlmEndpointConfig {
+        tier: InferenceTier::CloudOpenAiCompat,
+        base_url: format!("http://{addr}/v1"),
+        model: "qwen3.5:9b".into(),
+        api_key_env: None,
+        api_key: Some("sk-test-secret-1234".into()),
+    };
+    let view = cfg.redacted_view();
+    assert!(view.has_api_key);
+    assert_eq!(view.api_key_hint.as_deref(), Some("sk-••••1234"));
+
+    let tmp_path = std::env::temp_dir()
+        .join(format!("relay-llm-cfg-{}", Uuid::now_v7()))
+        .join("llm-settings.json");
+    save_llm_config(&tmp_path, &cfg).unwrap();
+    let loaded = load_llm_config(&tmp_path).unwrap();
+    assert_eq!(loaded, cfg);
+    let _ = std::fs::remove_dir_all(tmp_path.parent().unwrap());
+
+    let client = LlmClient::new(loaded, Duration::from_secs(5)).unwrap();
+    let probe = client.probe().await;
+    assert!(probe.ok, "probe failed: {}", probe.message);
+    assert!(probe.message.contains("qwen3.5:9b"));
+    let req = server.await.unwrap();
+    assert!(req.starts_with("GET /v1/models HTTP/1.1\r\n"), "{req}");
+    assert!(
+        req.to_ascii_lowercase().contains("authorization: bearer sk-test-secret-1234"),
+        "{req}"
+    );
+}

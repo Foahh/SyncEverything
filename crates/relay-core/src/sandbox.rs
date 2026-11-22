@@ -6,8 +6,12 @@ pub use execution::{
     PreflightReport, PresetRunOutput, detect_missing_python_module, extract_metrics_json,
 };
 
-use crate::contracts::{CommandPreset, RelayManifest, TaskId};
+use crate::contracts::{
+    CommandPreset, Freshness, GraphNode, NodeKind, RelayManifest, StalePropagationReport, TaskId,
+};
+use crate::engine::RelayEngine;
 use crate::error::{RelayError, RelayResult};
+use chrono::Utc;
 use std::path::{Path, PathBuf};
 use std::process::Output;
 use tokio::io::AsyncReadExt;
@@ -55,6 +59,18 @@ impl WorktreeSandbox {
 
     pub async fn head_commit_sha(&self) -> RelayResult<String> {
         self.resolve_commit("HEAD").await
+    }
+
+    pub async fn commit_subject(&self, commit_sha: &str) -> RelayResult<String> {
+        let sha = self.resolve_commit(commit_sha).await?;
+        let output = git_output(git_command(&self.repo_root).args([
+            "log",
+            "-1",
+            "--format=%s",
+            &sha,
+        ]))
+        .await?;
+        Ok(output_text(&output.stdout))
     }
 
     pub(crate) async fn branch_name(&self) -> RelayResult<String> {
@@ -404,6 +420,106 @@ async fn working_diff(repo_root: &Path) -> RelayResult<String> {
     .await?;
     String::from_utf8(output.stdout)
         .map_err(|error| RelayError::Git(format!("working diff is not valid UTF-8: {error}")))
+}
+
+/// Result of checking a Git repository's `HEAD` against the engine DAG.
+#[derive(Debug, Clone)]
+pub enum HeadSyncOutcome {
+    Unchanged,
+    Seeded {
+        commit_sha: String,
+    },
+    Superseded {
+        commit_sha: String,
+        report: StalePropagationReport,
+    },
+}
+
+/// Build an `Artifact` DAG node from a real Git commit in `sandbox`.
+pub async fn build_git_artifact_node(
+    sandbox: &WorktreeSandbox,
+    commit_sha: String,
+    device_origin: String,
+) -> RelayResult<GraphNode> {
+    let fingerprint = compute_env_fingerprint(sandbox.repo_root())?;
+    let (changed_files, dirty, subject) = tokio::join!(
+        sandbox.changed_files_in_commit(&commit_sha),
+        sandbox.is_working_tree_dirty(),
+        sandbox.commit_subject(&commit_sha),
+    );
+    let short_sha: String = commit_sha.chars().take(7).collect();
+    let label = subject
+        .ok()
+        .map(|text| text.trim().to_owned())
+        .filter(|text| !text.is_empty())
+        .unwrap_or_else(|| format!("Commit {short_sha}"));
+    let now = Utc::now();
+    Ok(GraphNode {
+        id: format!("artifact:{commit_sha}"),
+        label,
+        payload: NodeKind::Artifact {
+            git_commit_sha: commit_sha,
+            env_fingerprint: fingerprint,
+            working_tree_dirty: dirty.unwrap_or_default(),
+            changed_files: changed_files.unwrap_or_default(),
+        },
+        freshness: Freshness::Fresh,
+        device_origin,
+        created_at: now,
+        updated_at: now,
+    })
+}
+
+/// Inspect the repository's live Git `HEAD` and seed or supersede the DAG if a new commit exists.
+pub async fn sync_git_head_into_engine(
+    engine: &RelayEngine,
+    sandbox: &WorktreeSandbox,
+    device_origin: impl Into<String>,
+) -> RelayResult<HeadSyncOutcome> {
+    let head_sha = sandbox.head_commit_sha().await?;
+    let snapshot = engine.dag_snapshot(true).await;
+    if snapshot.head_commit_sha.as_deref() == Some(head_sha.as_str()) {
+        return Ok(HeadSyncOutcome::Unchanged);
+    }
+
+    // Find the current active artifact (prefer the node matching head_commit_sha, else newest artifact).
+    let previous_artifact_id = snapshot
+        .head_commit_sha
+        .as_deref()
+        .and_then(|sha| {
+            snapshot.nodes.iter().find_map(|node| match &node.payload {
+                NodeKind::Artifact { git_commit_sha, .. } if git_commit_sha == sha => {
+                    Some(node.id.clone())
+                }
+                _ => None,
+            })
+        })
+        .or_else(|| {
+            snapshot
+                .nodes
+                .iter()
+                .filter(|node| matches!(node.payload, NodeKind::Artifact { .. }))
+                .max_by_key(|node| node.updated_at)
+                .map(|node| node.id.clone())
+        });
+
+    let artifact = build_git_artifact_node(sandbox, head_sha.clone(), device_origin.into()).await?;
+    let short_sha: String = head_sha.chars().take(7).collect();
+    if let Some(old_id) = previous_artifact_id
+        && old_id != artifact.id
+    {
+        let reason = format!("Git commit {short_sha}: {}", artifact.label);
+        let report = engine.supersede_artifact(&old_id, artifact, reason).await?;
+        Ok(HeadSyncOutcome::Superseded {
+            commit_sha: head_sha,
+            report,
+        })
+    } else {
+        engine.upsert_node_and_edges(artifact, Vec::new()).await?;
+        Ok(HeadSyncOutcome::Seeded {
+            commit_sha: head_sha,
+        })
+    }
 }
 
 #[cfg(test)]

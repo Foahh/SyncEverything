@@ -1,10 +1,13 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
+use relay_core::agent::{
+    InferenceTier, LlmClient, LlmEndpointConfig, load_llm_config, run_host_task_pipeline,
+};
 use relay_core::contracts::RuntimeMode;
 use relay_core::engine::RelayEngine;
 use relay_core::mcp::RelayMcpServer;
-use relay_core::sandbox::WorktreeSandbox;
-use relay_core::sync::{NetworkProfile, RelayNode};
+use relay_core::sandbox::{HeadSyncOutcome, WorktreeSandbox, load_manifest, sync_git_head_into_engine};
+use relay_core::sync::{NetworkProfile, RelayNode, RelayNodeConfig, RelayNodeEvent};
 use rmcp::ServiceExt;
 use rmcp::transport::streamable_http_server::{
     StreamableHttpServerConfig, StreamableHttpService, session::local::LocalSessionManager,
@@ -16,7 +19,11 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::TcpListener;
-use tracing::info;
+use tokio::sync::mpsc;
+use tokio::time::{self, MissedTickBehavior};
+use tracing::{info, warn};
+
+const GIT_WATCH_INTERVAL: Duration = Duration::from_secs(2);
 
 #[derive(Debug, Parser)]
 #[command(name = "relay-daemon", about = "Relay headless Host/Client daemon & MCP server")]
@@ -30,18 +37,30 @@ struct Cli {
     #[arg(long, global = true)]
     repo_id: Option<String>,
 
+    #[arg(long, global = true, env = "RELAY_LLM_BASE_URL")]
+    llm_base_url: Option<String>,
+
+    #[arg(long, global = true, env = "RELAY_LLM_MODEL")]
+    llm_model: Option<String>,
+
+    #[arg(long, global = true, env = "RELAY_LLM_API_KEY")]
+    llm_api_key: Option<String>,
+
     #[command(subcommand)]
     command: Commands,
 }
 
 #[derive(Debug, Subcommand)]
 enum Commands {
-    /// Start the Relay Host with P2P sync and Streamable HTTP MCP.
+    /// Start the Relay Host with P2P sync, pairing ticket, Host executor, and Streamable HTTP MCP.
     Serve {
         #[arg(long, default_value = "127.0.0.1:7608")]
         mcp_addr: SocketAddr,
         #[arg(long)]
         local_only: bool,
+        /// Seconds to accept an incoming P2P pairing request (0 = 24 hours).
+        #[arg(long, default_value_t = 600)]
+        pairing_window_secs: u64,
     },
     /// Serve Relay MCP over stdio (compatible with dsh 0.2.0-rc.2).
     McpStdio,
@@ -52,6 +71,8 @@ enum Commands {
     },
     /// Start isolated Host and Client nodes and check the loopback route.
     SandboxDual,
+    /// Probe the configured Ollama or OpenAI-compatible Cloud LLM endpoint.
+    LlmCheck,
 }
 
 struct Repository {
@@ -87,6 +108,7 @@ impl Repository {
         let sandbox = self
             .root
             .as_ref()
+            .filter(|root| root.join(".git").exists() && load_manifest(root).is_ok())
             .map(|root| WorktreeSandbox::new(root, data_dir.join("worktrees")));
         Ok((Arc::new(engine), sandbox))
     }
@@ -111,6 +133,29 @@ fn manifest_repo_id(root: &Path) -> Result<Option<String>> {
     ))
 }
 
+fn resolve_llm_config(cli: &Cli) -> Result<LlmEndpointConfig> {
+    let mut cfg = load_llm_config(&cli.data_dir.join("llm-settings.json"))?;
+    if let Some(base_url) = &cli.llm_base_url
+        && !base_url.trim().is_empty()
+    {
+        cfg.base_url = base_url.trim().to_owned();
+    }
+    if let Some(model) = &cli.llm_model
+        && !model.trim().is_empty()
+    {
+        cfg.model = model.trim().to_owned();
+    }
+    if let Some(api_key) = &cli.llm_api_key
+        && !api_key.trim().is_empty()
+    {
+        cfg.api_key = Some(api_key.trim().to_owned());
+        if cfg.tier == InferenceTier::HostLocalOllama {
+            cfg.tier = InferenceTier::CloudOpenAiCompat;
+        }
+    }
+    Ok(cfg)
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
@@ -122,11 +167,22 @@ async fn main() -> Result<()> {
         .with_writer(std::io::stderr)
         .init();
 
-    let repo = Repository::resolve(cli.repo_root, cli.repo_id)?;
+    if matches!(cli.command, Commands::LlmCheck) {
+        let cfg = resolve_llm_config(&cli)?;
+        let client = LlmClient::new(cfg, Duration::from_secs(15))?;
+        let probe = client.probe().await;
+        println!("{}", serde_json::to_string_pretty(&probe)?);
+        anyhow::ensure!(probe.ok, "LLM probe failed: {}", probe.message);
+        return Ok(());
+    }
+
+    let repo = Repository::resolve(cli.repo_root.clone(), cli.repo_id.clone())?;
+    let llm_config = resolve_llm_config(&cli)?;
     match cli.command {
         Commands::Serve {
             mcp_addr,
             local_only,
+            pairing_window_secs,
         } => {
             let profile = if local_only {
                 NetworkProfile::LocalOnly
@@ -134,14 +190,19 @@ async fn main() -> Result<()> {
                 NetworkProfile::StandardN0
             };
             let listener = TcpListener::bind(mcp_addr).await?;
+            let bound_addr = listener.local_addr()?;
             let (engine, sandbox) = repo.open(&cli.data_dir).await?;
             engine.set_runtime_mode(RuntimeMode::Host).await?;
+            let (event_tx, event_rx) = mpsc::unbounded_channel();
             let node = Arc::new(
-                RelayNode::start_with_engine(
+                RelayNode::start_with_events(
                     &cli.data_dir.join("blobs"),
                     engine.clone(),
-                    sandbox.clone(),
-                    profile,
+                    RelayNodeConfig {
+                        profile,
+                        sandbox: sandbox.clone(),
+                    },
+                    event_tx,
                 )
                 .await?,
             );
@@ -149,9 +210,62 @@ async fn main() -> Result<()> {
                 // Give the relay address time to appear while allowing offline startup.
                 let _ = tokio::time::timeout(Duration::from_secs(5), node.endpoint().online()).await;
             }
-            println!("{}", json!({"node_id": node.id().to_string(), "addr": node.addr()}));
-            let server = RelayMcpServer::new(engine, sandbox, Some(node.clone()));
+            let window = Duration::from_secs(if pairing_window_secs == 0 {
+                86_400
+            } else {
+                pairing_window_secs
+            });
+            node.open_pairing_window(window);
+
+            if let Some(sb) = &sandbox {
+                match sync_git_head_into_engine(&engine, sb, node.id().to_string()).await {
+                    Ok(HeadSyncOutcome::Seeded { commit_sha }) => {
+                        info!(commit = %commit_sha, "Seeded repository HEAD artifact");
+                    }
+                    Ok(HeadSyncOutcome::Superseded { commit_sha, report }) => {
+                        info!(
+                            commit = %commit_sha,
+                            invalidated = report.invalidated_evidence_ids.len(),
+                            "Superseded DAG artifact from Git HEAD"
+                        );
+                    }
+                    Ok(HeadSyncOutcome::Unchanged) => {}
+                    Err(error) => warn!(%error, "Unable to read initial Git HEAD"),
+                }
+            }
+
+            let addr = node.addr();
+            let pairing_ticket = serde_json::to_string(&addr)?;
+            println!(
+                "{}",
+                json!({
+                    "node_id": node.id().to_string(),
+                    "repo_id": engine.repo_id(),
+                    "mcp_url": format!("http://{bound_addr}/mcp"),
+                    "addr": addr,
+                    "pairing_ticket": pairing_ticket,
+                })
+            );
+            eprintln!("Relay Host pairing ticket (paste into Relay Desktop -> Pair Device):");
+            eprintln!("{pairing_ticket}");
+
+            let server = RelayMcpServer::new(engine.clone(), sandbox.clone(), Some(node.clone()));
+            let events_task = spawn_host_event_loop(
+                event_rx,
+                engine.clone(),
+                server.clone(),
+                sandbox.clone(),
+                llm_config,
+            );
+            let git_task = sandbox.clone().map(|sb| {
+                spawn_git_head_watcher(engine.clone(), sb, node.id().to_string())
+            });
+
             let http_result = serve_mcp_http(listener, server).await;
+            events_task.abort();
+            if let Some(task) = git_task {
+                task.abort();
+            }
             let node_result = node.shutdown_shared().await;
             http_result?;
             node_result?;
@@ -168,9 +282,90 @@ async fn main() -> Result<()> {
             serve_mcp_http(TcpListener::bind(addr).await?, server).await?;
         }
         Commands::SandboxDual => sandbox_dual(&repo, &cli.data_dir).await?,
+        Commands::LlmCheck => unreachable!(),
     }
 
     Ok(())
+}
+
+fn spawn_host_event_loop(
+    mut events: mpsc::UnboundedReceiver<RelayNodeEvent>,
+    engine: Arc<RelayEngine>,
+    mcp: RelayMcpServer,
+    sandbox: Option<WorktreeSandbox>,
+    llm_config: LlmEndpointConfig,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        while let Some(event) = events.recv().await {
+            match event {
+                RelayNodeEvent::PeerPaired => {
+                    info!("Remote peer paired with Relay Host");
+                }
+                RelayNodeEvent::DagChanged => {
+                    info!("DAG updated via peer sync");
+                }
+                RelayNodeEvent::TaskSubmitted(task_id) => {
+                    if sandbox.is_none() {
+                        warn!(%task_id, "Task submitted but no Git + relay.toml sandbox is configured");
+                        continue;
+                    }
+                    let engine = engine.clone();
+                    let mcp = mcp.clone();
+                    let llm_config = llm_config.clone();
+                    tokio::spawn(async move {
+                        match run_host_task_pipeline(&engine, &mcp, llm_config, task_id).await {
+                            Ok(outcome) => info!(%task_id, ?outcome, "Host task pipeline finished"),
+                            Err(error) => warn!(%task_id, %error, "Host task pipeline failed"),
+                        }
+                    });
+                }
+                RelayNodeEvent::ApprovalResolved(task_id, decision) => {
+                    if sandbox.is_none() {
+                        continue;
+                    }
+                    let mcp = mcp.clone();
+                    tokio::spawn(async move {
+                        match mcp.finish_ui_approval(task_id, decision).await {
+                            Ok(record) => info!(
+                                %task_id,
+                                state = ?record.state,
+                                "Host approval execution finished"
+                            ),
+                            Err(error) => warn!(%task_id, %error, "Host approval execution failed"),
+                        }
+                    });
+                }
+            }
+        }
+    })
+}
+
+fn spawn_git_head_watcher(
+    engine: Arc<RelayEngine>,
+    sandbox: WorktreeSandbox,
+    device_origin: String,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut interval = time::interval(GIT_WATCH_INTERVAL);
+        interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
+        loop {
+            interval.tick().await;
+            match sync_git_head_into_engine(&engine, &sandbox, device_origin.clone()).await {
+                Ok(HeadSyncOutcome::Superseded { commit_sha, report }) => {
+                    info!(
+                        commit = %commit_sha,
+                        invalidated = report.invalidated_evidence_ids.len(),
+                        "Detected Git commit; cascaded STALE freshness"
+                    );
+                }
+                Ok(HeadSyncOutcome::Seeded { commit_sha }) => {
+                    info!(commit = %commit_sha, "Seeded Git HEAD artifact");
+                }
+                Ok(HeadSyncOutcome::Unchanged) => {}
+                Err(error) => warn!(%error, "Git HEAD watcher check failed"),
+            }
+        }
+    })
 }
 
 async fn serve_mcp_http(listener: TcpListener, server: RelayMcpServer) -> Result<()> {

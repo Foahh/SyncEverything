@@ -486,6 +486,28 @@ fn unexpected_response(response: WireResponse, expected: &str) -> RelayError {
     }
 }
 
+/// Parse either a raw `EndpointAddr` JSON ticket or a daemon JSON object containing `addr` or `pairing_ticket`.
+pub fn parse_pairing_ticket(raw: &str) -> RelayResult<EndpointAddr> {
+    let trimmed = raw.trim();
+    if let Ok(addr) = serde_json::from_str::<EndpointAddr>(trimmed) {
+        return Ok(addr);
+    }
+    let value: serde_json::Value = serde_json::from_str(trimmed)?;
+    if let Some(addr_val) = value.get("addr") {
+        return Ok(serde_json::from_value(addr_val.clone())?);
+    }
+    if let Some(ticket_val) = value.get("pairing_ticket") {
+        if let Some(nested) = ticket_val.as_str() {
+            return Ok(serde_json::from_str(nested)?);
+        }
+        return Ok(serde_json::from_value(ticket_val.clone())?);
+    }
+    Err(RelayError::Transport(
+        "pairing ticket must be a valid iroh EndpointAddr JSON or daemon output containing 'addr'"
+            .into(),
+    ))
+}
+
 fn transport_error(error: impl std::fmt::Display) -> RelayError {
     RelayError::Transport(error.to_string())
 }
