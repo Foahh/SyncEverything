@@ -1,4 +1,15 @@
-import { Button, Input, Label, Modal, TextArea } from "@heroui/react";
+import { Button } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import { Field, FieldGroup, FieldLabel } from "@/components/ui/field";
+import { Input } from "@/components/ui/input";
+import { Textarea } from "@/components/ui/textarea";
 import { StickyNote } from "lucide-react";
 import { useForm } from "react-hook-form";
 import { useTranslation } from "react-i18next";
@@ -27,7 +38,7 @@ export function RecordDecisionModal({
     register,
     handleSubmit,
     reset,
-    formState: { isValid },
+    formState: { isValid, errors },
   } = useForm<RecordDecisionFormValues>({
     mode: "onChange",
     defaultValues: {
@@ -52,77 +63,69 @@ export function RecordDecisionModal({
   });
 
   return (
-    <Modal isOpen={isOpen} onOpenChange={onOpenChange}>
-      <Modal.Backdrop variant="blur">
-        <Modal.Container placement="center" size="lg">
-          <Modal.Dialog className="border border-[var(--relay-border)] bg-[var(--relay-surface)] text-[var(--relay-text)]">
-            <Modal.CloseTrigger />
-            <Modal.Header>
-              <div className="flex items-center gap-2.5">
-                <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-indigo-500/12 text-indigo-600 dark:text-indigo-400">
-                  <StickyNote className="h-4 w-4" />
-                </div>
-                <div>
-                  <Modal.Heading className="text-[15px] font-semibold">
-                    {t("modals.note.title")}
-                  </Modal.Heading>
-                  <p className="text-[12px] text-[var(--relay-text-muted)]">
-                    {t("modals.note.subtitle")}
-                  </p>
-                </div>
-              </div>
-            </Modal.Header>
-            <form onSubmit={onSubmit}>
-              <Modal.Body className="space-y-3.5 py-3">
-                <div className="space-y-1.5">
-                  <Label htmlFor="note-label" isRequired className="text-[12px] font-medium">
-                    {t("modals.note.titleLabel")}
-                  </Label>
-                  <Input
-                    id="note-label"
-                    fullWidth
-                    placeholder={t("modals.note.titlePlaceholder")}
-                    {...register("label", { required: true, minLength: 2 })}
-                  />
-                </div>
+    <Dialog open={isOpen} onOpenChange={onOpenChange}>
+      <DialogContent className="sm:max-w-lg">
+        <DialogHeader>
+          <div className="flex items-center gap-2.5">
+            <div className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary">
+              <StickyNote className="size-4" />
+            </div>
+            <div className="flex flex-col gap-0.5">
+              <DialogTitle>{t("modals.note.title")}</DialogTitle>
+              <DialogDescription>{t("modals.note.subtitle")}</DialogDescription>
+            </div>
+          </div>
+        </DialogHeader>
 
-                <div className="space-y-1.5">
-                  <Label htmlFor="note-why" isRequired className="text-[12px] font-medium">
-                    {t("modals.note.whyLabel")}
-                  </Label>
-                  <TextArea
-                    id="note-why"
-                    fullWidth
-                    rows={3}
-                    placeholder={t("modals.note.whyPlaceholder")}
-                    {...register("rationale", { required: true, minLength: 3 })}
-                  />
-                </div>
+        <form onSubmit={onSubmit} className="flex flex-col gap-4">
+          <FieldGroup>
+            <Field data-invalid={!!errors.label}>
+              <FieldLabel htmlFor="note-label">
+                {t("modals.note.titleLabel")}
+                <span className="text-destructive">*</span>
+              </FieldLabel>
+              <Input
+                id="note-label"
+                aria-invalid={!!errors.label}
+                placeholder={t("modals.note.titlePlaceholder")}
+                {...register("label", { required: true, minLength: 2 })}
+              />
+            </Field>
 
-                <div className="space-y-1.5">
-                  <Label htmlFor="note-rules" className="text-[12px] font-medium">
-                    {t("modals.note.rulesLabel")}
-                  </Label>
-                  <Input
-                    id="note-rules"
-                    fullWidth
-                    placeholder={t("modals.note.rulesPlaceholder")}
-                    {...register("constraintsRaw")}
-                  />
-                </div>
-              </Modal.Body>
-              <Modal.Footer className="gap-2">
-                <Button variant="secondary" onPress={() => onOpenChange(false)}>
-                  {t("modals.note.cancel")}
-                </Button>
-                <Button type="submit" variant="primary" isDisabled={!isValid || isSubmitting}>
-                  {t("modals.note.submit")}
-                </Button>
-              </Modal.Footer>
-            </form>
-          </Modal.Dialog>
-        </Modal.Container>
-      </Modal.Backdrop>
-    </Modal>
+            <Field data-invalid={!!errors.rationale}>
+              <FieldLabel htmlFor="note-why">
+                {t("modals.note.whyLabel")}
+                <span className="text-destructive">*</span>
+              </FieldLabel>
+              <Textarea
+                id="note-why"
+                rows={3}
+                aria-invalid={!!errors.rationale}
+                placeholder={t("modals.note.whyPlaceholder")}
+                {...register("rationale", { required: true, minLength: 3 })}
+              />
+            </Field>
+
+            <Field>
+              <FieldLabel htmlFor="note-rules">{t("modals.note.rulesLabel")}</FieldLabel>
+              <Input
+                id="note-rules"
+                placeholder={t("modals.note.rulesPlaceholder")}
+                {...register("constraintsRaw")}
+              />
+            </Field>
+          </FieldGroup>
+
+          <DialogFooter>
+            <Button type="button" variant="outline" size="lg" onClick={() => onOpenChange(false)}>
+              {t("modals.note.cancel")}
+            </Button>
+            <Button type="submit" size="lg" disabled={!isValid || isSubmitting}>
+              {t("modals.note.submit")}
+            </Button>
+          </DialogFooter>
+        </form>
+      </DialogContent>
+    </Dialog>
   );
 }

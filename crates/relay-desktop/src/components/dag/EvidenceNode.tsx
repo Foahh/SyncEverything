@@ -1,8 +1,9 @@
-import { Chip } from "@heroui/react";
+import { Badge } from "@/components/ui/badge";
+import { cn } from "@/lib/utils";
 import { Handle, Position, type NodeProps } from "@xyflow/react";
 import { AlertCircle, BarChart3 } from "lucide-react";
 import { useTranslation } from "react-i18next";
-import type { JsonValue } from "../../bindings";
+import type { GraphNode, JsonValue } from "../../bindings";
 import type { RelayFlowNode } from "../../lib/dagLayout";
 
 const ACRONYMS = new Set(["mae", "rmse", "mse", "r2", "ms", "cpu", "gpu", "rtt"]);
@@ -30,68 +31,88 @@ function extractHeadlineMetrics(metrics: JsonValue): Array<[string, string]> {
     ]);
 }
 
+function freshnessBadgeStyle(status: GraphNode["freshness"]["status"]): {
+  variant: "destructive" | "secondary";
+  className?: string;
+} {
+  if (status === "stale") {
+    return { variant: "destructive" };
+  }
+  if (status === "pending_verify") {
+    return {
+      variant: "secondary",
+      className: "bg-amber-500/15 text-amber-700 dark:bg-amber-500/20 dark:text-amber-300",
+    };
+  }
+  return {
+    variant: "secondary",
+    className: "bg-emerald-500/12 text-emerald-700 dark:bg-emerald-500/20 dark:text-emerald-300",
+  };
+}
+
+function evidenceCardStyle(isStale: boolean, selected: boolean): string {
+  if (isStale) {
+    return cn(
+      "relay-node-stale border-destructive/70 bg-[var(--relay-stale-soft)]",
+      selected && "ring-2 ring-destructive/30",
+    );
+  }
+  return cn(
+    "bg-card",
+    selected
+      ? "border-emerald-500 ring-2 ring-emerald-500/20 shadow-md"
+      : "border-border shadow-xs hover:border-foreground/20 hover:shadow-sm",
+  );
+}
+
 export function EvidenceNode({ data, selected }: NodeProps<RelayFlowNode>) {
   const { t } = useTranslation();
   const { node } = data;
   if (node.payload.kind !== "evidence") return null;
 
   const isStale = node.freshness.status === "stale";
-  const isPending = node.freshness.status === "pending_verify";
   const metrics = extractHeadlineMetrics(node.payload.metrics_json);
+  const badge = freshnessBadgeStyle(node.freshness.status);
 
   return (
     <div
-      className={[
-        "w-[264px] rounded-2xl border px-4 py-3.5 transition-all duration-200",
-        isStale
-          ? "relay-node-stale border-red-400/80 bg-[var(--relay-stale-soft)]"
-          : "bg-[var(--relay-surface)]",
-        !isStale && selected
-          ? "border-teal-500 ring-2 ring-teal-500/20 shadow-md"
-          : !isStale
-            ? "border-[var(--relay-border)] shadow-xs hover:border-[var(--relay-border-strong)] hover:shadow-sm"
-            : selected
-              ? "ring-2 ring-red-500/30"
-              : "",
-      ].join(" ")}
+      className={cn(
+        "w-[264px] rounded-xl border px-4 py-3.5 transition-all duration-200",
+        evidenceCardStyle(isStale, Boolean(selected)),
+      )}
     >
       <div className="flex items-center justify-between gap-2">
         <span
-          className={[
+          className={cn(
             "inline-flex items-center gap-1.5 text-[11px] font-medium",
-            isStale ? "text-red-600 dark:text-red-400" : "text-teal-700 dark:text-teal-400",
-          ].join(" ")}
+            isStale ? "text-destructive" : "text-emerald-700 dark:text-emerald-400",
+          )}
         >
-          <BarChart3 className="h-3.5 w-3.5" />
+          <BarChart3 className="size-3.5" />
           {t("canvas.kind.evidence")}
         </span>
 
-        <Chip
-          size="sm"
-          variant={isStale ? "primary" : "soft"}
-          color={isStale ? "danger" : isPending ? "warning" : "success"}
-          className="h-5 px-2 text-[10.5px] font-medium"
-        >
+        <Badge variant={badge.variant} className={badge.className}>
           {t(`canvas.status.${node.freshness.status}`)}
-        </Chip>
+        </Badge>
       </div>
 
-      <h4 className="mt-1.5 text-[13.5px] font-semibold leading-snug text-[var(--relay-text)]">
+      <h4 className="mt-1.5 text-[13px] font-semibold leading-snug text-foreground">
         {node.label}
       </h4>
 
       {metrics.length > 0 && (
-        <div className="mt-2.5 grid grid-cols-2 gap-2 rounded-xl bg-[var(--relay-surface-subtle)]/90 px-3 py-2">
+        <div className="mt-2.5 grid grid-cols-2 gap-2 rounded-lg bg-muted/80 px-3 py-2">
           {metrics.map(([label, val]) => (
             <div key={label} className="min-w-0">
-              <div className="truncate text-[10.5px] text-[var(--relay-text-faint)]">{label}</div>
+              <div className="truncate text-[10.5px] text-muted-foreground">{label}</div>
               <div
-                className={[
-                  "font-mono-tech truncate text-[14px] font-semibold",
+                className={cn(
+                  "font-mono-tech truncate text-sm font-semibold",
                   isStale
-                    ? "line-through decoration-red-500/80 text-red-700/70 dark:text-red-300/70"
-                    : "text-[var(--relay-text)]",
-                ].join(" ")}
+                    ? "text-destructive/75 line-through decoration-destructive/80"
+                    : "text-foreground",
+                )}
               >
                 {val}
               </div>
@@ -101,8 +122,8 @@ export function EvidenceNode({ data, selected }: NodeProps<RelayFlowNode>) {
       )}
 
       {isStale && (
-        <div className="mt-2 flex items-center gap-1.5 text-[11px] font-medium text-red-600 dark:text-red-400">
-          <AlertCircle className="h-3.5 w-3.5 shrink-0" />
+        <div className="mt-2 flex items-center gap-1.5 text-[11px] font-medium text-destructive">
+          <AlertCircle className="size-3.5 shrink-0" />
           <span>{t("canvas.outdatedHint")}</span>
         </div>
       )}
@@ -110,15 +131,15 @@ export function EvidenceNode({ data, selected }: NodeProps<RelayFlowNode>) {
       <Handle
         type="target"
         position={Position.Left}
-        className={[
-          "!h-2 !w-2 !border-2 !border-[var(--relay-surface)]",
-          isStale ? "!bg-red-500" : "!bg-teal-500",
-        ].join(" ")}
+        className={cn(
+          "!size-2 !border-2 !border-card",
+          isStale ? "!bg-destructive" : "!bg-emerald-500",
+        )}
       />
       <Handle
         type="source"
         position={Position.Right}
-        className="!h-2 !w-2 !border-2 !border-[var(--relay-surface)] !bg-slate-400"
+        className="!size-2 !border-2 !border-card !bg-muted-foreground"
       />
     </div>
   );

@@ -1,4 +1,7 @@
-import { Button, Chip, Separator } from "@heroui/react";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { Separator } from "@/components/ui/separator";
+import { cn } from "@/lib/utils";
 import {
   ArrowRight,
   CheckCircle2,
@@ -37,22 +40,30 @@ interface LeftRailProps {
 
 const RUNTIME_MODES: RuntimeMode[] = ["client", "host", "local_dual_sandbox"];
 
-function stateBadgeColor(
-  state: TaskState,
-): "default" | "accent" | "success" | "warning" | "danger" {
+function stateBadgeProps(state: TaskState): {
+  variant: "default" | "secondary" | "destructive" | "outline";
+  className?: string;
+} {
   switch (state) {
     case "completed":
-      return "success";
+      return {
+        variant: "secondary",
+        className:
+          "bg-emerald-500/12 text-emerald-700 dark:bg-emerald-500/20 dark:text-emerald-300",
+      };
     case "self_healing_proposed":
-      return "accent";
+      return { variant: "default" };
     case "queued":
     case "preflight_running":
     case "executing":
-      return "warning";
+      return {
+        variant: "secondary",
+        className: "bg-amber-500/15 text-amber-700 dark:bg-amber-500/20 dark:text-amber-300",
+      };
     case "failed":
     case "stale":
     case "rejected":
-      return "danger";
+      return { variant: "destructive" };
   }
 }
 
@@ -76,36 +87,28 @@ export function LeftRail({
   const pendingOutbox = status?.pending_outbox_count ?? 0;
 
   return (
-    <aside className="flex h-full w-[268px] shrink-0 flex-col border-r border-[var(--relay-border)] bg-[var(--relay-surface)]">
-      {/* Main scrollable section */}
-      <div className="flex-1 overflow-y-auto p-3.5 space-y-5">
-        {/* Primary Action */}
-        <Button
-          variant="primary"
-          fullWidth
-          className="h-9 text-[13px] font-semibold shadow-xs"
-          onPress={onOpenRunTask}
-        >
-          <Play className="h-3.5 w-3.5" />
+    <aside className="flex h-full w-[268px] shrink-0 flex-col border-r border-border bg-sidebar text-sidebar-foreground">
+      <div className="flex flex-1 flex-col gap-5 overflow-y-auto p-3.5">
+        <Button size="lg" className="w-full justify-center font-medium" onClick={onOpenRunTask}>
+          <Play data-icon="inline-start" />
           {t("sidebar.runOnHost")}
         </Button>
 
-        {/* Connection Summary */}
-        <section className="space-y-2">
-          <div className="text-[11px] font-medium text-[var(--relay-text-faint)]">
+        <section className="flex flex-col gap-2">
+          <div className="text-[11px] font-medium text-muted-foreground">
             {t("sidebar.deviceSection")}
           </div>
-          <div className="rounded-xl border border-[var(--relay-border)] bg-[var(--relay-surface-subtle)]/70 p-3">
+          <div className="flex flex-col gap-2.5 rounded-xl border border-border bg-card p-3">
             <div className="flex items-center justify-between gap-2">
-              <div className="flex items-center gap-2 min-w-0">
-                <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-[var(--relay-surface)] text-teal-600 shadow-2xs dark:text-teal-400">
-                  <Cpu className="h-3.5 w-3.5" />
+              <div className="flex min-w-0 items-center gap-2">
+                <div className="flex size-7 shrink-0 items-center justify-center rounded-lg bg-muted text-primary">
+                  <Cpu className="size-3.5" />
                 </div>
                 <div className="min-w-0">
-                  <div className="truncate text-[12.5px] font-semibold text-[var(--relay-text)]">
+                  <div className="truncate text-xs font-semibold text-foreground">
                     {isConnected ? t("sidebar.connectedTo") : t("sidebar.waitingPeer")}
                   </div>
-                  <div className="text-[11px] text-[var(--relay-text-faint)]">
+                  <div className="text-[11px] text-muted-foreground">
                     {t(`sidebar.mode.${activeMode}`)}
                     {pendingOutbox > 0
                       ? ` · ${t("sidebar.queuedCount", { count: pendingOutbox })}`
@@ -114,90 +117,77 @@ export function LeftRail({
                 </div>
               </div>
               <span
-                className={[
-                  "h-2 w-2 shrink-0 rounded-full",
-                  isConnected ? "bg-teal-500" : "bg-amber-500",
-                ].join(" ")}
+                className={cn(
+                  "size-2 shrink-0 rounded-full",
+                  isConnected ? "bg-emerald-500" : "bg-amber-500",
+                )}
               />
             </div>
 
-            <Button
-              size="sm"
-              variant="outline"
-              fullWidth
-              className="mt-2.5 h-7 text-[11.5px]"
-              onPress={onOpenPairModal}
-            >
-              <Link2 className="h-3 w-3" />
+            <Button variant="outline" size="default" className="w-full" onClick={onOpenPairModal}>
+              <Link2 data-icon="inline-start" />
               {t("topbar.pairDevice")}
             </Button>
           </div>
         </section>
 
-        {/* Runs List */}
-        <section className="space-y-2">
+        <section className="flex flex-col gap-2">
           <div className="flex items-center justify-between">
-            <span className="text-[11px] font-medium text-[var(--relay-text-faint)]">
+            <span className="text-[11px] font-medium text-muted-foreground">
               {t("sidebar.runsSection")}
             </span>
             {tasks.length > 0 && (
-              <span className="font-mono-tech text-[11px] text-[var(--relay-text-faint)]">
+              <span className="font-mono-tech text-[11px] text-muted-foreground">
                 {tasks.length}
               </span>
             )}
           </div>
 
           {tasks.length === 0 ? (
-            <div className="rounded-xl border border-dashed border-[var(--relay-border)] px-3 py-5 text-center text-[12px] leading-relaxed text-[var(--relay-text-faint)]">
+            <div className="rounded-xl border border-dashed border-border px-3 py-5 text-center text-xs leading-relaxed text-muted-foreground">
               {t("sidebar.noRuns")}
             </div>
           ) : (
-            <div className="space-y-2">
+            <div className="flex flex-col gap-2">
               {tasks.map((task) => {
                 const needsFixReview =
                   task.state === "self_healing_proposed" && task.active_proposal != null;
+                const badge = stateBadgeProps(task.state);
 
                 return (
                   <div
                     key={task.spec.task_id}
-                    className={[
-                      "rounded-xl border p-3 transition-all",
+                    className={cn(
+                      "rounded-xl border p-3 transition-colors",
                       needsFixReview
-                        ? "border-indigo-400/60 bg-[var(--relay-heal-soft)]"
-                        : "border-[var(--relay-border)] bg-[var(--relay-surface)] hover:border-[var(--relay-border-strong)]",
-                    ].join(" ")}
+                        ? "border-primary/40 bg-[var(--relay-heal-soft)]"
+                        : "border-border bg-card hover:border-foreground/20",
+                    )}
                   >
                     <div className="flex items-center justify-between gap-2">
-                      <span className="truncate text-[12.5px] font-semibold text-[var(--relay-text)]">
+                      <span className="truncate text-xs font-semibold text-foreground">
                         {task.spec.command_preset}
                       </span>
-                      <Chip
-                        size="sm"
-                        variant={needsFixReview ? "primary" : "soft"}
-                        color={stateBadgeColor(task.state)}
-                        className="h-5 px-2 text-[10.5px] font-medium"
-                      >
+                      <Badge variant={badge.variant} className={badge.className}>
                         {t(`taskState.${task.state}`)}
-                      </Chip>
+                      </Badge>
                     </div>
 
                     {(task.preflight_summary || task.spec.user_note) && (
-                      <p className="mt-1 line-clamp-2 text-[11.5px] leading-relaxed text-[var(--relay-text-muted)]">
+                      <p className="mt-1 line-clamp-2 text-[11.5px] leading-relaxed text-muted-foreground">
                         {task.preflight_summary ?? task.spec.user_note}
                       </p>
                     )}
 
                     {needsFixReview && (
                       <Button
-                        size="sm"
-                        variant="primary"
-                        fullWidth
-                        className="mt-2.5 h-7.5 text-[11.5px] font-medium"
-                        onPress={() => onOpenApproval(task)}
+                        size="default"
+                        className="mt-2.5 w-full justify-center"
+                        onClick={() => onOpenApproval(task)}
                       >
-                        <Sparkles className="h-3.5 w-3.5" />
+                        <Sparkles data-icon="inline-start" />
                         {t("sidebar.reviewFix")}
-                        <ArrowRight className="h-3 w-3" />
+                        <ArrowRight data-icon="inline-end" />
                       </Button>
                     )}
 
@@ -205,9 +195,9 @@ export function LeftRail({
                       <button
                         type="button"
                         onClick={() => onSelectEvidenceNode(task.evidence_node_id!)}
-                        className="mt-2 inline-flex items-center gap-1 text-[11.5px] font-medium text-teal-700 hover:underline dark:text-teal-400 cursor-pointer"
+                        className="mt-2 inline-flex cursor-pointer items-center gap-1 text-[11.5px] font-medium text-primary hover:underline"
                       >
-                        <CheckCircle2 className="h-3 w-3" />
+                        <CheckCircle2 className="size-3" />
                         {t("sidebar.viewResult")}
                       </button>
                     )}
@@ -219,31 +209,27 @@ export function LeftRail({
         </section>
       </div>
 
-      {/* Discreet collapsible footer for Device Role & Developer / Lab Tools */}
-      <div className="border-t border-[var(--relay-border)] bg-[var(--relay-surface-subtle)]/50 p-2.5">
+      {/* Discreet footer popover for Device Role & Developer Tools */}
+      <div className="border-t border-border bg-muted/40 p-2.5">
         <button
           type="button"
           onClick={() => setSettingsOpen((prev) => !prev)}
-          className="flex w-full items-center justify-between rounded-lg px-2 py-1.5 text-[11.5px] font-medium text-[var(--relay-text-muted)] transition-colors hover:bg-[var(--relay-surface-subtle)] hover:text-[var(--relay-text)] cursor-pointer"
+          className="flex w-full cursor-pointer items-center justify-between rounded-lg px-2 py-1.5 text-[11.5px] font-medium text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
         >
           <span className="inline-flex items-center gap-1.5">
-            <Settings2 className="h-3.5 w-3.5" />
+            <Settings2 className="size-3.5" />
             {t("sidebar.settingsButton")}
           </span>
-          {settingsOpen ? (
-            <ChevronDown className="h-3.5 w-3.5" />
-          ) : (
-            <ChevronUp className="h-3.5 w-3.5" />
-          )}
+          {settingsOpen ? <ChevronDown className="size-3.5" /> : <ChevronUp className="size-3.5" />}
         </button>
 
         {settingsOpen && (
-          <div className="mt-2 space-y-3 rounded-xl border border-[var(--relay-border)] bg-[var(--relay-surface)] p-2.5">
-            <div className="space-y-1.5">
-              <div className="text-[10.5px] font-medium text-[var(--relay-text-faint)]">
+          <div className="mt-2 flex flex-col gap-3 rounded-xl border border-border bg-card p-2.5">
+            <div className="flex flex-col gap-1.5">
+              <div className="text-[10.5px] font-medium text-muted-foreground">
                 {t("sidebar.modeLabel")}
               </div>
-              <div className="grid grid-cols-3 gap-1 rounded-lg bg-[var(--relay-surface-subtle)] p-0.5">
+              <div className="grid grid-cols-3 gap-1 rounded-lg bg-muted p-0.5">
                 {RUNTIME_MODES.map((mode) => {
                   const active = mode === activeMode;
                   return (
@@ -251,12 +237,12 @@ export function LeftRail({
                       key={mode}
                       type="button"
                       onClick={() => onSwitchMode(mode)}
-                      className={[
-                        "rounded-md px-1.5 py-1 text-[10.5px] font-medium transition-all cursor-pointer",
+                      className={cn(
+                        "cursor-pointer rounded-md px-1.5 py-1 text-[10.5px] font-medium transition-all",
                         active
-                          ? "bg-[var(--relay-surface)] text-[var(--relay-text)] shadow-2xs"
-                          : "text-[var(--relay-text-muted)] hover:text-[var(--relay-text)]",
-                      ].join(" ")}
+                          ? "bg-background text-foreground shadow-2xs"
+                          : "text-muted-foreground hover:text-foreground",
+                      )}
                     >
                       {t(`sidebar.mode.${mode}`)}
                     </button>
@@ -267,30 +253,28 @@ export function LeftRail({
 
             <Separator />
 
-            <div className="space-y-1.5">
-              <div className="text-[10.5px] font-medium text-[var(--relay-text-faint)]">
+            <div className="flex flex-col gap-1.5">
+              <div className="text-[10.5px] font-medium text-muted-foreground">
                 {t("sidebar.devTools")}
               </div>
               <Button
-                size="sm"
                 variant="outline"
-                fullWidth
-                isDisabled={isSimulatingEdit}
-                onPress={onTriggerUpstreamEdit}
-                className="h-7 justify-start text-[11px]"
+                size="default"
+                className="w-full justify-start"
+                disabled={isSimulatingEdit}
+                onClick={onTriggerUpstreamEdit}
               >
-                <Zap className="h-3 w-3 text-amber-500" />
+                <Zap data-icon="inline-start" className="text-amber-500" />
                 {t("sidebar.simulateCodeChange")}
               </Button>
               {!isTauriRuntime() && (
                 <Button
-                  size="sm"
                   variant="ghost"
-                  fullWidth
-                  onPress={onResetDemo}
-                  className="h-7 justify-start text-[11px]"
+                  size="default"
+                  className="w-full justify-start"
+                  onClick={onResetDemo}
                 >
-                  <RotateCcw className="h-3 w-3" />
+                  <RotateCcw data-icon="inline-start" />
                   {t("sidebar.resetPreview")}
                 </Button>
               )}

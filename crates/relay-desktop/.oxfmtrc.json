@@ -4,5 +4,5 @@
   "tabWidth": 2,
   "semi": true,
   "singleQuote": false,
-  "ignorePatterns": ["src/bindings.ts", "dist/**"]
+  "ignorePatterns": ["src/bindings.ts", "src/components/ui/**", "dist/**"]
 }

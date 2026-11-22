@@ -386,6 +386,7 @@ export const relayApi = {
       });
     }
 
+    const nodeById = new Map(mockState.dag.nodes.map((n) => [n.id, n]));
     const visited = new Set<string>([newId]);
     const queue = [newId];
     const invalidated: string[] = [];
@@ -396,7 +397,7 @@ export const relayApi = {
         if (edge.from === current && !visited.has(edge.to)) {
           visited.add(edge.to);
           queue.push(edge.to);
-          const target = mockState.dag.nodes.find((n) => n.id === edge.to);
+          const target = nodeById.get(edge.to);
           if (target && target.payload.kind === "evidence") {
             target.freshness = {
               status: "stale",

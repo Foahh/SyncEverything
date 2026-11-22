@@ -1,4 +1,7 @@
-import { Button, Chip } from "@heroui/react";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { Separator } from "@/components/ui/separator";
+import { cn } from "@/lib/utils";
 import { AlertCircle, GitBranch, Globe, Link2, Moon, Play, Sun } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import type { PeerStatus_Serialize } from "../bindings";
@@ -31,14 +34,13 @@ export function TopTelemetryBar({
   const transport = status?.transport_path ?? "offline";
 
   return (
-    <header className="flex h-[52px] shrink-0 items-center justify-between gap-3 border-b border-[var(--relay-border)] bg-[var(--relay-surface)] px-4">
-      {/* Left: Clean Brand + Current Project */}
-      <div className="flex items-center gap-3 min-w-0">
+    <header className="flex h-12 shrink-0 items-center justify-between gap-3 border-b border-border bg-background px-4">
+      <div className="flex min-w-0 items-center gap-2.5">
         <div className="flex items-center gap-2">
-          <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-teal-600 text-white shadow-xs">
+          <div className="flex size-7 items-center justify-center rounded-lg bg-primary text-primary-foreground shadow-xs">
             <svg
               viewBox="0 0 24 24"
-              className="h-4 w-4"
+              className="size-4"
               fill="none"
               stroke="currentColor"
               strokeWidth="2.3"
@@ -49,90 +51,73 @@ export function TopTelemetryBar({
               <path d="M8.5 11.2L15.6 7.2M8.5 12.8L15.6 16.8" strokeLinecap="round" />
             </svg>
           </div>
-          <span className="text-[14.5px] font-bold tracking-tight text-[var(--relay-text)]">
+          <span className="text-sm font-semibold tracking-tight text-foreground">
             {t("app.name")}
           </span>
         </div>
 
-        <span className="text-[var(--relay-border-strong)]">/</span>
+        <span className="text-border">/</span>
 
-        <div className="flex items-center gap-2 min-w-0">
-          <GitBranch className="h-3.5 w-3.5 shrink-0 text-[var(--relay-text-faint)]" />
-          <span className="truncate text-[13px] font-medium text-[var(--relay-text)]">
-            {repoId}
-          </span>
+        <div className="flex min-w-0 items-center gap-2">
+          <GitBranch className="size-3.5 shrink-0 text-muted-foreground" />
+          <span className="truncate text-xs font-medium text-foreground">{repoId}</span>
           {headCommitSha && (
-            <span className="font-mono-tech hidden rounded-md bg-[var(--relay-surface-subtle)] px-1.5 py-0.5 text-[11px] text-[var(--relay-text-faint)] sm:inline">
+            <span className="font-mono-tech hidden rounded-md bg-muted px-1.5 py-0.5 text-[11px] text-muted-foreground sm:inline">
               {headCommitSha.slice(0, 7)}
             </span>
           )}
         </div>
       </div>
 
-      {/* Right: Connection Pill + Outdated Indicator (only when needed) + Primary CTA + Utilities */}
       <div className="flex items-center gap-2">
         {staleCount > 0 && (
-          <Chip
-            size="sm"
-            variant="soft"
-            color="danger"
-            className="h-7 px-2.5 text-[11.5px] font-medium"
-          >
-            <AlertCircle className="mr-1 h-3.5 w-3.5" />
+          <Badge variant="destructive" className="h-6 gap-1 px-2 text-[11px]">
+            <AlertCircle data-icon="inline-start" />
             {t("topbar.outdatedCount", { count: staleCount })}
-          </Chip>
+          </Badge>
         )}
 
-        <button
-          type="button"
+        <Button
+          variant="outline"
+          size="default"
+          className="rounded-full px-2.5"
           onClick={onOpenPairModal}
-          className="inline-flex h-7 items-center gap-1.5 rounded-full border border-[var(--relay-border)] bg-[var(--relay-surface-subtle)] px-2.5 text-[11.5px] font-medium text-[var(--relay-text)] transition-colors hover:border-[var(--relay-border-strong)] cursor-pointer"
         >
           <span
-            className={["h-2 w-2 rounded-full", isConnected ? "bg-teal-500" : "bg-amber-500"].join(
-              " ",
-            )}
+            className={cn("size-2 rounded-full", isConnected ? "bg-emerald-500" : "bg-amber-500")}
           />
           <span>
             {isConnected
               ? `${t(`topbar.transport.${transport}`)}${status?.rtt_ms != null ? ` · ${status.rtt_ms}ms` : ""}`
               : t("topbar.pairDevice")}
           </span>
-          <Link2 className="h-3 w-3 text-[var(--relay-text-faint)]" />
-        </button>
+          <Link2 data-icon="inline-end" className="text-muted-foreground" />
+        </Button>
 
-        <Button
-          size="sm"
-          variant="primary"
-          className="h-7 px-3 text-[12px] font-medium"
-          onPress={onOpenRunTask}
-        >
-          <Play className="h-3 w-3" />
+        <Button variant="default" size="default" className="px-3" onClick={onOpenRunTask}>
+          <Play data-icon="inline-start" />
           {t("topbar.runTask")}
         </Button>
 
-        <div className="h-4 w-px bg-[var(--relay-border)]" />
+        <Separator orientation="vertical" className="h-4" />
 
         <Button
-          size="sm"
           variant="ghost"
+          size="default"
           aria-label={t("topbar.switchLang")}
-          onPress={() => setRelayLocale(currentLang === "en" ? "zh-CN" : "en")}
-          className="h-7 min-w-0 px-2 text-[11.5px]"
+          onClick={() => setRelayLocale(currentLang === "en" ? "zh-CN" : "en")}
         >
-          <Globe className="h-3.5 w-3.5" />
+          <Globe data-icon="inline-start" />
           {currentLang === "en" ? "中文" : "EN"}
         </Button>
 
         <Button
-          size="sm"
           variant="ghost"
-          isIconOnly
+          size="icon"
           aria-label={t("topbar.toggleTheme")}
-          onPress={onToggleTheme}
-          className="h-7 w-7 min-w-7"
+          onClick={onToggleTheme}
         >
-          {theme === "light" ? <Moon className="h-3.5 w-3.5" /> : <Sun className="h-3.5 w-3.5" />}
+          {theme === "light" ? <Moon /> : <Sun />}
         </Button>
       </div>
     </header>

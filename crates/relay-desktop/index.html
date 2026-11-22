@@ -3,17 +3,33 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="light dark" />
+    <script>
+      try {
+        var saved = localStorage.getItem("relay.theme");
+        var meta = document.querySelector('meta[name="color-scheme"]');
+        if (saved === "light" || saved === "dark") {
+          if (meta) meta.content = saved;
+          document.documentElement.classList.toggle("dark", saved === "dark");
+          document.documentElement.dataset.theme = saved;
+        } else {
+          if (meta) meta.content = "light dark";
+          var prefersDark =
+            window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches;
+          document.documentElement.classList.toggle("dark", prefersDark);
+          document.documentElement.dataset.theme = prefersDark ? "dark" : "light";
+        }
+      } catch (_err) {}
+    </script>
     <title>Relay — Cross-Device Local Agent Workbench</title>
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link
-      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&family=Noto+Sans+SC:wght@400;500;600;700&display=swap"
+      href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=Noto+Sans+SC:wght@400;500;600;700&display=swap"
       rel="stylesheet"
     />
   </head>
-  <body
-    class="antialiased selection:bg-teal-500/20 selection:text-teal-900 dark:selection:text-teal-100"
-  >
+  <body class="antialiased selection:bg-primary/20 selection:text-foreground">
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
   </body>

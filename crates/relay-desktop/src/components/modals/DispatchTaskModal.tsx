@@ -1,4 +1,17 @@
-import { Button, Input, Label, Modal, Switch, TextArea } from "@heroui/react";
+import { Button } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import { Field, FieldGroup, FieldLabel, FieldTitle } from "@/components/ui/field";
+import { Input } from "@/components/ui/input";
+import { Switch } from "@/components/ui/switch";
+import { Textarea } from "@/components/ui/textarea";
+import { cn } from "@/lib/utils";
 import { Play } from "lucide-react";
 import { Controller, useForm, useWatch } from "react-hook-form";
 import { useTranslation } from "react-i18next";
@@ -45,137 +58,122 @@ export function DispatchTaskModal({
   });
 
   return (
-    <Modal isOpen={isOpen} onOpenChange={onOpenChange}>
-      <Modal.Backdrop variant="blur">
-        <Modal.Container placement="center" size="lg">
-          <Modal.Dialog className="border border-[var(--relay-border)] bg-[var(--relay-surface)] text-[var(--relay-text)]">
-            <Modal.CloseTrigger />
-            <Modal.Header>
-              <div className="flex items-center gap-2.5">
-                <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-teal-500/12 text-teal-600 dark:text-teal-400">
-                  <Play className="h-4 w-4" />
-                </div>
-                <div>
-                  <Modal.Heading className="text-[15px] font-semibold">
-                    {t("modals.task.title")}
-                  </Modal.Heading>
-                  <p className="text-[12px] text-[var(--relay-text-muted)]">
-                    {t("modals.task.subtitle")} ·{" "}
-                    <span className="font-mono-tech">{headCommitSha.slice(0, 7)}</span>
-                  </p>
-                </div>
+    <Dialog open={isOpen} onOpenChange={onOpenChange}>
+      <DialogContent className="sm:max-w-lg">
+        <DialogHeader>
+          <div className="flex items-center gap-2.5">
+            <div className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary">
+              <Play className="size-4" />
+            </div>
+            <div className="flex flex-col gap-0.5">
+              <DialogTitle>{t("modals.task.title")}</DialogTitle>
+              <DialogDescription>
+                {t("modals.task.subtitle")} ·{" "}
+                <span className="font-mono-tech">{headCommitSha.slice(0, 7)}</span>
+              </DialogDescription>
+            </div>
+          </div>
+        </DialogHeader>
+
+        <form onSubmit={onSubmit} className="flex flex-col gap-4">
+          <FieldGroup>
+            <Field>
+              <FieldTitle>{t("modals.task.presetLabel")}</FieldTitle>
+              <div className="grid grid-cols-2 gap-2">
+                {(["train_grid", "smoke"] as const).map((preset) => {
+                  const active = selectedPreset === preset;
+                  return (
+                    <button
+                      key={preset}
+                      type="button"
+                      onClick={() => setValue("preset", preset)}
+                      className={cn(
+                        "cursor-pointer rounded-xl border px-3 py-2.5 text-left transition-all",
+                        active
+                          ? "border-primary bg-primary/8 ring-1 ring-primary/25"
+                          : "border-border bg-muted/40 hover:border-foreground/20",
+                      )}
+                    >
+                      <div className="text-xs font-semibold text-foreground">
+                        {preset === "train_grid"
+                          ? t("modals.task.presetGridTitle")
+                          : t("modals.task.presetSmokeTitle")}
+                      </div>
+                      <div className="mt-0.5 text-[11px] text-muted-foreground">
+                        {preset === "train_grid"
+                          ? t("modals.task.presetGridDesc")
+                          : t("modals.task.presetSmokeDesc")}
+                      </div>
+                    </button>
+                  );
+                })}
               </div>
-            </Modal.Header>
+            </Field>
 
-            <form onSubmit={onSubmit}>
-              <Modal.Body className="space-y-3.5 py-3">
-                <div className="space-y-1.5">
-                  <Label className="text-[12px] font-medium">{t("modals.task.presetLabel")}</Label>
-                  <div className="grid grid-cols-2 gap-2">
-                    {(["train_grid", "smoke"] as const).map((preset) => {
-                      const active = selectedPreset === preset;
-                      return (
-                        <button
-                          key={preset}
-                          type="button"
-                          onClick={() => setValue("preset", preset)}
-                          className={[
-                            "rounded-xl border px-3 py-2.5 text-left transition-all cursor-pointer",
-                            active
-                              ? "border-teal-500 bg-teal-500/8 ring-1 ring-teal-500/25"
-                              : "border-[var(--relay-border)] bg-[var(--relay-surface-subtle)] hover:border-[var(--relay-border-strong)]",
-                          ].join(" ")}
-                        >
-                          <div className="text-[12.5px] font-semibold text-[var(--relay-text)]">
-                            {preset === "train_grid"
-                              ? t("modals.task.presetGridTitle")
-                              : t("modals.task.presetSmokeTitle")}
-                          </div>
-                          <div className="mt-0.5 text-[11px] text-[var(--relay-text-muted)]">
-                            {preset === "train_grid"
-                              ? t("modals.task.presetGridDesc")
-                              : t("modals.task.presetSmokeDesc")}
-                          </div>
-                        </button>
-                      );
-                    })}
-                  </div>
-                </div>
+            {selectedPreset === "train_grid" && (
+              <div className="grid grid-cols-2 gap-3">
+                <Field>
+                  <FieldLabel htmlFor="task-windows">{t("modals.task.windowsLabel")}</FieldLabel>
+                  <Input
+                    id="task-windows"
+                    className="font-mono-tech text-xs"
+                    {...register("windows", { required: true })}
+                  />
+                </Field>
+                <Field>
+                  <FieldLabel htmlFor="task-alpha">{t("modals.task.alphaLabel")}</FieldLabel>
+                  <Input
+                    id="task-alpha"
+                    className="font-mono-tech text-xs"
+                    {...register("alpha", { required: true })}
+                  />
+                </Field>
+              </div>
+            )}
 
-                {selectedPreset === "train_grid" && (
-                  <div className="grid grid-cols-2 gap-3">
-                    <div className="space-y-1.5">
-                      <Label htmlFor="task-windows" className="text-[12px] font-medium">
-                        {t("modals.task.windowsLabel")}
-                      </Label>
-                      <Input
-                        id="task-windows"
-                        fullWidth
-                        className="font-mono-tech text-[12px]"
-                        {...register("windows", { required: true })}
-                      />
-                    </div>
-                    <div className="space-y-1.5">
-                      <Label htmlFor="task-alpha" className="text-[12px] font-medium">
-                        {t("modals.task.alphaLabel")}
-                      </Label>
-                      <Input
-                        id="task-alpha"
-                        fullWidth
-                        className="font-mono-tech text-[12px]"
-                        {...register("alpha", { required: true })}
-                      />
-                    </div>
-                  </div>
+            <Field>
+              <FieldLabel htmlFor="task-note">{t("modals.task.noteLabel")}</FieldLabel>
+              <Textarea
+                id="task-note"
+                rows={2}
+                placeholder={t("modals.task.notePlaceholder")}
+                {...register("userNote")}
+              />
+            </Field>
+
+            <Field
+              orientation="horizontal"
+              className="justify-between rounded-xl border border-border bg-muted/40 px-3 py-2.5"
+            >
+              <FieldLabel htmlFor="task-ask-before-fix" className="cursor-pointer font-normal">
+                {t("modals.task.askBeforeFix")}
+              </FieldLabel>
+              <Controller
+                control={control}
+                name="requireApproval"
+                render={({ field }) => (
+                  <Switch
+                    id="task-ask-before-fix"
+                    size="sm"
+                    checked={field.value}
+                    onCheckedChange={field.onChange}
+                  />
                 )}
+              />
+            </Field>
+          </FieldGroup>
 
-                <div className="space-y-1.5">
-                  <Label htmlFor="task-note" className="text-[12px] font-medium">
-                    {t("modals.task.noteLabel")}
-                  </Label>
-                  <TextArea
-                    id="task-note"
-                    fullWidth
-                    rows={2}
-                    placeholder={t("modals.task.notePlaceholder")}
-                    {...register("userNote")}
-                  />
-                </div>
-
-                <div className="rounded-xl border border-[var(--relay-border)] bg-[var(--relay-surface-subtle)] px-3 py-2.5">
-                  <Controller
-                    control={control}
-                    name="requireApproval"
-                    render={({ field }) => (
-                      <Switch
-                        size="sm"
-                        isSelected={field.value}
-                        onChange={field.onChange}
-                        className="flex items-center justify-between gap-3 w-full"
-                      >
-                        <Switch.Content className="text-[12px] text-[var(--relay-text)]">
-                          {t("modals.task.askBeforeFix")}
-                        </Switch.Content>
-                        <Switch.Control>
-                          <Switch.Thumb />
-                        </Switch.Control>
-                      </Switch>
-                    )}
-                  />
-                </div>
-              </Modal.Body>
-              <Modal.Footer className="gap-2">
-                <Button variant="secondary" onPress={() => onOpenChange(false)}>
-                  {t("modals.task.cancel")}
-                </Button>
-                <Button type="submit" variant="primary" isDisabled={isSubmitting}>
-                  {t("modals.task.submit")}
-                </Button>
-              </Modal.Footer>
-            </form>
-          </Modal.Dialog>
-        </Modal.Container>
-      </Modal.Backdrop>
-    </Modal>
+          <DialogFooter>
+            <Button type="button" variant="outline" size="lg" onClick={() => onOpenChange(false)}>
+              {t("modals.task.cancel")}
+            </Button>
+            <Button type="submit" size="lg" disabled={isSubmitting}>
+              <Play data-icon="inline-start" />
+              {t("modals.task.submit")}
+            </Button>
+          </DialogFooter>
+        </form>
+      </DialogContent>
+    </Dialog>
   );
 }

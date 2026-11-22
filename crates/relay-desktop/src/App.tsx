@@ -24,18 +24,30 @@ import {
 } from "./lib/queries";
 
 const THEME_STORAGE_KEY = "relay.theme";
+type ThemeScheme = "light" | "dark";
 
-function detectInitialTheme(): "light" | "dark" {
-  if (typeof window === "undefined") return "light";
-  const saved = window.localStorage.getItem(THEME_STORAGE_KEY);
-  if (saved === "light" || saved === "dark") return saved;
-  return "light";
+function readStoredTheme(): ThemeScheme | null {
+  if (typeof window === "undefined") return null;
+  try {
+    const saved = window.localStorage.getItem(THEME_STORAGE_KEY);
+    return saved === "light" || saved === "dark" ? saved : null;
+  } catch {
+    return null;
+  }
+}
+
+function readSystemTheme(): ThemeScheme {
+  if (typeof window === "undefined" || typeof window.matchMedia !== "function") return "light";
+  return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
 }
 
 export default function App() {
   useRelayEventSync();
 
-  const [theme, setTheme] = useState<"light" | "dark">(detectInitialTheme);
+  const [storedTheme, setStoredTheme] = useState<ThemeScheme | null>(readStoredTheme);
+  const [systemTheme, setSystemTheme] = useState<ThemeScheme>(readSystemTheme);
+  const theme: ThemeScheme = storedTheme ?? systemTheme;
+
   const [includeStale, setIncludeStale] = useState(true);
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const [drawerMode, setDrawerMode] = useState<"closed" | "node" | "fix">("closed");
@@ -59,8 +71,50 @@ export default function App() {
     const root = document.documentElement;
     root.classList.toggle("dark", theme === "dark");
     root.dataset.theme = theme;
-    window.localStorage.setItem(THEME_STORAGE_KEY, theme);
-  }, [theme]);
+    const meta = document.querySelector<HTMLMetaElement>('meta[name="color-scheme"]');
+    if (meta) {
+      meta.content = storedTheme ?? "light dark";
+    }
+  }, [theme, storedTheme]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const media = window.matchMedia?.("(prefers-color-scheme: dark)");
+    const handleMediaChange = (event: MediaQueryListEvent) => {
+      setSystemTheme(event.matches ? "dark" : "light");
+    };
+    const handleStorage = (event: StorageEvent) => {
+      if (event.key === THEME_STORAGE_KEY) {
+        setStoredTheme(readStoredTheme());
+      }
+    };
+    media?.addEventListener("change", handleMediaChange);
+    window.addEventListener("storage", handleStorage);
+    return () => {
+      media?.removeEventListener("change", handleMediaChange);
+      window.removeEventListener("storage", handleStorage);
+    };
+  }, []);
+
+  const handleToggleTheme = () => {
+    const target: ThemeScheme = theme === "light" ? "dark" : "light";
+    const currentSystem = readSystemTheme();
+    if (target === currentSystem) {
+      setStoredTheme(null);
+      try {
+        window.localStorage.removeItem(THEME_STORAGE_KEY);
+      } catch {
+        // Ignore storage errors in restricted environments
+      }
+    } else {
+      setStoredTheme(target);
+      try {
+        window.localStorage.setItem(THEME_STORAGE_KEY, target);
+      } catch {
+        // Ignore storage errors in restricted environments
+      }
+    }
+  };
 
   const selectedNode: GraphNode | null = useMemo(() => {
     if (!selectedNodeId || !dag) return null;
@@ -182,19 +236,19 @@ export default function App() {
   };
 
   return (
-    <div className="flex h-screen w-screen flex-col overflow-hidden bg-[var(--relay-canvas)] text-[var(--relay-text)]">
+    <div className="flex h-screen w-screen flex-col overflow-hidden bg-background text-foreground">
       <TopTelemetryBar
         status={status}
         repoId={dag?.repo_id ?? "forecast-bench"}
         headCommitSha={dag?.head_commit_sha ?? null}
         staleCount={dag?.stale_count ?? 0}
         theme={theme}
-        onToggleTheme={() => setTheme((prev) => (prev === "light" ? "dark" : "light"))}
+        onToggleTheme={handleToggleTheme}
         onOpenPairModal={() => setPairModalOpen(true)}
         onOpenRunTask={() => setTaskModalOpen(true)}
       />
 
-      <main className="flex flex-1 min-h-0 overflow-hidden">
+      <main className="flex min-h-0 flex-1 overflow-hidden">
         <LeftRail
           status={status}
           tasks={tasks}

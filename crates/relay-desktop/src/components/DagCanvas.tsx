@@ -1,4 +1,5 @@
-import { Button } from "@heroui/react";
+import { Button } from "@/components/ui/button";
+import { Separator } from "@/components/ui/separator";
 import {
   Background,
   BackgroundVariant,
@@ -54,7 +55,7 @@ function DagCanvasInner({
   useEffect(() => {
     if (nodes.length > 0) {
       const id = window.setTimeout(() => {
-        void fitView({ padding: 0.28, maxZoom: 1.05, duration: 300 });
+        void fitView({ padding: 0.18, maxZoom: 1.05, duration: 300 });
       }, 60);
       return () => window.clearTimeout(id);
     }
@@ -67,7 +68,7 @@ function DagCanvasInner({
     const observer = new ResizeObserver(() => {
       window.clearTimeout(timer);
       timer = window.setTimeout(() => {
-        void fitView({ padding: 0.28, maxZoom: 1.05, duration: 220 });
+        void fitView({ padding: 0.18, maxZoom: 1.05, duration: 220 });
       }, 120);
     });
     observer.observe(el);
@@ -82,19 +83,17 @@ function DagCanvasInner({
   return (
     <div
       ref={containerRef}
-      className="relative flex-1 h-full w-full overflow-hidden bg-[var(--relay-canvas)]"
+      className="relative h-full w-full flex-1 overflow-hidden bg-[var(--relay-canvas)]"
     >
-      {/* Subtle single-line notice ONLY when outdated results exist */}
       {staleCount > 0 && (
-        <div className="pointer-events-none absolute top-4 left-4 right-4 z-20 flex justify-center">
-          <div className="pointer-events-auto inline-flex items-center gap-2 rounded-full border border-red-500/30 bg-[var(--relay-surface)]/95 px-3.5 py-1.5 text-[12px] font-medium text-red-700 shadow-sm backdrop-blur-md dark:text-red-300">
-            <AlertCircle className="h-3.5 w-3.5 shrink-0 text-red-500" />
+        <div className="pointer-events-none absolute top-4 right-4 left-4 z-20 flex justify-center">
+          <div className="pointer-events-auto inline-flex items-center gap-2 rounded-full border border-destructive/30 bg-card/95 px-3.5 py-1.5 text-xs font-medium text-destructive shadow-sm backdrop-blur-md">
+            <AlertCircle className="size-3.5 shrink-0" />
             <span>{t("canvas.outdatedBanner", { count: staleCount })}</span>
           </div>
         </div>
       )}
 
-      {/* Calm Interactive Workflow Map */}
       <ReactFlow
         nodes={nodes}
         edges={edges}
@@ -102,8 +101,8 @@ function DagCanvasInner({
         onNodeClick={(_, node) => onSelectNode(node.id)}
         onPaneClick={() => onSelectNode(null)}
         fitView
-        fitViewOptions={{ padding: 0.28, maxZoom: 1.05 }}
-        minZoom={0.5}
+        fitViewOptions={{ padding: 0.18, maxZoom: 1.05 }}
+        minZoom={0.25}
         maxZoom={1.5}
         proOptions={{ hideAttribution: true }}
       >
@@ -116,23 +115,20 @@ function DagCanvasInner({
         <Controls position="bottom-left" showInteractive={false} />
       </ReactFlow>
 
-      {/* Clean First-Run Empty State */}
       {nodes.length === 0 && (
         <div className="pointer-events-none absolute inset-0 flex items-center justify-center p-8">
-          <div className="pointer-events-auto max-w-sm rounded-2xl border border-[var(--relay-border)] bg-[var(--relay-surface)] p-6 text-center shadow-sm">
-            <h3 className="text-[15px] font-semibold text-[var(--relay-text)]">
-              {t("canvas.emptyTitle")}
-            </h3>
-            <p className="mt-1.5 text-[12.5px] leading-relaxed text-[var(--relay-text-muted)]">
+          <div className="pointer-events-auto max-w-sm rounded-2xl border border-border bg-card p-6 text-center shadow-sm">
+            <h3 className="text-sm font-semibold text-foreground">{t("canvas.emptyTitle")}</h3>
+            <p className="mt-1.5 text-xs leading-relaxed text-muted-foreground">
               {t("canvas.emptyDesc")}
             </p>
             <div className="mt-4 flex justify-center gap-2">
-              <Button size="sm" variant="primary" onPress={onOpenDispatchTask}>
-                <Play className="h-3.5 w-3.5" />
+              <Button size="lg" onClick={onOpenDispatchTask}>
+                <Play data-icon="inline-start" />
                 {t("canvas.emptyCta")}
               </Button>
-              <Button size="sm" variant="secondary" onPress={onOpenRecordDecision}>
-                <Plus className="h-3.5 w-3.5" />
+              <Button variant="secondary" size="lg" onClick={onOpenRecordDecision}>
+                <Plus data-icon="inline-start" />
                 {t("canvas.dock.addNote")}
               </Button>
             </div>
@@ -140,41 +136,25 @@ function DagCanvasInner({
         </div>
       )}
 
-      {/* Minimal Floating Bottom Toolbar */}
-      <div className="pointer-events-none absolute bottom-4 left-4 right-4 z-20 flex justify-center">
-        <div className="pointer-events-auto flex items-center gap-1 rounded-2xl border border-[var(--relay-border)] bg-[var(--relay-surface)]/95 p-1.5 shadow-lg backdrop-blur-md">
-          <Button
-            size="sm"
-            variant="secondary"
-            className="h-8 whitespace-nowrap px-3 text-[12px]"
-            onPress={onOpenRecordDecision}
-          >
-            <Plus className="h-3.5 w-3.5" />
+      <div className="pointer-events-none absolute right-4 bottom-4 left-4 z-20 flex justify-center">
+        <div className="pointer-events-auto flex items-center gap-1 rounded-xl border border-border bg-card/95 p-1.5 shadow-lg backdrop-blur-md">
+          <Button variant="secondary" size="lg" onClick={onOpenRecordDecision}>
+            <Plus data-icon="inline-start" />
             {t("canvas.dock.addNote")}
           </Button>
-          <Button
-            size="sm"
-            variant="primary"
-            className="h-8 whitespace-nowrap px-3 text-[12px] font-medium"
-            onPress={onOpenDispatchTask}
-          >
-            <Play className="h-3.5 w-3.5" />
+          <Button variant="default" size="lg" onClick={onOpenDispatchTask}>
+            <Play data-icon="inline-start" />
             {t("canvas.dock.runTask")}
           </Button>
 
           {staleCount > 0 && (
             <>
-              <div className="mx-0.5 h-4 w-px bg-[var(--relay-border)]" />
-              <Button
-                size="sm"
-                variant="ghost"
-                className="h-8 whitespace-nowrap px-2.5 text-[11.5px]"
-                onPress={onToggleIncludeStale}
-              >
+              <Separator orientation="vertical" className="mx-0.5 h-4" />
+              <Button variant="ghost" size="lg" onClick={onToggleIncludeStale}>
                 {includeStale ? (
-                  <Eye className="h-3.5 w-3.5" />
+                  <Eye data-icon="inline-start" />
                 ) : (
-                  <EyeOff className="h-3.5 w-3.5" />
+                  <EyeOff data-icon="inline-start" />
                 )}
                 {includeStale ? t("canvas.dock.showOutdated") : t("canvas.dock.hideOutdated")}
               </Button>
@@ -182,14 +162,12 @@ function DagCanvasInner({
           )}
 
           <Button
-            size="sm"
             variant="ghost"
-            isIconOnly
-            className="h-8 w-8 min-w-8"
+            size="icon-lg"
             aria-label={t("canvas.dock.fitView")}
-            onPress={() => void fitView({ padding: 0.28, maxZoom: 1.05, duration: 280 })}
+            onClick={() => void fitView({ padding: 0.18, maxZoom: 1.05, duration: 280 })}
           >
-            <Maximize2 className="h-3.5 w-3.5" />
+            <Maximize2 />
           </Button>
         </div>
       </div>

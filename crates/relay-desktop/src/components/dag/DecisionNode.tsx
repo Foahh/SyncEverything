@@ -1,3 +1,4 @@
+import { cn } from "@/lib/utils";
 import { Handle, Position, type NodeProps } from "@xyflow/react";
 import { StickyNote } from "lucide-react";
 import { useTranslation } from "react-i18next";
@@ -10,35 +11,35 @@ export function DecisionNode({ data, selected }: NodeProps<RelayFlowNode>) {
 
   return (
     <div
-      className={[
-        "w-[244px] rounded-2xl border bg-[var(--relay-surface)] px-4 py-3.5 transition-all duration-150",
+      className={cn(
+        "w-[244px] rounded-xl border bg-card px-4 py-3.5 text-card-foreground transition-all duration-150",
         selected
-          ? "border-indigo-500 ring-2 ring-indigo-500/20 shadow-md"
-          : "border-[var(--relay-border)] shadow-xs hover:border-[var(--relay-border-strong)] hover:shadow-sm",
-      ].join(" ")}
+          ? "border-primary ring-2 ring-primary/20 shadow-md"
+          : "border-border shadow-xs hover:border-foreground/20 hover:shadow-sm",
+      )}
     >
-      <div className="flex items-center gap-1.5 text-[11px] font-medium text-indigo-600 dark:text-indigo-400">
-        <StickyNote className="h-3.5 w-3.5" />
+      <div className="flex items-center gap-1.5 text-[11px] font-medium text-primary">
+        <StickyNote className="size-3.5" />
         <span>{t("canvas.kind.decision")}</span>
       </div>
 
-      <h4 className="mt-1.5 text-[13.5px] font-semibold leading-snug text-[var(--relay-text)]">
+      <h4 className="mt-1.5 text-[13px] font-semibold leading-snug text-foreground">
         {node.label}
       </h4>
 
-      <p className="mt-1 line-clamp-2 text-[12px] leading-relaxed text-[var(--relay-text-muted)]">
+      <p className="mt-1 line-clamp-2 text-xs leading-relaxed text-muted-foreground">
         {node.payload.rationale}
       </p>
 
       <Handle
         type="target"
         position={Position.Left}
-        className="!h-2 !w-2 !border-2 !border-[var(--relay-surface)] !bg-indigo-400"
+        className="!size-2 !border-2 !border-card !bg-primary/70"
       />
       <Handle
         type="source"
         position={Position.Right}
-        className="!h-2 !w-2 !border-2 !border-[var(--relay-surface)] !bg-indigo-500"
+        className="!size-2 !border-2 !border-card !bg-primary"
       />
     </div>
   );
