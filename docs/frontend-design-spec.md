@@ -73,14 +73,15 @@ Relay is a deterministic coordination instrument for AI agents — not a generic
 
 ---
 
-## 4. Recommended Frontend Packages (for `crates/relay-desktop`)
+## 4. Frontend Stack (`crates/relay-desktop`)
 
-When scaffolding `crates/relay-desktop` with your preferred `create app` setup (React 19 + TypeScript + Vite / Vite+), the design system expects:
+Scaffolded with **Bun** + React 19 + TypeScript 7 (`tsgo`) + Vite 8 + Tailwind CSS v4 + **shadcn/ui** (`base-mira` / `@base-ui/react`, initialized via `--preset b38miVIYq`):
 
-- **Core UI & Graph:** `@xyflow/react`, `lucide-react`, `tailwindcss` (v4)
-- **Localization:** `i18next`, `react-i18next`
-- **Tauri Bridge:** `@tauri-apps/api` (plus any Tauri plugins you add)
-- **Layout helper (optional):** `@dagrejs/dagre` or lightweight deterministic column layout for Decision → Artifact → Evidence tiers
+- **Core UI & Graph:** `shadcn/ui` (`@/components/ui/*` on `@base-ui/react`), `@xyflow/react`, `lucide-react`, `tailwindcss` v4, `@fontsource-variable/inter`
+- **State & Forms:** `@tanstack/react-query`, `react-hook-form`
+- **Localization:** `i18next`, `react-i18next` (strict TS augmentation in `src/i18n/i18next.d.ts`)
+- **Lint & Format:** `oxlint`, `oxfmt`
+- **Tauri Bridge:** `@tauri-apps/api` via auto-generated `src/bindings.ts`
 
 ### Expected Paths (Must Match `src-tauri/tauri.conf.json`)
 - Dev server URL: `http://localhost:1420` (adjustable in `src-tauri/tauri.conf.json`)

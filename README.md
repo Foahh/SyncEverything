@@ -9,8 +9,12 @@ COMP7608 Course Project — Tauri v2 + Rust Monorepo for cross-device local AI a
 ├── AGENTS.md                      # Contributor & AI Agent rules, verification gates & Conventional Commits
 ├── Cargo.toml                     # Rust Workspace (edition 2024, latest stable pinned crates)
 ├── docs/
+│   ├── relay_proposal_v2.md       # Project proposal, architecture & evaluation plan
+│   ├── relay_plan_v2.md           # 6-track parallel ownership, sprints & demo plan
 │   ├── contracts.md               # Day 1 frozen contracts (MCP, DAG, TaskSpec, Wire RPC, ChaosCase)
-│   └── api-cheatsheet.md          # Verified late-2026 Rust API patterns for AI-assisted coding
+│   ├── api-cheatsheet.md          # Verified late-2026 Rust API patterns for AI-assisted coding
+│   └── frontend-design-spec.md    # Frontend design system & product UX guidelines
+├── .agents/skills/                # Bundled AI coding skills (shadcn, tailwind-v4, modern-web-guidance, react-doctor)
 ├── demo/                          # [Track 6] Dual-mode demo scripts & recordings
 ├── prompts/                       # [Track 3] Edge/Host prompts & dsh MCP configuration
 ├── eval/models/                   # [Track 3] Local Ollama (qwen3.5:4b/9b) vs. Cloud API benchmarks
@@ -26,7 +30,7 @@ COMP7608 Course Project — Tauri v2 + Rust Monorepo for cross-device local AI a
 
 ## Quick Verification
 
-> Contributors & AI agents: read [AGENTS.md](AGENTS.md) before opening a PR (covers 6-track ownership, Rust/Tauri/HeroUI invariants, and mandatory Conventional Commits).
+> Contributors & AI agents: read [AGENTS.md](AGENTS.md) before opening a PR (covers 6-track ownership, Rust/Tauri/shadcn invariants, and mandatory Conventional Commits).
 
 ```powershell
 # Verify full Rust workspace compiles
@@ -35,15 +39,18 @@ cargo check --workspace
 # Run Rust core/daemon tests (including DAG STALE, worktree self-healing, iroh P2P & MCP tests)
 cargo test -p relay-core -p relay-daemon
 
-# Export TypeScript bindings after modifying src-tauri commands or contracts
+# Install desktop frontend dependencies (Bun)
 cd crates/relay-desktop
-pnpm gen:bindings
+bun install
 
-# Run frontend lint, format check & build
-pnpm format:check && pnpm lint && pnpm build
+# Export TypeScript bindings after modifying src-tauri commands or contracts
+bun run gen:bindings
+
+# Run frontend format check, lint & build
+bun run format:check && bun run lint && bun run build
 
 # Launch desktop workbench (defaults to LocalDualSandbox)
-pnpm tauri dev
+bun run tauri dev
 ```
 
 ## Local LLM Setup (Ollama)
