@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "relay": {
+      "command": "<RELAY_DAEMON_BIN>",
+      "args": [
+        "--repo-root",
+        "<REPO_ROOT>",
+        "--data-dir",
+        "<DATA_DIR>",
+        "mcp-stdio"
+      ]
+    }
+  }
+}

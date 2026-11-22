@@ -62,7 +62,7 @@ Worktrees isolate checkout and environment changes. Task processes run with the 
 | --- | --- |
 | 1 | Core engine, daemon, and Tauri backend in [`crates/relay-core/`](../crates/relay-core/), [`crates/relay-daemon/`](../crates/relay-daemon/), and [`crates/relay-desktop/src-tauri/`](../crates/relay-desktop/src-tauri/). |
 | 2 | React desktop, generated binding consumers, and localization in [`crates/relay-desktop/src/`](../crates/relay-desktop/src/). |
-| 3 | Agent prompts, DeepSeek Harness (`dsh`) integration, and model evaluation in [`prompts/`](../prompts/) and [`eval/models/`](../eval/models/). |
+| 3 | Agent prompts, standard MCP client setup (Claude Code / Cursor / Codex / `dsh`), and model evaluation in [`prompts/`](../prompts/) and [`eval/models/`](../eval/models/). |
 | 4 | Forecasting fixture and Chaos Suite cases in [`bench/fixture-repo/`](../bench/fixture-repo/) and [`bench/chaos-cases/`](../bench/chaos-cases/). |
 | 5 | Baseline and ablation runs, raw data, and publication plots in [`bench/results/`](../bench/results/). |
 | 6 | Windows and macOS QA, demo assets, report, and slides in [`docs/`](./) and [`demo/`](../demo/). |

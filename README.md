@@ -16,7 +16,7 @@ COMP7608 Course Project — Tauri v2 + Rust Monorepo for cross-device local AI a
 │   └── frontend-design-spec.md    # Frontend design system & product UX guidelines
 ├── .agents/skills/                # Bundled AI coding skills (shadcn, tailwind-v4, modern-web-guidance, react-doctor)
 ├── demo/                          # [Track 6] Dual-mode demo scripts & recordings
-├── prompts/                       # [Track 3] Edge/Host prompts & dsh MCP configuration
+├── prompts/                       # [Track 3] Edge/Host prompts & MCP client configurations
 ├── eval/models/                   # [Track 3] Local Ollama (qwen3.5:4b/9b) vs. Cloud API benchmarks
 ├── bench/
 │   ├── fixture-repo/              # [Track 4] Reproducible forecasting experiment repo with relay.toml

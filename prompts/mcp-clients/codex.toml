@@ -1,0 +1,10 @@
+# Add to your Codex CLI config (~/.codex/config.toml)
+# Replace placeholders with paths to your compiled relay-daemon binary and Git repository.
+
+[mcp_servers.relay]
+command = "<RELAY_DAEMON_BIN>"
+args = [
+  "--repo-root", "<REPO_ROOT>",
+  "--data-dir", "<DATA_DIR>",
+  "mcp-stdio",
+]

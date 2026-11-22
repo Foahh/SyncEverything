@@ -6,7 +6,7 @@
 
 ## 1. MCP Tool Contract (`rmcp` 3.11)
 
-Exposed over both **Stdio** (`relay-daemon mcp-stdio`, compatible with `dsh 0.2.0-rc.2`) and **Streamable HTTP** (`relay-daemon mcp-http --addr 127.0.0.1:7608`, mounted at `/mcp`).
+Exposed over both **Stdio** (`relay-daemon mcp-stdio`, compatible with Claude Code, Cursor, Codex, `dsh`, and any standard MCP client) and **Streamable HTTP** (`relay-daemon mcp-http --addr 127.0.0.1:7608`, mounted at `/mcp`).
 
 ### Read-Only Tools
 | Tool Name | Arguments | Purpose |
