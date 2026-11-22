@@ -2,7 +2,7 @@
 /target
 **/*.rs.bk
 
-# Frontend / Node / Vite+ / pnpm
+# Frontend / Bun / Vite
 node_modules/
 **/dist/*
 !crates/relay-desktop/dist/.gitkeep
@@ -32,7 +32,9 @@ __pycache__/
 
 # Workspace scratch / legacy temp
 .tmp/
-.agents/
+.agents/*
+!.agents/skills/
+!.agents/skills/**
 
 # OS & editor files
 .DS_Store
