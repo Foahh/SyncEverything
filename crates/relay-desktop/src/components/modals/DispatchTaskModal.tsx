@@ -51,17 +51,17 @@ export function DispatchTaskModal({
           <Modal.Dialog className="border border-[var(--relay-border)] bg-[var(--relay-surface)] text-[var(--relay-text)]">
             <Modal.CloseTrigger />
             <Modal.Header>
-              <div className="flex items-center gap-2">
+              <div className="flex items-center gap-2.5">
                 <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-teal-500/12 text-teal-600 dark:text-teal-400">
                   <Play className="h-4 w-4" />
                 </div>
                 <div>
-                  <Modal.Heading className="text-[15px] font-bold">
+                  <Modal.Heading className="text-[15px] font-semibold">
                     {t("modals.task.title")}
                   </Modal.Heading>
                   <p className="text-[12px] text-[var(--relay-text-muted)]">
                     {t("modals.task.subtitle")} ·{" "}
-                    <span className="font-mono-tech">@{headCommitSha.slice(0, 7)}</span>
+                    <span className="font-mono-tech">{headCommitSha.slice(0, 7)}</span>
                   </p>
                 </div>
               </div>
@@ -69,9 +69,8 @@ export function DispatchTaskModal({
 
             <form onSubmit={onSubmit}>
               <Modal.Body className="space-y-3.5 py-3">
-                {/* Preset Whitelist Picker */}
                 <div className="space-y-1.5">
-                  <Label className="text-[12px] font-medium">{t("modals.task.presetField")}</Label>
+                  <Label className="text-[12px] font-medium">{t("modals.task.presetLabel")}</Label>
                   <div className="grid grid-cols-2 gap-2">
                     {(["train_grid", "smoke"] as const).map((preset) => {
                       const active = selectedPreset === preset;
@@ -87,13 +86,15 @@ export function DispatchTaskModal({
                               : "border-[var(--relay-border)] bg-[var(--relay-surface-subtle)] hover:border-[var(--relay-border-strong)]",
                           ].join(" ")}
                         >
-                          <div className="font-mono-tech text-[12px] font-semibold text-[var(--relay-text)]">
-                            {preset}
+                          <div className="text-[12.5px] font-semibold text-[var(--relay-text)]">
+                            {preset === "train_grid"
+                              ? t("modals.task.presetGridTitle")
+                              : t("modals.task.presetSmokeTitle")}
                           </div>
                           <div className="mt-0.5 text-[11px] text-[var(--relay-text-muted)]">
                             {preset === "train_grid"
-                              ? "uv run forecast.py --windows 7,14,28"
-                              : "uv run forecast.py --smoke"}
+                              ? t("modals.task.presetGridDesc")
+                              : t("modals.task.presetSmokeDesc")}
                           </div>
                         </button>
                       );
@@ -105,7 +106,7 @@ export function DispatchTaskModal({
                   <div className="grid grid-cols-2 gap-3">
                     <div className="space-y-1.5">
                       <Label htmlFor="task-windows" className="text-[12px] font-medium">
-                        {t("modals.task.windowsField")}
+                        {t("modals.task.windowsLabel")}
                       </Label>
                       <Input
                         id="task-windows"
@@ -116,7 +117,7 @@ export function DispatchTaskModal({
                     </div>
                     <div className="space-y-1.5">
                       <Label htmlFor="task-alpha" className="text-[12px] font-medium">
-                        {t("modals.task.alphaField")}
+                        {t("modals.task.alphaLabel")}
                       </Label>
                       <Input
                         id="task-alpha"
@@ -130,7 +131,7 @@ export function DispatchTaskModal({
 
                 <div className="space-y-1.5">
                   <Label htmlFor="task-note" className="text-[12px] font-medium">
-                    {t("modals.task.noteField")}
+                    {t("modals.task.noteLabel")}
                   </Label>
                   <TextArea
                     id="task-note"
@@ -153,7 +154,7 @@ export function DispatchTaskModal({
                         className="flex items-center justify-between gap-3 w-full"
                       >
                         <Switch.Content className="text-[12px] text-[var(--relay-text)]">
-                          {t("modals.task.requireApproval")}
+                          {t("modals.task.askBeforeFix")}
                         </Switch.Content>
                         <Switch.Control>
                           <Switch.Thumb />

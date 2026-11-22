@@ -19,11 +19,6 @@ export function isTauriRuntime(): boolean {
   return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 }
 
-// ============================================================================
-// Stateful Browser Preview Simulation (matches bindings.ts 1:1 when running
-// `pnpm dev` outside a Tauri native window for rapid visual design & review)
-// ============================================================================
-
 interface MockWorkspaceState {
   status: PeerStatus_Serialize;
   dag: DagSnapshot_Serialize;
@@ -40,21 +35,21 @@ function createInitialMockState(): MockWorkspaceState {
   const nodes: GraphNode[] = [
     {
       id: "dec-window-strategy",
-      label: "Hybrid MA + EWMA Rolling Forecast",
+      label: "Switch to hybrid MA + EWMA forecast",
       payload: {
         kind: "decision",
         rationale:
-          "Combine moving average stability with EWMA responsiveness across 7/14/28 rolling horizons; defer heavy grid sweeps to Windows Host over iroh P2P.",
-        constraints: ["smoke < 2s", "offline uv.lock", "block STALE citations"],
+          "Blend moving average stability with EWMA responsiveness across 7/14/28 day windows, and offload the full sweep to the desktop GPU.",
+        constraints: ["Keep pre-check under 2s", "Pin packages in uv.lock"],
       },
       freshness: { status: "fresh" },
-      device_origin: "macbook-air-m4",
+      device_origin: "MacBook Air",
       created_at: t0,
       updated_at: t0,
     },
     {
       id: "art-a91f0c2",
-      label: "Commit a91f0c2",
+      label: "Add seasonal weighting",
       payload: {
         kind: "artifact",
         git_commit_sha: "a91f0c28e4b71a2d9012f",
@@ -63,28 +58,28 @@ function createInitialMockState(): MockWorkspaceState {
         changed_files: ["src/forecast.py", "relay.toml", "pyproject.toml"],
       },
       freshness: { status: "fresh" },
-      device_origin: "macbook-air-m4",
+      device_origin: "MacBook Air",
       created_at: t1,
       updated_at: t1,
     },
     {
       id: "ev-grid-7-14-28",
-      label: "train_grid · Windows 7 / 14 / 28",
+      label: "Window sweep (7, 14, 28)",
       payload: {
         kind: "evidence",
         task_id: "019a9e80-41f2-7d3a-9c44-81b2f3001001",
         preset: "train_grid",
         metrics_json: {
+          best_mae: 2.165,
           best_window: 28,
-          best_mae: 2.16502,
-          rmse_w28: 2.56794,
+          rmse_w28: 2.568,
           alpha: 0.35,
           elapsed_ms: 1.08,
         },
         log_blob_hash: "blake3:7a31d908f42b1c90e442",
       },
       freshness: { status: "fresh" },
-      device_origin: "win-rtx5060-host",
+      device_origin: "Windows Workstation",
       created_at: t2,
       updated_at: t2,
     },
@@ -114,8 +109,8 @@ function createInitialMockState(): MockWorkspaceState {
         command_preset: "train_grid",
         params: { windows: "7,14,28", alpha: "0.45" },
         require_approval: true,
-        requested_by_device: "macbook-air-m4",
-        user_note: "Re-run 3-window sweep with seasonal weighting on Host GPU.",
+        requested_by_device: "MacBook Air",
+        user_note: "Re-run window sweep with alpha=0.45 on workstation.",
       },
       state: "self_healing_proposed",
       active_proposal: {
@@ -123,14 +118,12 @@ function createInitialMockState(): MockWorkspaceState {
         task_id: "019a9e80-78c1-7a91-b302-9a10e44b2002",
         kind: "uv_spec",
         summary:
-          "Detected ModuleNotFoundError('scipy') during isolated smoke preflight. Added pinned scipy>=1.15 to pyproject.toml and regenerated uv.lock inside worktree.",
+          "Missing package `scipy` blocked the run. Added `scipy>=1.15.2` to pyproject.toml and verified a quick check in an isolated copy.",
         diff_preview: [
-          "diff --git a/pyproject.toml b/pyproject.toml",
-          "index 4f21a09..98b2c44 100644",
           "--- a/pyproject.toml",
           "+++ b/pyproject.toml",
           '@@ -4,7 +4,9 @@ version = "0.1.0"',
-          ' description = "Reproducible time-series window forecasting fixture"',
+          ' description = "Time-series window forecasting"',
           ' requires-python = ">=3.11"',
           "-dependencies = []",
           "+dependencies = [",
@@ -143,11 +136,10 @@ function createInitialMockState(): MockWorkspaceState {
         worktree_branch: "relay/heal/019a9e80-scipy",
         smoke_verified: true,
         smoke_stdout_tail:
-          '[uv] Resolved 2 packages in 18ms (offline cache hit)\n[smoke] {"mode":"smoke","best_window":7,"best_mae":2.46437,"elapsed_ms":0.24}\n[preflight] Exit code 0 · Main worktree untouched',
+          "[uv] Resolved 2 packages in 18ms (cached)\n[smoke] best_window=7  best_mae=2.464  elapsed=0.24ms\n[ok] Exit code 0",
         created_at: t3,
       },
-      preflight_summary:
-        "Missing dependency healed in isolated worktree; awaiting Elicitation approval.",
+      preflight_summary: "Missing package `scipy` — fix tested and ready to apply.",
       evidence_node_id: null,
       error_message: null,
       created_at: t2,
@@ -161,12 +153,12 @@ function createInitialMockState(): MockWorkspaceState {
         command_preset: "train_grid",
         params: { windows: "7,14,28", alpha: "0.35" },
         require_approval: true,
-        requested_by_device: "macbook-air-m4",
-        user_note: "Baseline 3-window sweep before seasonal weighting refactor.",
+        requested_by_device: "MacBook Air",
+        user_note: "Baseline 3-window sweep.",
       },
       state: "completed",
       active_proposal: null,
-      preflight_summary: "Smoke passed in 0.21ms",
+      preflight_summary: "Finished cleanly in 1.08ms",
       evidence_node_id: "ev-grid-7-14-28",
       error_message: null,
       created_at: t1,
@@ -178,9 +170,9 @@ function createInitialMockState(): MockWorkspaceState {
     {
       handoff_id: "ho-20261121-02",
       repo_id: "forecast-bench",
-      source_device: "macbook-air-m4",
+      source_device: "MacBook Air",
       base_commit_sha: "a91f0c2",
-      summary: "Queued seasonal weighting grid sweep after offline laptop edits",
+      summary: "Sent window sweep (alpha=0.45) to Workstation",
       active_task_count: 1,
       stale_evidence_count: 0,
       created_at: t3,
@@ -188,9 +180,9 @@ function createInitialMockState(): MockWorkspaceState {
     {
       handoff_id: "ho-20261121-01",
       repo_id: "forecast-bench",
-      source_device: "win-rtx5060-host",
+      source_device: "Windows Workstation",
       base_commit_sha: "a91f0c2",
-      summary: "Returned baseline MAE 2.16502 (best window=28) with BLAKE3 log proof",
+      summary: "Completed baseline sweep (best MAE 2.165)",
       active_task_count: 0,
       stale_evidence_count: 0,
       created_at: t2,
@@ -242,7 +234,7 @@ export const relayApi = {
     mockState.status.mode = mode;
     mockState.status.transport_path =
       mode === "local_dual_sandbox" ? "loopback" : mode === "client" ? "relay" : "direct_lan";
-    mockState.status.rtt_ms = mode === "local_dual_sandbox" ? 1 : mode === "client" ? 19 : 2;
+    mockState.status.rtt_ms = mode === "local_dual_sandbox" ? 1 : mode === "client" ? 18 : 2;
     return mode;
   },
 
@@ -292,7 +284,7 @@ export const relayApi = {
       },
       state: "queued",
       active_proposal: null,
-      preflight_summary: "Queued for isolated git worktree smoke check",
+      preflight_summary: "Waiting for host pre-check",
       evidence_node_id: null,
       error_message: null,
       created_at: now,
@@ -315,7 +307,7 @@ export const relayApi = {
     if (decision === "approved") {
       task.state = "completed";
       task.updated_at = now;
-      task.preflight_summary = "Patch merged cleanly in worktree and experiment completed.";
+      task.preflight_summary = "Fix applied and run finished cleanly.";
       const evidenceId = `ev-${taskId.slice(0, 8)}`;
       task.evidence_node_id = evidenceId;
       const latestArtifact = [...mockState.dag.nodes]
@@ -324,22 +316,22 @@ export const relayApi = {
       if (!mockState.dag.nodes.some((n) => n.id === evidenceId)) {
         mockState.dag.nodes.push({
           id: evidenceId,
-          label: `${task.spec.command_preset} · Healed Run`,
+          label: `${task.spec.command_preset} (fixed)`,
           payload: {
             kind: "evidence",
             task_id: task.spec.task_id,
             preset: task.spec.command_preset,
             metrics_json: {
+              best_mae: 1.942,
               best_window: 28,
-              best_mae: 1.94218,
-              rmse_w28: 2.31044,
+              rmse_w28: 2.31,
               alpha: Number(task.spec.params.alpha ?? 0.45),
               elapsed_ms: 1.14,
             },
             log_blob_hash: "blake3:9e12ca44110b83df2210",
           },
           freshness: { status: "fresh" },
-          device_origin: "win-rtx5060-host",
+          device_origin: "Windows Workstation",
           created_at: now,
           updated_at: now,
         });
@@ -355,7 +347,7 @@ export const relayApi = {
     } else {
       task.state = "rejected";
       task.updated_at = now;
-      task.preflight_summary = "Patch proposal rejected by operator; worktree discarded.";
+      task.preflight_summary = "Suggested fix dismissed.";
     }
     return structuredClone(task);
   },
@@ -373,7 +365,7 @@ export const relayApi = {
     if (!mockState.dag.nodes.some((n) => n.id === newId)) {
       mockState.dag.nodes.push({
         id: newId,
-        label: `Commit ${newCommitSha.slice(0, 7)}`,
+        label: "Update forecast weighting",
         payload: {
           kind: "artifact",
           git_commit_sha: newCommitSha,
@@ -382,7 +374,7 @@ export const relayApi = {
           changed_files: ["src/forecast.py"],
         },
         freshness: { status: "fresh" },
-        device_origin: "macbook-air-m4",
+        device_origin: "MacBook Air",
         created_at: now,
         updated_at: now,
       });
@@ -394,7 +386,6 @@ export const relayApi = {
       });
     }
 
-    // BFS downstream propagation matching relay_core::dag::DagEngine
     const visited = new Set<string>([newId]);
     const queue = [newId];
     const invalidated: string[] = [];
@@ -449,6 +440,33 @@ export const relayApi = {
       }
     }
     return this.getDagSnapshot(true);
+  },
+
+  async getPairingTicket(): Promise<string> {
+    if (isTauriRuntime()) {
+      return commands.getPairingTicket();
+    }
+    return JSON.stringify(
+      {
+        id: mockState.status.local_node_id,
+        addrs: ["192.168.1.42:49152"],
+        relay_url: "https://relay.iroh.network/",
+      },
+      null,
+      2,
+    );
+  },
+
+  async connectPeerTicket(ticketJson: string): Promise<PeerStatus_Serialize> {
+    if (isTauriRuntime()) {
+      return commands.connectPeerTicket(ticketJson);
+    }
+    const parsed = JSON.parse(ticketJson) as { id?: string };
+    mockState.status.remote_node_id = parsed.id ?? "iroh1paired...peer";
+    mockState.status.connected = true;
+    mockState.status.transport_path = "direct_lan";
+    mockState.status.rtt_ms = 3;
+    return structuredClone(mockState.status);
   },
 
   async subscribeEvents(handlers: {

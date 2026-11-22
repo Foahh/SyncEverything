@@ -8,10 +8,10 @@ import {
   DispatchTaskModal,
   type DispatchTaskFormValues,
 } from "./components/modals/DispatchTaskModal";
+import { PairDeviceModal } from "./components/modals/PairDeviceModal";
 import { RecordDecisionModal } from "./components/modals/RecordDecisionModal";
 import {
   useDagSnapshot,
-  useHandoffs,
   useRelayEventSync,
   useResetPreviewDemo,
   useResolvePatchApproval,
@@ -29,7 +29,7 @@ function detectInitialTheme(): "light" | "dark" {
   if (typeof window === "undefined") return "light";
   const saved = window.localStorage.getItem(THEME_STORAGE_KEY);
   if (saved === "light" || saved === "dark") return saved;
-  return "light"; // Light-first for crisp classroom projector readability
+  return "light";
 }
 
 export default function App() {
@@ -38,16 +38,15 @@ export default function App() {
   const [theme, setTheme] = useState<"light" | "dark">(detectInitialTheme);
   const [includeStale, setIncludeStale] = useState(true);
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
-  const [drawerOpen, setDrawerOpen] = useState(true);
-  const [drawerTab, setDrawerTab] = useState<"node" | "approval">("approval");
+  const [drawerMode, setDrawerMode] = useState<"closed" | "node" | "fix">("closed");
   const [activeApprovalTaskId, setActiveApprovalTaskId] = useState<string | null>(null);
   const [decisionModalOpen, setDecisionModalOpen] = useState(false);
   const [taskModalOpen, setTaskModalOpen] = useState(false);
+  const [pairModalOpen, setPairModalOpen] = useState(false);
 
   const { data: status } = useRuntimeStatus();
   const { data: dag } = useDagSnapshot(includeStale);
   const { data: tasks = [] } = useTasks();
-  const { data: handoffs = [] } = useHandoffs();
 
   const switchMode = useSwitchRuntimeMode();
   const submitTask = useSubmitTask();
@@ -68,7 +67,7 @@ export default function App() {
     return dag.nodes.find((n) => n.id === selectedNodeId) ?? null;
   }, [dag, selectedNodeId]);
 
-  const pendingApprovalTask: TaskRecord_Serialize | null = useMemo(() => {
+  const pendingFixTask: TaskRecord_Serialize | null = useMemo(() => {
     if (activeApprovalTaskId) {
       const explicit = tasks.find((t) => t.spec.task_id === activeApprovalTaskId);
       if (explicit?.state === "self_healing_proposed" && explicit.active_proposal) {
@@ -88,15 +87,15 @@ export default function App() {
   const handleSelectNode = (nodeId: string | null) => {
     setSelectedNodeId(nodeId);
     if (nodeId) {
-      setDrawerTab("node");
-      setDrawerOpen(true);
+      setDrawerMode("node");
+    } else if (drawerMode === "node") {
+      setDrawerMode("closed");
     }
   };
 
   const handleOpenApproval = (task: TaskRecord_Serialize) => {
     setActiveApprovalTaskId(task.spec.task_id);
-    setDrawerTab("approval");
-    setDrawerOpen(true);
+    setDrawerMode("fix");
   };
 
   const handleTriggerUpstreamEdit = () => {
@@ -107,7 +106,7 @@ export default function App() {
     simulateEdit.mutate({
       oldArtifactId: latestArtifact.id,
       newCommitSha: `c4${randomHex}91a0ef`,
-      reason: "Modified seasonal weighting in src/forecast.py on laptop",
+      reason: "Updated src/forecast.py",
     });
   };
 
@@ -127,7 +126,7 @@ export default function App() {
         constraints: values.constraints,
       },
       freshness: { status: "fresh" },
-      device_origin: status?.mode === "host" ? "win-rtx5060-host" : "macbook-air-m4",
+      device_origin: status?.mode === "host" ? "Workstation" : "Laptop",
       created_at: now,
       updated_at: now,
     };
@@ -146,8 +145,7 @@ export default function App() {
       {
         onSuccess: () => {
           setSelectedNodeId(id);
-          setDrawerTab("node");
-          setDrawerOpen(true);
+          setDrawerMode("node");
         },
       },
     );
@@ -162,7 +160,7 @@ export default function App() {
       params:
         values.preset === "train_grid" ? { windows: values.windows, alpha: values.alpha } : {},
       require_approval: values.requireApproval,
-      requested_by_device: status?.mode === "host" ? "win-rtx5060-host" : "macbook-air-m4",
+      requested_by_device: status?.mode === "host" ? "Workstation" : "Laptop",
       user_note: values.userNote.trim() || null,
     });
   };
@@ -174,7 +172,9 @@ export default function App() {
         onSuccess: (updated) => {
           if (updated.evidence_node_id) {
             setSelectedNodeId(updated.evidence_node_id);
-            setDrawerTab("node");
+            setDrawerMode("node");
+          } else {
+            setDrawerMode("closed");
           }
         },
       },
@@ -190,18 +190,25 @@ export default function App() {
         staleCount={dag?.stale_count ?? 0}
         theme={theme}
         onToggleTheme={() => setTheme((prev) => (prev === "light" ? "dark" : "light"))}
-        onSwitchMode={(mode) => switchMode.mutate(mode)}
+        onOpenPairModal={() => setPairModalOpen(true)}
+        onOpenRunTask={() => setTaskModalOpen(true)}
       />
 
       <main className="flex flex-1 min-h-0 overflow-hidden">
         <LeftRail
           status={status}
           tasks={tasks}
-          handoffs={handoffs}
+          onOpenRunTask={() => setTaskModalOpen(true)}
+          onOpenPairModal={() => setPairModalOpen(true)}
           onOpenApproval={handleOpenApproval}
           onSelectEvidenceNode={handleSelectNode}
+          onSwitchMode={(mode) => switchMode.mutate(mode)}
           onTriggerUpstreamEdit={handleTriggerUpstreamEdit}
-          onResetDemo={() => resetDemo.mutate()}
+          onResetDemo={() => {
+            setDrawerMode("closed");
+            setSelectedNodeId(null);
+            resetDemo.mutate();
+          }}
           isSimulatingEdit={simulateEdit.isPending}
         />
 
@@ -213,19 +220,18 @@ export default function App() {
           onSelectNode={handleSelectNode}
           onOpenRecordDecision={() => setDecisionModalOpen(true)}
           onOpenDispatchTask={() => setTaskModalOpen(true)}
-          onTriggerUpstreamEdit={handleTriggerUpstreamEdit}
-          isSimulatingEdit={simulateEdit.isPending}
         />
 
         <InspectorDrawer
-          open={drawerOpen}
-          activeTab={drawerTab}
-          onTabChange={setDrawerTab}
+          mode={drawerMode}
           selectedNode={selectedNode}
-          pendingApprovalTask={pendingApprovalTask}
+          pendingFixTask={pendingFixTask}
           onResolveApproval={handleResolveApproval}
           isResolvingApproval={resolveApproval.isPending}
-          onClose={() => setDrawerOpen(false)}
+          onClose={() => {
+            setDrawerMode("closed");
+            setSelectedNodeId(null);
+          }}
         />
       </main>
 
@@ -243,6 +249,8 @@ export default function App() {
         onDispatch={handleDispatchTask}
         isSubmitting={submitTask.isPending}
       />
+
+      <PairDeviceModal isOpen={pairModalOpen} onOpenChange={setPairModalOpen} />
     </div>
   );
 }

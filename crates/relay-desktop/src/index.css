@@ -81,6 +81,7 @@ body,
 .font-mono-tech {
   font-family: var(--font-mono);
   font-variant-numeric: tabular-nums;
+  font-variant-ligatures: none;
 }
 
 /* Custom hairline scrollbars */

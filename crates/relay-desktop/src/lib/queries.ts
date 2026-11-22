@@ -82,7 +82,7 @@ export function useSwitchRuntimeMode() {
   return useMutation({
     mutationFn: (mode: RuntimeMode) => relayApi.switchRuntimeMode(mode),
     onSuccess: () => {
-      void queryClient.invalidateQueries({ queryKey: relayKeys.status() });
+      void queryClient.invalidateQueries({ queryKey: relayKeys.all });
     },
   });
 }
@@ -132,6 +132,22 @@ export function useUpsertDagNode() {
   return useMutation({
     mutationFn: ({ node, edges }: { node: GraphNode; edges: GraphEdge[] }) =>
       relayApi.upsertDagNode(node, edges),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: relayKeys.all });
+    },
+  });
+}
+
+export function useGetPairingTicket() {
+  return useMutation({
+    mutationFn: () => relayApi.getPairingTicket(),
+  });
+}
+
+export function useConnectPeerTicket() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (ticketJson: string) => relayApi.connectPeerTicket(ticketJson),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: relayKeys.all });
     },
