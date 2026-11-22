@@ -246,3 +246,94 @@ async fn llm_client_probe_and_config_persistence_work() {
         "{req}"
     );
 }
+
+#[test]
+fn compose_context_ablation_strategies_are_deterministic_and_quarantine_stale_in_dag_bundle() {
+    use crate::contracts::{EdgeKind, GraphEdge, TaskSpec};
+    use std::collections::BTreeMap;
+
+    let now = Utc::now();
+    let snapshot = DagSnapshot {
+        repo_id: "forecast-bench".into(),
+        head_commit_sha: Some("deadbeef1234567".into()),
+        nodes: vec![
+            GraphNode {
+                id: "dec-1".into(),
+                label: "Blend alpha=0.45".into(),
+                payload: NodeKind::Decision {
+                    rationale: "Improve seasonal tracking".into(),
+                    constraints: vec!["Keep smoke < 2s".into()],
+                },
+                freshness: Freshness::Fresh,
+                device_origin: "laptop".into(),
+                created_at: now,
+                updated_at: now,
+            },
+            evidence("ev-fresh", Freshness::Fresh, "1.942-fresh"),
+            evidence(
+                "ev-stale",
+                Freshness::Stale {
+                    caused_by: "art-v2".into(),
+                    reason: "Upstream edit".into(),
+                    marked_at: now,
+                },
+                "2.165-stale-secret",
+            ),
+        ],
+        edges: vec![GraphEdge {
+            id: "e1".into(),
+            from: "dec-1".into(),
+            to: "ev-fresh".into(),
+            kind: EdgeKind::Informs,
+        }],
+        stale_count: 1,
+        captured_at: now,
+    };
+    let tasks = vec![TaskRecord {
+        spec: TaskSpec {
+            task_id: Uuid::now_v7(),
+            repo_id: "forecast-bench".into(),
+            base_commit_sha: "deadbeef1234567".into(),
+            command_preset: "train_grid".into(),
+            params: BTreeMap::new(),
+            require_approval: true,
+            requested_by_device: "laptop".into(),
+            user_note: Some("Run grid".into()),
+        },
+        state: TaskState::Queued,
+        active_proposal: None,
+        preflight_summary: Some("Waiting for preflight".into()),
+        evidence_node_id: None,
+        error_message: None,
+        created_at: now,
+        updated_at: now,
+    }];
+    let handoffs = vec![HandoffSummary {
+        handoff_id: "ho-1".into(),
+        repo_id: "forecast-bench".into(),
+        source_device: "laptop".into(),
+        base_commit_sha: "deadbeef".into(),
+        summary: "Updated blend weights".into(),
+        active_task_count: 1,
+        stale_evidence_count: 1,
+        created_at: now,
+    }];
+
+    let full = compose_context(&snapshot, &tasks, &handoffs, ContextStrategy::FullTranscript);
+    let flat = compose_context(&snapshot, &tasks, &handoffs, ContextStrategy::FlatSummary);
+    let dag = compose_context(&snapshot, &tasks, &handoffs, ContextStrategy::DagBundle);
+    let dag_repeat = compose_context(&snapshot, &tasks, &handoffs, ContextStrategy::DagBundle);
+
+    assert_eq!(dag.context_bundle_hash, dag_repeat.context_bundle_hash);
+    assert!(dag.context_bundle_hash.starts_with("blake3:"));
+    assert_eq!(full.exposed_stale_metrics_count, 1);
+    assert_eq!(flat.exposed_stale_metrics_count, 1);
+    assert_eq!(dag.exposed_stale_metrics_count, 0);
+
+    assert!(full.content.contains("2.165-stale-secret"));
+    assert!(flat.content.contains("2.165-stale-secret"));
+    assert!(!dag.content.contains("2.165-stale-secret"));
+    assert!(dag.content.contains("1.942-fresh"));
+    assert!(dag.content.contains("\"ev-stale\""));
+    assert!(dag.estimated_tokens < full.estimated_tokens);
+}

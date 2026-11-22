@@ -1,7 +1,8 @@
 use anyhow::{Context, Result};
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use relay_core::agent::{
-    InferenceTier, LlmClient, LlmEndpointConfig, load_llm_config, run_host_task_pipeline,
+    ContextStrategy, InferenceTier, LlmClient, LlmEndpointConfig, compose_context, load_llm_config,
+    run_host_task_pipeline,
 };
 use relay_core::contracts::{RuntimeMode, TaskSpec};
 use relay_core::engine::RelayEngine;
@@ -17,9 +18,11 @@ use std::collections::BTreeMap;
 use std::io::ErrorKind;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
+use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::TcpListener;
+use tokio::process::Command;
 use tokio::sync::mpsc;
 use tokio::time::{self, MissedTickBehavior};
 use tracing::{info, warn};
@@ -52,6 +55,26 @@ struct Cli {
     command: Commands,
 }
 
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum ContextStrategyArg {
+    #[value(alias = "full_transcript")]
+    FullTranscript,
+    #[value(alias = "flat_summary")]
+    FlatSummary,
+    #[value(alias = "dag_bundle")]
+    DagBundle,
+}
+
+impl From<ContextStrategyArg> for ContextStrategy {
+    fn from(value: ContextStrategyArg) -> Self {
+        match value {
+            ContextStrategyArg::FullTranscript => Self::FullTranscript,
+            ContextStrategyArg::FlatSummary => Self::FlatSummary,
+            ContextStrategyArg::DagBundle => Self::DagBundle,
+        }
+    }
+}
+
 #[derive(Debug, Subcommand)]
 enum Commands {
     /// Start the Relay Host with P2P sync, pairing ticket, Host executor, and Streamable HTTP MCP.
@@ -75,6 +98,15 @@ enum Commands {
     SandboxDual,
     /// Probe the configured Ollama or OpenAI-compatible Cloud LLM endpoint.
     LlmCheck,
+    /// Check required external runtimes (git, uv), repository relay.toml, data dir, and optional LLM endpoint.
+    Doctor {
+        /// Output machine-readable JSON instead of human-readable status lines.
+        #[arg(long)]
+        json: bool,
+        /// Skip probing the configured Ollama / Cloud LLM endpoint (useful offline).
+        #[arg(long)]
+        skip_llm: bool,
+    },
     /// Sync the repository's current Git HEAD into the DAG (cascading STALE if HEAD advanced).
     SyncHead,
     /// Submit a whitelisted task preset bound to current Git HEAD and print its TaskRecord JSON.
@@ -94,6 +126,18 @@ enum Commands {
         /// Optional explicit base commit SHA (defaults to current Git HEAD).
         #[arg(long)]
         base_commit: Option<String>,
+    },
+    /// Deterministically compose model context for Track 5 ablation (full_transcript / flat_summary / dag_bundle).
+    ComposeContext {
+        /// Context strategy to emit (ignored when --all-strategies is set).
+        #[arg(long, value_enum, default_value_t = ContextStrategyArg::DagBundle)]
+        strategy: ContextStrategyArg,
+        /// Emit all three ablation strategies side-by-side in one JSON object.
+        #[arg(long)]
+        all_strategies: bool,
+        /// Read the stored DAG as-is without syncing Git HEAD first.
+        #[arg(long)]
+        no_sync: bool,
     },
 }
 
@@ -196,6 +240,14 @@ async fn main() -> Result<()> {
         println!("{}", serde_json::to_string_pretty(&probe)?);
         anyhow::ensure!(probe.ok, "LLM probe failed: {}", probe.message);
         return Ok(());
+    }
+
+    if let Commands::Doctor {
+        json: as_json,
+        skip_llm,
+    } = cli.command
+    {
+        return run_doctor(&cli, as_json, skip_llm).await;
     }
 
     let repo = Repository::resolve(cli.repo_root.clone(), cli.repo_id.clone())?;
@@ -314,7 +366,7 @@ async fn main() -> Result<()> {
             serve_mcp_http(TcpListener::bind(addr).await?, server).await?;
         }
         Commands::SandboxDual => sandbox_dual(&repo, &cli.data_dir).await?,
-        Commands::LlmCheck => unreachable!(),
+        Commands::LlmCheck | Commands::Doctor { .. } => unreachable!(),
         Commands::SyncHead => {
             let (engine, sandbox) = repo.open(&cli.data_dir).await?;
             let sb = sandbox.context("repository must contain both .git and relay.toml")?;
@@ -367,9 +419,208 @@ async fn main() -> Result<()> {
             let (record, _) = engine.submit_task(spec).await?;
             println!("{}", serde_json::to_string_pretty(&record)?);
         }
+        Commands::ComposeContext {
+            strategy,
+            all_strategies,
+            no_sync,
+        } => {
+            let (engine, sandbox) = repo.open(&cli.data_dir).await?;
+            if !no_sync
+                && let Some(sb) = &sandbox
+                && let Err(error) = sync_git_head_into_engine(&engine, sb, "cli").await
+            {
+                warn!(%error, "Unable to sync Git HEAD before composing context");
+            }
+            let snapshot = engine.dag_snapshot(true).await;
+            let tasks = engine.list_tasks().await?;
+            let handoffs = engine.list_handoffs(u32::MAX).await?;
+            if all_strategies {
+                let output = json!({
+                    "full_transcript": compose_context(&snapshot, &tasks, &handoffs, ContextStrategy::FullTranscript),
+                    "flat_summary": compose_context(&snapshot, &tasks, &handoffs, ContextStrategy::FlatSummary),
+                    "dag_bundle": compose_context(&snapshot, &tasks, &handoffs, ContextStrategy::DagBundle),
+                });
+                println!("{}", serde_json::to_string_pretty(&output)?);
+            } else {
+                let bundle = compose_context(&snapshot, &tasks, &handoffs, strategy.into());
+                println!("{}", serde_json::to_string_pretty(&bundle)?);
+            }
+        }
     }
 
     Ok(())
+}
+
+async fn run_doctor(cli: &Cli, as_json: bool, skip_llm: bool) -> Result<()> {
+    let mut checks = Vec::new();
+    let mut required_ok = true;
+
+    let git_check = probe_binary("git", &["--version"]).await;
+    required_ok &= git_check.0;
+    checks.push(json!({
+        "name": "git",
+        "required": true,
+        "status": if git_check.0 { "ok" } else { "fail" },
+        "detail": git_check.1,
+    }));
+
+    let uv_check = probe_binary("uv", &["--version"]).await;
+    required_ok &= uv_check.0;
+    checks.push(json!({
+        "name": "uv",
+        "required": true,
+        "status": if uv_check.0 { "ok" } else { "fail" },
+        "detail": uv_check.1,
+    }));
+
+    let data_dir_ok = std::fs::create_dir_all(&cli.data_dir).is_ok();
+    required_ok &= data_dir_ok;
+    checks.push(json!({
+        "name": "data_dir",
+        "required": true,
+        "status": if data_dir_ok { "ok" } else { "fail" },
+        "detail": cli.data_dir.display().to_string(),
+    }));
+
+    let explicit_repo = cli.repo_root.is_some();
+    let repo_candidate = match &cli.repo_root {
+        Some(path) => Some(path.clone()),
+        None => std::env::current_dir().ok().filter(|cwd| cwd.join("relay.toml").is_file()),
+    };
+    let (repo_status, repo_detail) = match repo_candidate {
+        Some(root) => {
+            let has_git = root.join(".git").exists();
+            match load_manifest(&root) {
+                Ok(manifest) => {
+                    let has_smoke = manifest.presets.contains_key(&manifest.project.smoke_preset);
+                    if has_git && has_smoke {
+                        (
+                            "ok",
+                            format!(
+                                "repo_id='{}', presets={} (smoke='{}')",
+                                manifest.project.repo_id,
+                                manifest.presets.len(),
+                                manifest.project.smoke_preset,
+                            ),
+                        )
+                    } else if !has_git {
+                        if explicit_repo {
+                            required_ok = false;
+                        }
+                        (
+                            if explicit_repo { "fail" } else { "warn" },
+                            format!("relay.toml loaded ({}) but .git directory is missing", manifest.project.repo_id),
+                        )
+                    } else {
+                        if explicit_repo {
+                            required_ok = false;
+                        }
+                        (
+                            if explicit_repo { "fail" } else { "warn" },
+                            format!(
+                                "relay.toml smoke_preset '{}' not found in [presets]",
+                                manifest.project.smoke_preset
+                            ),
+                        )
+                    }
+                }
+                Err(error) => {
+                    if explicit_repo {
+                        required_ok = false;
+                    }
+                    (
+                        if explicit_repo { "fail" } else { "warn" },
+                        format!("could not load relay.toml: {error}"),
+                    )
+                }
+            }
+        }
+        None => (
+            "warn",
+            "no relay.toml in current directory (pass --repo-root <path> when starting daemon)".into(),
+        ),
+    };
+    checks.push(json!({
+        "name": "repository",
+        "required": explicit_repo,
+        "status": repo_status,
+        "detail": repo_detail,
+    }));
+
+    if skip_llm {
+        checks.push(json!({
+            "name": "llm_endpoint",
+            "required": false,
+            "status": "skipped",
+            "detail": "skipped via --skip-llm",
+        }));
+    } else {
+        match resolve_llm_config(cli).and_then(|cfg| Ok(LlmClient::new(cfg, Duration::from_secs(6))?)) {
+            Ok(client) => {
+                let probe = client.probe().await;
+                checks.push(json!({
+                    "name": "llm_endpoint",
+                    "required": false,
+                    "status": if probe.ok { "ok" } else { "warn" },
+                    "detail": format!("{} ({}) — {}", probe.endpoint, probe.model, probe.message),
+                }));
+            }
+            Err(error) => {
+                checks.push(json!({
+                    "name": "llm_endpoint",
+                    "required": false,
+                    "status": "warn",
+                    "detail": error.to_string(),
+                }));
+            }
+        }
+    }
+
+    if as_json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&json!({
+                "ok": required_ok,
+                "runtime_architecture": "2 Rust binaries (relay-desktop, relay-daemon) + external runtimes (git, uv, optional Ollama/Cloud LLM)",
+                "checks": checks,
+            }))?
+        );
+    } else {
+        println!("Relay Doctor — Runtime & Environment Check");
+        for item in &checks {
+            let status = item["status"].as_str().unwrap_or("unknown").to_ascii_uppercase();
+            let name = item["name"].as_str().unwrap_or("check");
+            let detail = item["detail"].as_str().unwrap_or("");
+            println!("  [{status:<7}] {name:<14} {detail}");
+        }
+    }
+
+    anyhow::ensure!(required_ok, "One or more required Relay runtime checks failed");
+    Ok(())
+}
+
+async fn probe_binary(program: &str, args: &[&str]) -> (bool, String) {
+    match Command::new(program)
+        .args(args)
+        .stdin(Stdio::null())
+        .output()
+        .await
+    {
+        Ok(output) if output.status.success() => {
+            let line = String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .next()
+                .unwrap_or("ok")
+                .trim()
+                .to_owned();
+            (true, line)
+        }
+        Ok(output) => (
+            false,
+            format!("exited with {} ({})", output.status, String::from_utf8_lossy(&output.stderr).trim()),
+        ),
+        Err(error) => (false, format!("not found on PATH ({error})")),
+    }
 }
 
 fn spawn_host_event_loop(

@@ -1,6 +1,6 @@
 use crate::contracts::{
-    ApproveAndExecuteArgs, DagSnapshot, Freshness, NodeKind, PatchKind, ProposeWorktreePatchArgs,
-    RunPreflightArgs, TaskId, TaskState,
+    ApproveAndExecuteArgs, DagSnapshot, Freshness, HandoffSummary, NodeKind, PatchKind,
+    ProposeWorktreePatchArgs, RunPreflightArgs, TaskId, TaskRecord, TaskState,
 };
 use crate::engine::RelayEngine;
 use crate::error::{RelayError, RelayResult};
@@ -619,6 +619,196 @@ pub fn build_safe_dag_context(snapshot: &DagSnapshot) -> String {
         context.push('\n');
     }
     context
+}
+
+/// Deterministic context ablation strategies for Track 5 evaluation.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum ContextStrategy {
+    /// Unstructured chronological dump of handoffs, tasks, and all raw evidence metrics.
+    FullTranscript,
+    /// Compact flat text summary without causal edges or deterministic STALE quarantine.
+    FlatSummary,
+    /// Relay Decision-Evidence DAG bundle with deterministic STALE metric quarantine.
+    DagBundle,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Type)]
+pub struct ComposedContextBundle {
+    pub strategy: ContextStrategy,
+    pub repo_id: String,
+    pub head_commit_sha: Option<String>,
+    pub content: String,
+    pub context_bundle_hash: String,
+    pub estimated_tokens: u32,
+    pub fresh_evidence_count: u32,
+    pub stale_evidence_count: u32,
+    pub exposed_stale_metrics_count: u32,
+}
+
+/// Deterministically compose model context for one of the three Track 5 ablation strategies.
+pub fn compose_context(
+    snapshot: &DagSnapshot,
+    tasks: &[TaskRecord],
+    handoffs: &[HandoffSummary],
+    strategy: ContextStrategy,
+) -> ComposedContextBundle {
+    let mut fresh_evidence_count = 0u32;
+    let mut stale_evidence_count = 0u32;
+    for node in &snapshot.nodes {
+        if matches!(node.payload, NodeKind::Evidence { .. }) {
+            match node.freshness {
+                Freshness::Stale { .. } => stale_evidence_count += 1,
+                Freshness::Fresh | Freshness::PendingVerify => fresh_evidence_count += 1,
+            }
+        }
+    }
+
+    let (content, exposed_stale_metrics_count) = match strategy {
+        ContextStrategy::FullTranscript => {
+            let mut out = format!(
+                "[FULL TRANSCRIPT LOG]\nrepo_id: {}\nhead_commit_sha: {}\n",
+                snapshot.repo_id,
+                snapshot.head_commit_sha.as_deref().unwrap_or("none"),
+            );
+            out.push_str("\n[HANDOFF HISTORY]\n");
+            for h in handoffs {
+                out.push_str(&format!(
+                    "- [{}] device={} commit={} active_tasks={} stale_count={}: {}\n",
+                    h.handoff_id,
+                    h.source_device,
+                    h.base_commit_sha,
+                    h.active_task_count,
+                    h.stale_evidence_count,
+                    h.summary,
+                ));
+            }
+            out.push_str("\n[TASK RECORDS]\n");
+            for task in tasks {
+                let record_json = serde_json::to_string(task).unwrap_or_default();
+                out.push_str(&record_json);
+                out.push('\n');
+            }
+            out.push_str("\n[ALL GRAPH NODES & RAW METRICS]\n");
+            for node in &snapshot.nodes {
+                let node_json = serde_json::to_string(node).unwrap_or_default();
+                out.push_str(&node_json);
+                out.push('\n');
+            }
+            (out, stale_evidence_count)
+        }
+        ContextStrategy::FlatSummary => {
+            let mut out = format!(
+                "[FLAT SUMMARY]\nRepository: {} (HEAD {})\n",
+                snapshot.repo_id,
+                snapshot
+                    .head_commit_sha
+                    .as_deref()
+                    .map(|sha| &sha[..sha.len().min(7)])
+                    .unwrap_or("none"),
+            );
+            for node in &snapshot.nodes {
+                match &node.payload {
+                    NodeKind::Decision { rationale, .. } => {
+                        out.push_str(&format!("- Decision ({}): {}\n", node.label, rationale));
+                    }
+                    NodeKind::Artifact {
+                        git_commit_sha,
+                        changed_files,
+                        ..
+                    } => {
+                        let short = &git_commit_sha[..git_commit_sha.len().min(7)];
+                        out.push_str(&format!(
+                            "- Commit {short} ({}): {} files\n",
+                            node.label,
+                            changed_files.len(),
+                        ));
+                    }
+                    NodeKind::Evidence {
+                        preset,
+                        metrics_json,
+                        ..
+                    } => {
+                        let metrics = serde_json::to_string(metrics_json).unwrap_or_default();
+                        out.push_str(&format!(
+                            "- Result {} ({}): {}\n",
+                            node.id, preset, metrics,
+                        ));
+                    }
+                }
+            }
+            if let Some(latest) = handoffs.first() {
+                out.push_str(&format!("- Latest handoff: {}\n", latest.summary));
+            }
+            (out, stale_evidence_count)
+        }
+        ContextStrategy::DagBundle => {
+            let mut out = format!(
+                "[ACTIVE HEAD]\nrepo_id: {}\nhead_commit_sha: {}\n\n[DECISIONS & CONSTRAINTS]\n",
+                snapshot.repo_id,
+                snapshot.head_commit_sha.as_deref().unwrap_or("none"),
+            );
+            for node in &snapshot.nodes {
+                if let NodeKind::Decision {
+                    rationale,
+                    constraints,
+                } = &node.payload
+                {
+                    let entry = json!({
+                        "node_id": node.id,
+                        "label": node.label,
+                        "rationale": rationale,
+                        "constraints": constraints,
+                    });
+                    out.push_str(&entry.to_string());
+                    out.push('\n');
+                }
+            }
+            out.push_str("\n[CAUSAL EDGES]\n");
+            for edge in &snapshot.edges {
+                out.push_str(&format!("{} --{:?}--> {}\n", edge.from, edge.kind, edge.to));
+            }
+            out.push_str("\n[ACTIVE TASKS]\n");
+            for task in tasks {
+                if !matches!(task.state, TaskState::Completed | TaskState::Rejected) {
+                    let entry = json!({
+                        "task_id": task.spec.task_id,
+                        "preset": task.spec.command_preset,
+                        "state": task.state,
+                        "base_commit_sha": task.spec.base_commit_sha,
+                    });
+                    out.push_str(&entry.to_string());
+                    out.push('\n');
+                }
+            }
+            out.push('\n');
+            out.push_str(&build_safe_dag_context(snapshot));
+            (out, 0)
+        }
+    };
+
+    let context_bundle_hash = format!("blake3:{}", blake3::hash(content.as_bytes()).to_hex());
+    let estimated_tokens = estimate_tokens(&content);
+
+    ComposedContextBundle {
+        strategy,
+        repo_id: snapshot.repo_id.clone(),
+        head_commit_sha: snapshot.head_commit_sha.clone(),
+        content,
+        context_bundle_hash,
+        estimated_tokens,
+        fresh_evidence_count,
+        stale_evidence_count,
+        exposed_stale_metrics_count,
+    }
+}
+
+fn estimate_tokens(text: &str) -> u32 {
+    let chars = text.chars().count();
+    if chars == 0 {
+        return 0;
+    }
+    u32::try_from(chars.div_ceil(4)).unwrap_or(u32::MAX)
 }
 
 #[cfg(test)]
