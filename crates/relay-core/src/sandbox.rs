@@ -13,7 +13,7 @@ use crate::engine::RelayEngine;
 use crate::error::{RelayError, RelayResult};
 use chrono::Utc;
 use std::path::{Path, PathBuf};
-use std::process::Output;
+use std::process::{Output, Stdio};
 use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 
@@ -371,7 +371,12 @@ fn is_within_checkout(path: &Path, root: &Path) -> RelayResult<bool> {
 
 fn git_command(repo_root: &Path) -> Command {
     let mut command = Command::new("git");
-    command.arg("-C").arg(repo_root).kill_on_drop(true);
+    // Explicitly null stdin so spawning git inside `mcp-stdio` never deadlocks on Windows stdin pipes.
+    command
+        .arg("-C")
+        .arg(repo_root)
+        .stdin(Stdio::null())
+        .kill_on_drop(true);
     // Local Git variables from an invoking hook can redirect worktree operations.
     for key in ["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR"] {
         command.env_remove(key);

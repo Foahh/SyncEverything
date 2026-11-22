@@ -3,7 +3,7 @@ use clap::{Parser, Subcommand};
 use relay_core::agent::{
     InferenceTier, LlmClient, LlmEndpointConfig, load_llm_config, run_host_task_pipeline,
 };
-use relay_core::contracts::RuntimeMode;
+use relay_core::contracts::{RuntimeMode, TaskSpec};
 use relay_core::engine::RelayEngine;
 use relay_core::mcp::RelayMcpServer;
 use relay_core::sandbox::{HeadSyncOutcome, WorktreeSandbox, load_manifest, sync_git_head_into_engine};
@@ -13,6 +13,7 @@ use rmcp::transport::streamable_http_server::{
     StreamableHttpServerConfig, StreamableHttpService, session::local::LocalSessionManager,
 };
 use serde_json::json;
+use std::collections::BTreeMap;
 use std::io::ErrorKind;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -22,6 +23,7 @@ use tokio::net::TcpListener;
 use tokio::sync::mpsc;
 use tokio::time::{self, MissedTickBehavior};
 use tracing::{info, warn};
+use uuid::Uuid;
 
 const GIT_WATCH_INTERVAL: Duration = Duration::from_secs(2);
 
@@ -62,7 +64,7 @@ enum Commands {
         #[arg(long, default_value_t = 600)]
         pairing_window_secs: u64,
     },
-    /// Serve Relay MCP over stdio (compatible with dsh 0.2.0-rc.2).
+    /// Serve Relay MCP over stdio (compatible with Claude Code, Cursor, Codex, dsh, and any MCP client).
     McpStdio,
     /// Serve Relay MCP over Streamable HTTP at /mcp.
     McpHttp {
@@ -73,6 +75,26 @@ enum Commands {
     SandboxDual,
     /// Probe the configured Ollama or OpenAI-compatible Cloud LLM endpoint.
     LlmCheck,
+    /// Sync the repository's current Git HEAD into the DAG (cascading STALE if HEAD advanced).
+    SyncHead,
+    /// Submit a whitelisted task preset bound to current Git HEAD and print its TaskRecord JSON.
+    SubmitTask {
+        /// Preset name defined in `<repo>/relay.toml`.
+        #[arg(long)]
+        preset: String,
+        /// Optional key=value parameter overrides allowed by `relay.toml`.
+        #[arg(long = "param")]
+        params: Vec<String>,
+        /// Optional note explaining why this run was submitted.
+        #[arg(long)]
+        note: Option<String>,
+        /// Skip human approval when running this task.
+        #[arg(long)]
+        no_approval: bool,
+        /// Optional explicit base commit SHA (defaults to current Git HEAD).
+        #[arg(long)]
+        base_commit: Option<String>,
+    },
 }
 
 struct Repository {
@@ -272,17 +294,79 @@ async fn main() -> Result<()> {
         }
         Commands::McpStdio => {
             let (engine, sandbox) = repo.open(&cli.data_dir).await?;
+            if let Some(sb) = &sandbox
+                && let Err(error) = sync_git_head_into_engine(&engine, sb, "mcp-stdio").await
+            {
+                warn!(%error, "Unable to sync initial Git HEAD for mcp-stdio");
+            }
             let server = RelayMcpServer::new(engine, sandbox, None);
             let service = server.serve((tokio::io::stdin(), tokio::io::stdout())).await?;
             service.waiting().await?;
         }
         Commands::McpHttp { addr } => {
             let (engine, sandbox) = repo.open(&cli.data_dir).await?;
+            if let Some(sb) = &sandbox
+                && let Err(error) = sync_git_head_into_engine(&engine, sb, "mcp-http").await
+            {
+                warn!(%error, "Unable to sync initial Git HEAD for mcp-http");
+            }
             let server = RelayMcpServer::new(engine, sandbox, None);
             serve_mcp_http(TcpListener::bind(addr).await?, server).await?;
         }
         Commands::SandboxDual => sandbox_dual(&repo, &cli.data_dir).await?,
         Commands::LlmCheck => unreachable!(),
+        Commands::SyncHead => {
+            let (engine, sandbox) = repo.open(&cli.data_dir).await?;
+            let sb = sandbox.context("repository must contain both .git and relay.toml")?;
+            let out = match sync_git_head_into_engine(&engine, &sb, "cli").await? {
+                HeadSyncOutcome::Unchanged => json!({"status": "unchanged"}),
+                HeadSyncOutcome::Seeded { commit_sha } => {
+                    json!({"status": "seeded", "commit_sha": commit_sha})
+                }
+                HeadSyncOutcome::Superseded { commit_sha, report } => json!({
+                    "status": "superseded",
+                    "commit_sha": commit_sha,
+                    "trigger_node_id": report.trigger_node_id,
+                    "invalidated_evidence_ids": report.invalidated_evidence_ids,
+                    "reason": report.reason,
+                }),
+            };
+            println!("{out}");
+        }
+        Commands::SubmitTask {
+            preset,
+            params,
+            note,
+            no_approval,
+            base_commit,
+        } => {
+            let (engine, sandbox) = repo.open(&cli.data_dir).await?;
+            let sb = sandbox.context("repository must contain both .git and relay.toml")?;
+            let _ = sync_git_head_into_engine(&engine, &sb, "cli").await?;
+            let base_commit_sha = match base_commit {
+                Some(sha) => sha,
+                None => sb.head_commit_sha().await?,
+            };
+            let mut param_map = BTreeMap::new();
+            for raw in params {
+                let (k, v) = raw
+                    .split_once('=')
+                    .with_context(|| format!("expected --param KEY=VALUE, got '{raw}'"))?;
+                param_map.insert(k.trim().to_owned(), v.trim().to_owned());
+            }
+            let spec = TaskSpec {
+                task_id: Uuid::now_v7(),
+                repo_id: engine.repo_id().to_owned(),
+                base_commit_sha,
+                command_preset: preset,
+                params: param_map,
+                require_approval: !no_approval,
+                requested_by_device: "cli".into(),
+                user_note: note,
+            };
+            let (record, _) = engine.submit_task(spec).await?;
+            println!("{}", serde_json::to_string_pretty(&record)?);
+        }
     }
 
     Ok(())

@@ -226,7 +226,7 @@ impl WorktreeSandbox {
 
 fn worktree_command(program: &str, worktree_path: &Path) -> Command {
     let mut command = Command::new(program);
-    command.current_dir(worktree_path);
+    command.current_dir(worktree_path).stdin(Stdio::null());
     for key in ["VIRTUAL_ENV", "CONDA_PREFIX", "UV_PROJECT", "UV_WORKING_DIRECTORY"] {
         command.env_remove(key);
     }

@@ -589,12 +589,16 @@ fn tool_result<T: Serialize>(result: RelayResult<T>) -> Result<CallToolResult, M
 
 #[tool_router]
 impl RelayMcpServer {
-    #[tool(description = "Inspect P2P sync status, active transport path, and pending outbox count.")]
+    #[tool(
+        description = "Inspect P2P sync status, runtime mode (client/host/local_dual_sandbox), active transport path, last synced commit, and pending outbox count. Call this when asked about connectivity or sync health."
+    )]
     async fn inspect_sync_status(&self) -> Result<CallToolResult, McpError> {
         tool_result(self.handle_inspect_sync_status().await)
     }
 
-    #[tool(description = "List recent cross-device handoffs with base commit and active task count.")]
+    #[tool(
+        description = "List recent cross-device handoffs with base commit SHA, summary note, active task count, and stale evidence count."
+    )]
     async fn list_handoffs(
         &self,
         Parameters(args): Parameters<ListHandoffsArgs>,
@@ -602,7 +606,9 @@ impl RelayMcpServer {
         tool_result(self.handle_list_handoffs(args).await)
     }
 
-    #[tool(description = "Compare target commit uv.lock and pyproject environment fingerprints against the Host.")]
+    #[tool(
+        description = "Compare a target Git commit's pyproject.toml and uv.lock environment fingerprint against the Host environment, listing any missing Python packages."
+    )]
     async fn check_env_diff(
         &self,
         Parameters(args): Parameters<CheckEnvDiffArgs>,
@@ -610,7 +616,9 @@ impl RelayMcpServer {
         tool_result(self.handle_check_env_diff(args).await)
     }
 
-    #[tool(description = "Fetch the Decision-Evidence DAG snapshot with explicit STALE flags and count.")]
+    #[tool(
+        description = "Fetch the Decision-Evidence DAG snapshot with head_commit_sha, nodes, edges, stale_count, and explicit freshness flags. Always call this before answering questions about experiment metrics. NEVER cite metrics from any node whose freshness status is 'stale'."
+    )]
     async fn get_dag_snapshot(
         &self,
         Parameters(args): Parameters<GetDagSnapshotArgs>,
@@ -618,7 +626,9 @@ impl RelayMcpServer {
         tool_result(Ok(self.handle_get_dag_snapshot(args).await))
     }
 
-    #[tool(description = "Read evidence metrics and the log tail. STALE evidence is blocked.")]
+    #[tool(
+        description = "Read verified metrics and the raw log tail for a specific FRESH evidence node_id. Deterministically blocks STALE evidence nodes; do not retry if blocked."
+    )]
     async fn read_evidence_log(
         &self,
         Parameters(args): Parameters<ReadEvidenceLogArgs>,
@@ -626,7 +636,9 @@ impl RelayMcpServer {
         tool_result(self.handle_read_evidence_log(args).await)
     }
 
-    #[tool(description = "Run smoke preflight in the task's isolated Git worktree.")]
+    #[tool(
+        description = "Run the repository's smoke preflight check inside an isolated Git worktree for task_id without modifying the main working tree. Always run this before proposing a patch or executing a task."
+    )]
     async fn run_preflight_in_worktree(
         &self,
         Parameters(args): Parameters<RunPreflightArgs>,
@@ -634,7 +646,9 @@ impl RelayMcpServer {
         tool_result(self.handle_run_preflight(args).await)
     }
 
-    #[tool(description = "Apply a uv_spec or code_diff patch in the task worktree, verify smoke, and persist the proposal.")]
+    #[tool(
+        description = "After a failed smoke preflight, apply a candidate fix inside the task's isolated Git worktree, re-run smoke verification, and persist the PatchProposal. Set patch_kind to 'uv_spec' with a single Python requirement string (e.g. 'scipy>=1.14') for missing modules, or 'code_diff' with a unified git diff for code fixes."
+    )]
     async fn propose_worktree_patch(
         &self,
         Parameters(args): Parameters<ProposeWorktreePatchArgs>,
@@ -642,7 +656,9 @@ impl RelayMcpServer {
         tool_result(self.handle_propose_patch(args).await)
     }
 
-    #[tool(description = "Request human approval when needed and run the task's whitelisted experiment preset.")]
+    #[tool(
+        description = "Request human approval (MCP Elicitation or UI Diff Approval) when required and run the task's whitelisted relay.toml preset in the verified worktree. If status is approval_required, stop and report the pending patch_id and diff_preview to the user instead of retrying."
+    )]
     async fn approve_and_execute_task(
         &self,
         Parameters(args): Parameters<ApproveAndExecuteArgs>,
@@ -652,10 +668,20 @@ impl RelayMcpServer {
     }
 }
 
+const RELAY_MCP_INSTRUCTIONS: &str = concat!(
+    "Relay coordinates local AI agents across devices using a Decision-Evidence DAG and isolated Git worktree sandboxes.\n",
+    "Rules:\n",
+    "1. Call get_dag_snapshot before citing experiment metrics. NEVER cite or treat STALE evidence as valid for the current commit.\n",
+    "2. Never execute arbitrary shell commands; only run whitelisted presets through Relay task tools.\n",
+    "3. For a task_id, follow: run_preflight_in_worktree -> (if failed) propose_worktree_patch -> approve_and_execute_task.\n",
+    "4. If approve_and_execute_task returns approval_required, pause and ask the user to approve the diff rather than retrying in a loop."
+);
+
 #[tool_handler(router = self.tool_router)]
 impl ServerHandler for RelayMcpServer {
     fn get_info(&self) -> ServerConfig {
         ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
+            .with_instructions(RELAY_MCP_INSTRUCTIONS)
     }
 }
 
