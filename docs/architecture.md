@@ -71,5 +71,5 @@ Coordinate across tracks before changing the frozen MCP tools, DAG and task type
 
 ## Frozen project documents
 
-- [Project plan v2](relay_plan_v2.md) is the group’s internal plan.
-- [Project proposal v2](relay_proposal_v2.md) is the proposal for the course instructor.
+- [Project plan](relay_plan.md) is the group’s internal plan.
+- [Project proposal](relay_proposal.md) is the proposal for the course instructor.

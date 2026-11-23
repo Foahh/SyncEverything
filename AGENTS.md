@@ -6,8 +6,8 @@ Shared engineering rules, verification gates, and Conventional Commit standards 
 
 ## 1. Authoritative Project Docs (Read First, Do Not Duplicate)
 
-- [docs/relay_proposal_v2.md](docs/relay_proposal_v2.md) — Problem statement, system architecture, scope, and evaluation plan
-- [docs/relay_plan_v2.md](docs/relay_plan_v2.md) — 6-track parallel ownership boundaries, sprint milestones, and dual-mode demo plan
+- [docs/relay_proposal.md](docs/relay_proposal.md) — Problem statement, system architecture, scope, and evaluation plan
+- [docs/relay_plan.md](docs/relay_plan.md) — 6-track parallel ownership boundaries, sprint milestones, and dual-mode demo plan
 - [docs/contracts.md](docs/contracts.md) — Frozen Day 1 interfaces (MCP 8 tools, DAG, TaskSpec, Wire RPC, ChaosCase, `relay.toml`)
 - [docs/api-cheatsheet.md](docs/api-cheatsheet.md) — Verified late-2026 Rust crate versions and API patterns
 - [docs/frontend-design-spec.md](docs/frontend-design-spec.md) — Frontend design system and product UX guidelines

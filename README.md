@@ -9,8 +9,8 @@ COMP7608 Course Project — Tauri v2 + Rust Monorepo for cross-device local AI a
 ├── AGENTS.md                      # Contributor & AI Agent rules, verification gates & Conventional Commits
 ├── Cargo.toml                     # Rust Workspace (edition 2024, latest stable pinned crates)
 ├── docs/
-│   ├── relay_proposal_v2.md       # Project proposal, architecture & evaluation plan
-│   ├── relay_plan_v2.md           # 6-track parallel ownership, sprints & demo plan
+│   ├── relay_proposal.md          # Project proposal, architecture & evaluation plan
+│   ├── relay_plan.md              # 6-track parallel ownership, sprints & demo plan
 │   ├── contracts.md               # Day 1 frozen contracts (MCP, DAG, TaskSpec, Wire RPC, ChaosCase)
 │   ├── api-cheatsheet.md          # Verified late-2026 Rust API patterns for AI-assisted coding
 │   └── frontend-design-spec.md    # Frontend design system & product UX guidelines
