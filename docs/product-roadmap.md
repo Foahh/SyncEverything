@@ -12,6 +12,7 @@ These lightweight capabilities are being built right alongside Tracks 1–3 beca
 - **Real Git `HEAD` watcher**: background detection of real `git commit` changes that automatically records new `Artifact` nodes and cascades `Outdated` (`STALE`) status to downstream `Evidence` nodes without needing manual simulation buttons.
 - **`relay-daemon` ↔ `relay-desktop` Pairing Ticket interop + Host task execution**: headless `relay-daemon serve` prints ready-to-paste pairing tickets, opens a pairing window, and executes incoming preflight / self-healing / approval workflows over `iroh`.
 - **Desktop & Daemon LLM Settings**: configure Ollama (`qwen3.5:4b` / `9b`) or any OpenAI-compatible Cloud API directly from the desktop UI (or `RELAY_LLM_*` env vars) with live connectivity probing.
+- **Built-in Relay Agent side rail**: collapsible right-hand workbench rail (`Agent` / `Details` tabs) powered by native `shadcn/ui` chat primitives + `streamdown` streaming Markdown, real OpenAI-compatible SSE tool calling across all 8 frozen MCP tools plus whitelisted task dispatch, decision recording, and read-only repo inspection, per-repo SQLite chat persistence, and inline diff confirmation cards synced live with the DAG and approval queue.
 
 ---
 
@@ -31,10 +32,7 @@ These lightweight capabilities are being built right alongside Tracks 1–3 beca
 - **Multi-runtime adapters**: extend beyond `uv` (Python) to support Conda, Docker/OCI containers, Bun/Node, and Cargo/Rust sandboxes.
 - **Parameterized ad-hoc runs**: safely allow temporary overrides (e.g., pytest filter `-k`, extra hyperparameters) within explicit approval boundaries.
 
-### 4. Built-In Natural Language Workbench Prompt
-- Add an inline command bar in the desktop app (backed by the configured LLM + Relay's own MCP tools) so users can ask questions or dispatch runs directly without switching to a separate CLI client.
-
-### 5. Always-On Production Polish
+### 4. Always-On Production Polish
 - **System tray & auto-start**: run `relay-daemon` silently in the Windows/macOS menu bar or system tray with auto-reconnect across laptop sleep/wake cycles.
 - **Persistent trusted devices & revocation**: remember paired peers across restarts, label devices, and revoke compromised or retired devices from Settings.
 - **Visual two-way conflict resolver**: side-by-side diff UI when both laptop and workstation edit the same file offline.
