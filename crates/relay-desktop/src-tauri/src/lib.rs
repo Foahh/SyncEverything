@@ -1,7 +1,10 @@
 mod runtime;
 
 use chrono::Utc;
-use relay_core::agent::{InferenceTier, LlmProbeResult, LlmSettingsView};
+use relay_core::agent::{
+    AgentApprovalCard, AgentChatMessage, AgentToolTrace, InferenceTier, LlmProbeResult,
+    LlmSettingsView,
+};
 use relay_core::contracts::{
     ApprovalDecision, DagSnapshot, GraphEdge, GraphNode, HandoffSummary, PeerStatus, RuntimeMode,
     StalePropagationReport, TaskRecord, TaskSpec,
@@ -27,6 +30,17 @@ pub struct RelayStateChangedEvent {
 #[derive(Clone, Debug, Serialize, Deserialize, Type, Event)]
 pub struct DagStaleAlertEvent {
     pub report: StalePropagationReport,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, Type, Event)]
+pub struct AgentChatStreamEvent {
+    pub turn_id: String,
+    pub message_id: String,
+    pub kind: String,
+    pub delta: Option<String>,
+    pub trace: Option<AgentToolTrace>,
+    pub approval: Option<AgentApprovalCard>,
+    pub error: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Type)]
@@ -363,6 +377,59 @@ async fn connect_peer_ticket(
         .map_err(|error| error.to_string())
 }
 
+#[tauri::command]
+#[specta::specta]
+async fn list_chat_messages(
+    app: AppHandle,
+    state: State<'_, RuntimeManager>,
+    limit: Option<u32>,
+) -> Result<Vec<AgentChatMessage>, String> {
+    state
+        .get_or_init(&app)
+        .await?
+        .list_chat_messages(limit)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+#[specta::specta]
+async fn send_chat_message(
+    app: AppHandle,
+    state: State<'_, RuntimeManager>,
+    prompt: String,
+) -> Result<AgentChatMessage, String> {
+    state
+        .get_or_init(&app)
+        .await?
+        .send_chat_message(prompt)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+#[specta::specta]
+async fn cancel_chat_turn(
+    app: AppHandle,
+    state: State<'_, RuntimeManager>,
+) -> Result<bool, String> {
+    Ok(state.get_or_init(&app).await?.cancel_chat_turn().await)
+}
+
+#[tauri::command]
+#[specta::specta]
+async fn clear_chat_messages(
+    app: AppHandle,
+    state: State<'_, RuntimeManager>,
+) -> Result<(), String> {
+    state
+        .get_or_init(&app)
+        .await?
+        .clear_chat_messages()
+        .await
+        .map_err(|error| error.to_string())
+}
+
 pub fn specta_builder() -> Builder<tauri::Wry> {
     Builder::<tauri::Wry>::new()
         .commands(collect_commands![
@@ -384,8 +451,16 @@ pub fn specta_builder() -> Builder<tauri::Wry> {
             upsert_dag_node,
             get_pairing_ticket,
             connect_peer_ticket,
+            list_chat_messages,
+            send_chat_message,
+            cancel_chat_turn,
+            clear_chat_messages,
         ])
-        .events(collect_events![RelayStateChangedEvent, DagStaleAlertEvent])
+        .events(collect_events![
+            RelayStateChangedEvent,
+            DagStaleAlertEvent,
+            AgentChatStreamEvent,
+        ])
 }
 
 pub fn export_bindings_to(path: &Path) -> Result<(), String> {

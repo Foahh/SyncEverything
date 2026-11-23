@@ -24,15 +24,108 @@ export const commands = {
 	upsertDagNode: (node: GraphNode, edges: GraphEdge[], options?: InvokeOptions) => __TAURI_INVOKE<DagSnapshot_Serialize>("upsert_dag_node", { node, edges }, options),
 	getPairingTicket: (options?: InvokeOptions) => __TAURI_INVOKE<string>("get_pairing_ticket", undefined, options),
 	connectPeerTicket: (ticketJson: string, options?: InvokeOptions) => __TAURI_INVOKE<PeerStatus_Serialize>("connect_peer_ticket", { ticketJson }, options),
+	listChatMessages: (limit: number | null, options?: InvokeOptions) => __TAURI_INVOKE<AgentChatMessage_Serialize[]>("list_chat_messages", { limit }, options),
+	sendChatMessage: (prompt: string, options?: InvokeOptions) => __TAURI_INVOKE<AgentChatMessage_Serialize>("send_chat_message", { prompt }, options),
+	cancelChatTurn: (options?: InvokeOptions) => __TAURI_INVOKE<boolean>("cancel_chat_turn", undefined, options),
+	clearChatMessages: (options?: InvokeOptions) => __TAURI_INVOKE<null>("clear_chat_messages", undefined, options),
 };
 
 /** Events */
 export const events = {
+	agentChatStreamEvent: makeEvent<AgentChatStreamEvent_Serialize, AgentChatStreamEvent_Deserialize>("agent-chat-stream-event"),
 	dagStaleAlertEvent: makeEvent<DagStaleAlertEvent, DagStaleAlertEvent>("dag-stale-alert-event"),
 	relayStateChangedEvent: makeEvent<RelayStateChangedEvent, RelayStateChangedEvent>("relay-state-changed-event"),
 };
 
 /* Types */
+export type AgentApprovalCard = AgentApprovalCard_Serialize | AgentApprovalCard_Deserialize;
+
+export type AgentApprovalCard_Deserialize = {
+	task_id: string,
+	patch_id?: string | null,
+	summary: string,
+	diff_preview: string,
+	/**  `None` while awaiting human confirmation; `Some("approved")` or `Some("rejected")` once resolved. */
+	resolved?: string | null,
+};
+
+export type AgentApprovalCard_Serialize = {
+	task_id: string,
+	patch_id: string | null,
+	summary: string,
+	diff_preview: string,
+	/**  `None` while awaiting human confirmation; `Some("approved")` or `Some("rejected")` once resolved. */
+	resolved: string | null,
+};
+
+export type AgentChatMessage = AgentChatMessage_Serialize | AgentChatMessage_Deserialize;
+
+export type AgentChatMessage_Deserialize = {
+	id: string,
+	repo_id: string,
+	role: AgentChatRole,
+	content: string,
+	traces?: AgentToolTrace_Deserialize[],
+	approval?: AgentApprovalCard_Deserialize | null,
+	error?: string | null,
+	created_at: string,
+};
+
+export type AgentChatMessage_Serialize = {
+	id: string,
+	repo_id: string,
+	role: AgentChatRole,
+	content: string,
+	traces: AgentToolTrace_Serialize[],
+	approval: AgentApprovalCard_Serialize | null,
+	error: string | null,
+	created_at: string,
+};
+
+export type AgentChatRole = "user" | "assistant";
+
+export type AgentChatStreamEvent = AgentChatStreamEvent_Serialize | AgentChatStreamEvent_Deserialize;
+
+export type AgentChatStreamEvent_Deserialize = {
+	turn_id: string,
+	message_id: string,
+	kind: string,
+	delta?: string | null,
+	trace?: AgentToolTrace_Deserialize | null,
+	approval?: AgentApprovalCard_Deserialize | null,
+	error?: string | null,
+};
+
+export type AgentChatStreamEvent_Serialize = {
+	turn_id: string,
+	message_id: string,
+	kind: string,
+	delta: string | null,
+	trace: AgentToolTrace_Serialize | null,
+	approval: AgentApprovalCard_Serialize | null,
+	error: string | null,
+};
+
+export type AgentToolTrace = AgentToolTrace_Serialize | AgentToolTrace_Deserialize;
+
+export type AgentToolTrace_Deserialize = {
+	id: string,
+	tool_name: string,
+	args_preview: string,
+	status: ToolTraceStatus,
+	output_preview?: string | null,
+	duration_ms?: number | null,
+};
+
+export type AgentToolTrace_Serialize = {
+	id: string,
+	tool_name: string,
+	args_preview: string,
+	status: ToolTraceStatus,
+	output_preview: string | null,
+	duration_ms: number | null,
+};
+
 export type ApprovalDecision = "approved" | "rejected";
 
 export type DagSnapshot = DagSnapshot_Serialize | DagSnapshot_Deserialize;
@@ -258,6 +351,8 @@ export type TaskSpec_Serialize = {
 };
 
 export type TaskState = "queued" | "preflight_running" | "self_healing_proposed" | "executing" | "completed" | "failed" | "stale" | "rejected";
+
+export type ToolTraceStatus = "running" | "done" | "error";
 
 export type TransportPath = "direct_lan" | "relay" | "loopback" | "offline";
 

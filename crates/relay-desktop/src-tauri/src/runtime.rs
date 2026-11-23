@@ -1,3 +1,4 @@
+mod copilot;
 mod network;
 
 use crate::{
@@ -25,6 +26,7 @@ use serde::{Deserialize, Serialize};
 use std::env;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tauri::AppHandle;
 use tauri_specta::Event;
@@ -53,6 +55,7 @@ pub(crate) struct DesktopRuntime {
     mcp: Arc<RelayMcpServer>,
     network: Mutex<Option<Network>>,
     llm_config: RwLock<LlmEndpointConfig>,
+    active_chat_cancel: Mutex<Option<Arc<AtomicBool>>>,
     shutdown: watch::Sender<bool>,
 }
 
@@ -193,6 +196,7 @@ impl DesktopRuntime {
             mcp,
             network: Mutex::new(Some(network)),
             llm_config: RwLock::new(llm_config),
+            active_chat_cancel: Mutex::new(None),
             shutdown,
         });
         runtime.listen(events, mode);
@@ -203,6 +207,9 @@ impl DesktopRuntime {
 
     pub(crate) async fn shutdown(&self) {
         let _ = self.shutdown.send(true);
+        if let Some(cancel) = self.active_chat_cancel.lock().await.take() {
+            cancel.store(true, Ordering::Relaxed);
+        }
         if let Some(network) = self.network.lock().await.take() {
             network.shutdown().await;
         }
@@ -463,7 +470,7 @@ impl DesktopRuntime {
 
         if let Some(address) = remote {
             if network.mode == RuntimeMode::LocalDualSandbox {
-                return network
+                let record = network
                     .local
                     .resolve_remote_approval(
                         address,
@@ -471,7 +478,9 @@ impl DesktopRuntime {
                         patch_id.map(str::to_owned),
                         decision,
                     )
-                    .await;
+                    .await?;
+                self.sync_chat_approval_card(task_id, decision).await;
+                return Ok(record);
             }
             let request = WireRequest::ResolveApproval {
                 task_id,
@@ -483,6 +492,7 @@ impl DesktopRuntime {
                 Ok(response) => {
                     let record = task_response(response)?;
                     self.engine.mirror_peer_task(&record).await?;
+                    self.sync_chat_approval_card(task_id, decision).await;
                     self.approval_resolved(task_id, decision, false);
                     return Ok(record);
                 }
@@ -501,8 +511,24 @@ impl DesktopRuntime {
                 .resolve_ui_approval(task_id, patch_id, decision)
                 .await?
         };
+        self.sync_chat_approval_card(task_id, decision).await;
         self.approval_resolved(task_id, decision, network.mode == RuntimeMode::Host);
         Ok(record)
+    }
+
+    async fn sync_chat_approval_card(&self, task_id: TaskId, decision: ApprovalDecision) {
+        let label = match decision {
+            ApprovalDecision::Approved => "approved",
+            ApprovalDecision::Rejected => "rejected",
+        };
+        if let Ok(updated) = self
+            .engine
+            .mark_chat_approval_resolved(&task_id.to_string(), label)
+            .await
+            && updated > 0
+        {
+            emit_state(&self.app, "chat_updated", "Updated Copilot approval card");
+        }
     }
 
     pub(crate) async fn supersede_artifact(
@@ -697,6 +723,10 @@ impl DesktopRuntime {
             "approval_resolved",
             format!("Task {id}: {decision:?}"),
         );
+        let sync_runtime = self.clone();
+        tauri::async_runtime::spawn(async move {
+            sync_runtime.sync_chat_approval_card(id, decision).await;
+        });
         if execute && self.sandbox.is_some() {
             let runtime = self.clone();
             tauri::async_runtime::spawn(async move {
