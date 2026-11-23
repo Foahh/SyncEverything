@@ -12,7 +12,7 @@ use crate::contracts::{
 use crate::engine::RelayEngine;
 use crate::error::{RelayError, RelayResult};
 use chrono::Utc;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::process::{Output, Stdio};
 use tokio::io::AsyncReadExt;
 use tokio::process::Command;
@@ -188,6 +188,127 @@ impl WorktreeSandbox {
         ]))
         .await?;
         Ok(!output.stdout.is_empty())
+    }
+
+    /// Read a UTF-8 file strictly inside the repository root with line numbers.
+    /// Blocks path traversal (`..`), symlinks escaping the repo, `.git` internals, and `.env*` secrets.
+    pub async fn read_repo_file(&self, relative_path: &str, max_bytes: usize) -> RelayResult<String> {
+        let trimmed = relative_path.trim();
+        if trimmed.is_empty() {
+            return Err(RelayError::Internal("file path must not be empty".into()));
+        }
+        let rel = Path::new(trimmed);
+        if rel.is_absolute() {
+            return Err(RelayError::Internal(
+                "read_repo_file requires a repository-relative path".into(),
+            ));
+        }
+        let mut has_normal = false;
+        for component in rel.components() {
+            match component {
+                Component::Normal(part) => {
+                    has_normal = true;
+                    let name = part.to_string_lossy().to_ascii_lowercase();
+                    if matches!(name.as_str(), ".git" | ".relay" | ".relay-desktop")
+                        || name.starts_with(".env")
+                        || name.ends_with(".db")
+                        || name.ends_with(".db-wal")
+                        || name.ends_with(".db-shm")
+                        || name.ends_with(".pem")
+                        || name.ends_with(".key")
+                    {
+                        return Err(RelayError::Internal(format!(
+                            "access to protected path '{trimmed}' is blocked"
+                        )));
+                    }
+                }
+                Component::CurDir => {}
+                Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
+                    return Err(RelayError::Internal(format!(
+                        "path traversal outside repository is blocked: '{trimmed}'"
+                    )));
+                }
+            }
+        }
+        if !has_normal {
+            return Err(RelayError::Internal("invalid repository file path".into()));
+        }
+
+        let canonical_root = std::fs::canonicalize(&self.repo_root)?;
+        let candidate = self.repo_root.join(rel);
+        let canonical_file = std::fs::canonicalize(&candidate).map_err(|err| {
+            RelayError::Internal(format!("could not open '{trimmed}': {err}"))
+        })?;
+        if !canonical_file.starts_with(&canonical_root) {
+            return Err(RelayError::Internal(format!(
+                "path '{trimmed}' resolves outside the active repository"
+            )));
+        }
+        let metadata = tokio::fs::metadata(&canonical_file).await?;
+        if !metadata.is_file() {
+            return Err(RelayError::Internal(format!(
+                "'{trimmed}' is not a regular file"
+            )));
+        }
+
+        let bytes = tokio::fs::read(&canonical_file).await?;
+        if bytes.iter().take(4096).any(|b| *b == 0) {
+            return Err(RelayError::Internal(format!(
+                "'{trimmed}' appears to be a binary file"
+            )));
+        }
+        let text = String::from_utf8(bytes).map_err(|_| {
+            RelayError::Internal(format!("'{trimmed}' is not valid UTF-8 text"))
+        })?;
+
+        let cap = max_bytes.max(256);
+        let mut formatted = String::new();
+        let mut truncated = false;
+        for (idx, line) in text.lines().enumerate() {
+            let entry = format!("{:>4}: {}\n", idx + 1, line);
+            if formatted.len() + entry.len() > cap {
+                truncated = true;
+                break;
+            }
+            formatted.push_str(&entry);
+        }
+        if truncated {
+            formatted.push_str("... [truncated]\n");
+        }
+        Ok(formatted)
+    }
+
+    /// Return `git status --short` and uncommitted `git diff HEAD` (strictly read-only).
+    pub async fn git_status_and_diff(&self, max_bytes: usize) -> RelayResult<String> {
+        let status_out =
+            git_output(git_command(&self.repo_root).args(["status", "--short"])).await?;
+        let status_text = output_text(&status_out.stdout);
+        let diff_text = working_diff(&self.repo_root).await?;
+
+        let mut out = String::from("[git status --short]\n");
+        if status_text.is_empty() {
+            out.push_str("(clean working tree)\n");
+        } else {
+            out.push_str(&status_text);
+            out.push('\n');
+        }
+        out.push_str("\n[git diff HEAD]\n");
+        if diff_text.is_empty() {
+            out.push_str("(no uncommitted diff)\n");
+        } else {
+            out.push_str(&diff_text);
+        }
+
+        let cap = max_bytes.max(512);
+        if out.len() > cap {
+            let mut end = cap;
+            while end > 0 && !out.is_char_boundary(end) {
+                end -= 1;
+            }
+            out.truncate(end);
+            out.push_str("\n... [diff truncated]");
+        }
+        Ok(out)
     }
 
     pub async fn prepare_worktree(

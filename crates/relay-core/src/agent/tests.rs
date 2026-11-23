@@ -337,3 +337,176 @@ fn compose_context_ablation_strategies_are_deterministic_and_quarantine_stale_in
     assert!(dag.content.contains("\"ev-stale\""));
     assert!(dag.estimated_tokens < full.estimated_tokens);
 }
+
+#[tokio::test]
+async fn stream_chat_with_tools_parses_chunked_sse_text_and_tool_calls() {
+    use std::sync::atomic::AtomicBool;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut buf = [0u8; 8192];
+        let _ = socket.read(&mut buf).await.unwrap();
+        let sse = concat!(
+            "HTTP/1.1 200 OK\r\n",
+            "content-type: text/event-stream\r\n",
+            "connection: close\r\n\r\n",
+            "data: {\"choices\":[{\"delta\":{\"content\":\"Checking \"}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"content\":\"DAG...\"}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_abc\",\"function\":{\"name\":\"get_dag_\",\"arguments\":\"{\\\"include_\"}}]}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"name\":\"snapshot\",\"arguments\":\"stale\\\":true}\"}}]}}]}\n\n",
+            "data: [DONE]\n\n"
+        );
+        socket.write_all(sse.as_bytes()).await.unwrap();
+    });
+
+    let client = endpoint(format!("http://{addr}/v1"));
+    let cancel = AtomicBool::new(false);
+    let mut streamed = Vec::new();
+    let turn = client
+        .stream_chat_with_tools(
+            &[json!({"role": "user", "content": "status?"})],
+            &copilot_tool_definitions(),
+            &cancel,
+            |delta| streamed.push(delta.to_owned()),
+        )
+        .await
+        .unwrap();
+    server.await.unwrap();
+
+    assert_eq!(streamed, vec!["Checking ", "DAG..."]);
+    assert_eq!(turn.content, "Checking DAG...");
+    assert_eq!(turn.tool_calls.len(), 1);
+    assert_eq!(turn.tool_calls[0].id, "call_abc");
+    assert_eq!(turn.tool_calls[0].name, "get_dag_snapshot");
+    assert_eq!(turn.tool_calls[0].arguments, "{\"include_stale\":true}");
+}
+
+#[tokio::test]
+async fn stream_chat_with_tools_falls_back_to_non_streaming_on_http_400() {
+    use std::sync::atomic::AtomicBool;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        // First request: reject streaming with HTTP 400
+        {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 8192];
+            let _ = socket.read(&mut buf).await.unwrap();
+            let resp = "HTTP/1.1 400 Bad Request\r\ncontent-length: 23\r\nconnection: close\r\n\r\nstreaming not supported";
+            socket.write_all(resp.as_bytes()).await.unwrap();
+        }
+        // Second request: return non-streaming JSON
+        {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 8192];
+            let _ = socket.read(&mut buf).await.unwrap();
+            let body = json!({
+                "choices": [{
+                    "message": {
+                        "role": "assistant",
+                        "content": "Fallback ok",
+                        "tool_calls": [{
+                            "id": "call_1",
+                            "type": "function",
+                            "function": {
+                                "name": "inspect_sync_status",
+                                "arguments": "{}"
+                            }
+                        }]
+                    }
+                }]
+            })
+            .to_string();
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            socket.write_all(resp.as_bytes()).await.unwrap();
+        }
+    });
+
+    let client = endpoint(format!("http://{addr}/v1"));
+    let cancel = AtomicBool::new(false);
+    let mut streamed = String::new();
+    let turn = client
+        .stream_chat_with_tools(
+            &[json!({"role": "user", "content": "sync?"})],
+            &copilot_tool_definitions(),
+            &cancel,
+            |delta| streamed.push_str(delta),
+        )
+        .await
+        .unwrap();
+    server.await.unwrap();
+
+    assert_eq!(streamed, "Fallback ok");
+    assert_eq!(turn.content, "Fallback ok");
+    assert_eq!(turn.tool_calls.len(), 1);
+    assert_eq!(turn.tool_calls[0].name, "inspect_sync_status");
+}
+
+#[tokio::test]
+async fn engine_persists_chat_history_and_resolves_approvals() {
+    let engine = RelayEngine::in_memory("forecast-bench", None).await.unwrap();
+    let now = Utc::now();
+    let user_msg = AgentChatMessage {
+        id: "msg-1".into(),
+        repo_id: "forecast-bench".into(),
+        role: AgentChatRole::User,
+        content: "Run smoke check".into(),
+        traces: vec![],
+        approval: None,
+        error: None,
+        created_at: now,
+    };
+    let assistant_msg = AgentChatMessage {
+        id: "msg-2".into(),
+        repo_id: "forecast-bench".into(),
+        role: AgentChatRole::Assistant,
+        content: "Patch ready for review.".into(),
+        traces: vec![AgentToolTrace {
+            id: "tr-1".into(),
+            tool_name: "propose_worktree_patch".into(),
+            args_preview: "{\"task_id\":\"t1\"}".into(),
+            status: ToolTraceStatus::Done,
+            output_preview: Some("smoke_verified: true".into()),
+            duration_ms: Some(120),
+        }],
+        approval: Some(AgentApprovalCard {
+            task_id: "task-42".into(),
+            patch_id: Some("patch-9".into()),
+            summary: "Add scipy dependency".into(),
+            diff_preview: "+scipy>=1.14".into(),
+            resolved: None,
+        }),
+        error: None,
+        created_at: now + chrono::Duration::milliseconds(5),
+    };
+
+    engine.upsert_chat_message(&user_msg).await.unwrap();
+    engine.upsert_chat_message(&assistant_msg).await.unwrap();
+
+    let listed = engine.list_chat_messages(50).await.unwrap();
+    assert_eq!(listed.len(), 2);
+    assert_eq!(listed[0].id, "msg-1");
+    assert_eq!(listed[1].traces.len(), 1);
+    assert_eq!(listed[1].approval.as_ref().unwrap().resolved, None);
+
+    let updated = engine
+        .mark_chat_approval_resolved("task-42", "approved")
+        .await
+        .unwrap();
+    assert_eq!(updated, 1);
+
+    let after = engine.list_chat_messages(50).await.unwrap();
+    assert_eq!(
+        after[1].approval.as_ref().unwrap().resolved.as_deref(),
+        Some("approved")
+    );
+
+    engine.clear_chat_messages().await.unwrap();
+    assert!(engine.list_chat_messages(50).await.unwrap().is_empty());
+}

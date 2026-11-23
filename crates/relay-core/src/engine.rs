@@ -1,3 +1,4 @@
+use crate::agent::AgentChatMessage;
 use crate::contracts::{
     ApprovalDecision, DagDelta, DagSnapshot, EdgeKind, Freshness, GraphEdge, GraphNode,
     HandoffSummary, NodeKind, PatchProposal, RuntimeMode, StalePropagationReport, TaskId,
@@ -637,6 +638,29 @@ impl RelayEngine {
 
     pub async fn list_handoffs(&self, limit: u32) -> RelayResult<Vec<HandoffSummary>> {
         self.store.list_repo_handoffs(Some(&self.repo_id), limit).await
+    }
+
+    pub async fn list_chat_messages(&self, limit: u32) -> RelayResult<Vec<AgentChatMessage>> {
+        self.store.list_chat_messages(&self.repo_id, limit).await
+    }
+
+    pub async fn upsert_chat_message(&self, message: &AgentChatMessage) -> RelayResult<()> {
+        self.check_repo(&message.repo_id)?;
+        self.store.upsert_chat_message(message).await
+    }
+
+    pub async fn clear_chat_messages(&self) -> RelayResult<()> {
+        self.store.clear_chat_messages(&self.repo_id).await
+    }
+
+    pub async fn mark_chat_approval_resolved(
+        &self,
+        task_id: &str,
+        decision: &str,
+    ) -> RelayResult<u32> {
+        self.store
+            .resolve_chat_approvals(&self.repo_id, task_id, decision)
+            .await
     }
 
     pub async fn enqueue_outbox(&self, payload: &Value) -> RelayResult<i64> {

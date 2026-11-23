@@ -1,3 +1,9 @@
+mod copilot;
+pub use copilot::{
+    AgentApprovalCard, AgentChatMessage, AgentChatRole, AgentToolTrace, COPILOT_SYSTEM_PROMPT,
+    LlmToolCall, StreamedChatTurn, ToolTraceStatus, copilot_tool_definitions,
+};
+
 use crate::contracts::{
     ApproveAndExecuteArgs, DagSnapshot, Freshness, HandoffSummary, NodeKind, PatchKind,
     ProposeWorktreePatchArgs, RunPreflightArgs, TaskId, TaskRecord, TaskState,

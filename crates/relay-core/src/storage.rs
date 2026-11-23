@@ -1,3 +1,4 @@
+use crate::agent::{AgentApprovalCard, AgentChatMessage, AgentChatRole, AgentToolTrace};
 use crate::contracts::{
     EdgeKind, Freshness, GraphEdge, GraphNode, HandoffSummary, NodeKind, PatchProposal, RuntimeMode,
     TaskId, TaskRecord, TaskSpec, TaskState,
@@ -73,11 +74,23 @@ CREATE TABLE IF NOT EXISTS sync_outbox (
     created_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS chat_messages (
+    id TEXT PRIMARY KEY NOT NULL,
+    repo_id TEXT NOT NULL,
+    role TEXT NOT NULL,
+    content TEXT NOT NULL,
+    traces_json TEXT NOT NULL,
+    approval_json TEXT,
+    error_message TEXT,
+    created_at TEXT NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS dag_nodes_repo ON dag_nodes (repo_id);
 CREATE INDEX IF NOT EXISTS dag_edges_repo ON dag_edges (repo_id);
 CREATE INDEX IF NOT EXISTS tasks_repo_created ON tasks (repo_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS handoffs_repo_created ON handoffs (repo_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS sync_outbox_pending ON sync_outbox (repo_id, seq) WHERE delivered = 0;
+CREATE INDEX IF NOT EXISTS chat_messages_repo_created ON chat_messages (repo_id, created_at ASC);
 "#;
 
 #[derive(Clone, Debug)]
@@ -363,6 +376,127 @@ impl RelayStore {
         .bind(repo_id)
         .fetch_one(&self.pool)
         .await?)
+    }
+
+    pub async fn list_chat_messages(
+        &self,
+        repo_id: &str,
+        limit: u32,
+    ) -> RelayResult<Vec<AgentChatMessage>> {
+        type ChatRow = (
+            String,
+            String,
+            Json<AgentChatRole>,
+            String,
+            Json<Vec<AgentToolTrace>>,
+            Option<Json<AgentApprovalCard>>,
+            Option<String>,
+            DateTime<Utc>,
+        );
+        let rows = sqlx::query_as::<_, ChatRow>(
+            "SELECT id, repo_id, role, content, traces_json, approval_json, error_message, created_at
+             FROM (
+                 SELECT id, repo_id, role, content, traces_json, approval_json, error_message, created_at, rowid
+                 FROM chat_messages
+                 WHERE repo_id = ?1
+                 ORDER BY created_at DESC, rowid DESC
+                 LIMIT ?2
+             )
+             ORDER BY created_at ASC, rowid ASC",
+        )
+        .bind(repo_id)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .into_iter()
+            .map(
+                |(id, repo_id, Json(role), content, Json(traces), approval, error, created_at)| {
+                    AgentChatMessage {
+                        id,
+                        repo_id,
+                        role,
+                        content,
+                        traces,
+                        approval: approval.map(|Json(card)| card),
+                        error,
+                        created_at,
+                    }
+                },
+            )
+            .collect())
+    }
+
+    pub async fn upsert_chat_message(&self, message: &AgentChatMessage) -> RelayResult<()> {
+        let result = sqlx::query(
+            "INSERT INTO chat_messages (id, repo_id, role, content, traces_json, approval_json, error_message, created_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+             ON CONFLICT (id) DO UPDATE SET
+                 content = excluded.content,
+                 traces_json = excluded.traces_json,
+                 approval_json = excluded.approval_json,
+                 error_message = excluded.error_message
+             WHERE chat_messages.repo_id = excluded.repo_id",
+        )
+        .bind(&message.id)
+        .bind(&message.repo_id)
+        .bind(Json(message.role))
+        .bind(&message.content)
+        .bind(Json(&message.traces))
+        .bind(message.approval.as_ref().map(Json))
+        .bind(&message.error)
+        .bind(timestamp(message.created_at))
+        .execute(&self.pool)
+        .await?;
+        if result.rows_affected() == 0 {
+            return Err(RelayError::Internal(format!(
+                "chat message {} belongs to another repository",
+                message.id,
+            )));
+        }
+        Ok(())
+    }
+
+    pub async fn clear_chat_messages(&self, repo_id: &str) -> RelayResult<()> {
+        sqlx::query("DELETE FROM chat_messages WHERE repo_id = ?")
+            .bind(repo_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    pub async fn resolve_chat_approvals(
+        &self,
+        repo_id: &str,
+        task_id: &str,
+        decision: &str,
+    ) -> RelayResult<u32> {
+        let mut tx = self.begin_write().await?;
+        let rows = sqlx::query_as::<_, (String, Json<AgentApprovalCard>)>(
+            "SELECT id, approval_json FROM chat_messages
+             WHERE repo_id = ? AND approval_json IS NOT NULL",
+        )
+        .bind(repo_id)
+        .fetch_all(&mut *tx)
+        .await?;
+
+        let mut updated = 0u32;
+        for (id, Json(mut card)) in rows {
+            if card.task_id == task_id && card.resolved.as_deref() != Some(decision) {
+                card.resolved = Some(decision.to_owned());
+                sqlx::query(
+                    "UPDATE chat_messages SET approval_json = ? WHERE id = ? AND repo_id = ?",
+                )
+                .bind(Json(&card))
+                .bind(&id)
+                .bind(repo_id)
+                .execute(&mut *tx)
+                .await?;
+                updated += 1;
+            }
+        }
+        tx.commit().await?;
+        Ok(updated)
     }
 }
 

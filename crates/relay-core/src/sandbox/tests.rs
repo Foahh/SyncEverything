@@ -402,3 +402,26 @@ async fn sync_git_head_seeds_and_invalidates_evidence_on_new_commit() {
         .unwrap();
     assert_eq!(second_node.label, "Update forecast logic");
 }
+
+#[tokio::test]
+async fn read_repo_file_and_git_diff_enforce_repo_confinement() {
+    let temp = TempDir::new();
+    let repo = temp.join("safe-read");
+    init_python_repo(&repo).await;
+    fs::write(repo.join(".env"), "API_KEY=secret\n").unwrap();
+    let sandbox = WorktreeSandbox::new(&repo, temp.join("worktrees"));
+
+    let numbered = sandbox.read_repo_file("src/app.py", 4096).await.unwrap();
+    assert!(numbered.contains("   1: import argparse"));
+    assert!(sandbox.read_repo_file("../outside.txt", 4096).await.is_err());
+    assert!(sandbox.read_repo_file(".git/config", 4096).await.is_err());
+    assert!(sandbox.read_repo_file(".env", 4096).await.is_err());
+
+    let clean = sandbox.git_status_and_diff(4096).await.unwrap();
+    assert!(clean.contains("(no uncommitted diff)"));
+
+    fs::write(repo.join("src/app.py"), format!("{PYTHON}\n# modified line\n")).unwrap();
+    let dirty = sandbox.git_status_and_diff(4096).await.unwrap();
+    assert!(dirty.contains("M src/app.py"));
+    assert!(dirty.contains("+# modified line"));
+}
