@@ -1,8 +1,8 @@
-import { useEffect, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
 import type { ApprovalDecision, GraphNode, TaskRecord_Serialize } from "./bindings";
 import { DagCanvas } from "./components/DagCanvas";
-import { InspectorDrawer } from "./components/InspectorDrawer";
 import { LeftRail } from "./components/LeftRail";
+import { RightWorkbenchRail, type RightRailTab } from "./components/RightWorkbenchRail";
 import { TopTelemetryBar } from "./components/TopTelemetryBar";
 import {
   DispatchTaskModal,
@@ -14,8 +14,11 @@ import {
   WorkspaceSettingsModal,
   type SettingsTab,
 } from "./components/modals/WorkspaceSettingsModal";
+import { useCopilotChat } from "./hooks/useCopilotChat";
+import { useRelayTheme } from "./hooks/useRelayTheme";
 import {
   useDagSnapshot,
+  useLlmSettings,
   useRelayEventSync,
   useResetPreviewDemo,
   useResolvePatchApproval,
@@ -28,34 +31,15 @@ import {
   useWorkspaceInfo,
 } from "./lib/queries";
 
-const THEME_STORAGE_KEY = "relay.theme";
-type ThemeScheme = "light" | "dark";
-
-function readStoredTheme(): ThemeScheme | null {
-  if (typeof window === "undefined") return null;
-  try {
-    const saved = window.localStorage.getItem(THEME_STORAGE_KEY);
-    return saved === "light" || saved === "dark" ? saved : null;
-  } catch {
-    return null;
-  }
-}
-
-function readSystemTheme(): ThemeScheme {
-  if (typeof window === "undefined" || typeof window.matchMedia !== "function") return "light";
-  return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
-}
-
 export default function App() {
   useRelayEventSync();
-
-  const [storedTheme, setStoredTheme] = useState<ThemeScheme | null>(readStoredTheme);
-  const [systemTheme, setSystemTheme] = useState<ThemeScheme>(readSystemTheme);
-  const theme: ThemeScheme = storedTheme ?? systemTheme;
+  const { theme, toggleTheme } = useRelayTheme();
 
   const [includeStale, setIncludeStale] = useState(true);
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
-  const [drawerMode, setDrawerMode] = useState<"closed" | "node" | "fix">("closed");
+  const [rightRailOpen, setRightRailOpen] = useState(true);
+  const [rightRailTab, setRightRailTab] = useState<RightRailTab>("agent");
+  const [inspectorMode, setInspectorMode] = useState<"node" | "fix">("node");
   const [activeApprovalTaskId, setActiveApprovalTaskId] = useState<string | null>(null);
   const [decisionModalOpen, setDecisionModalOpen] = useState(false);
   const [taskModalOpen, setTaskModalOpen] = useState(false);
@@ -65,8 +49,10 @@ export default function App() {
 
   const { data: status } = useRuntimeStatus();
   const { data: workspace } = useWorkspaceInfo();
+  const { data: llmSettings } = useLlmSettings();
   const { data: dag } = useDagSnapshot(includeStale);
   const { data: tasks = [] } = useTasks();
+  const copilot = useCopilotChat();
 
   const switchMode = useSwitchRuntimeMode();
   const submitTask = useSubmitTask();
@@ -74,55 +60,6 @@ export default function App() {
   const simulateEdit = useSimulateArtifactUpdate();
   const upsertNode = useUpsertDagNode();
   const resetDemo = useResetPreviewDemo();
-
-  useEffect(() => {
-    const root = document.documentElement;
-    root.classList.toggle("dark", theme === "dark");
-    root.dataset.theme = theme;
-    const meta = document.querySelector<HTMLMetaElement>('meta[name="color-scheme"]');
-    if (meta) {
-      meta.content = storedTheme ?? "light dark";
-    }
-  }, [theme, storedTheme]);
-
-  useEffect(() => {
-    if (typeof window === "undefined") return;
-    const media = window.matchMedia?.("(prefers-color-scheme: dark)");
-    const handleMediaChange = (event: MediaQueryListEvent) => {
-      setSystemTheme(event.matches ? "dark" : "light");
-    };
-    const handleStorage = (event: StorageEvent) => {
-      if (event.key === THEME_STORAGE_KEY) {
-        setStoredTheme(readStoredTheme());
-      }
-    };
-    media?.addEventListener("change", handleMediaChange);
-    window.addEventListener("storage", handleStorage);
-    return () => {
-      media?.removeEventListener("change", handleMediaChange);
-      window.removeEventListener("storage", handleStorage);
-    };
-  }, []);
-
-  const handleToggleTheme = () => {
-    const target: ThemeScheme = theme === "light" ? "dark" : "light";
-    const currentSystem = readSystemTheme();
-    if (target === currentSystem) {
-      setStoredTheme(null);
-      try {
-        window.localStorage.removeItem(THEME_STORAGE_KEY);
-      } catch {
-        // Ignore storage errors in restricted environments
-      }
-    } else {
-      setStoredTheme(target);
-      try {
-        window.localStorage.setItem(THEME_STORAGE_KEY, target);
-      } catch {
-        // Ignore storage errors in restricted environments
-      }
-    }
-  };
 
   const selectedNode: GraphNode | null = useMemo(() => {
     if (!selectedNodeId || !dag) return null;
@@ -149,15 +86,26 @@ export default function App() {
   const handleSelectNode = (nodeId: string | null) => {
     setSelectedNodeId(nodeId);
     if (nodeId) {
-      setDrawerMode("node");
-    } else if (drawerMode === "node") {
-      setDrawerMode("closed");
+      setInspectorMode("node");
+      setRightRailTab("inspector");
+      setRightRailOpen(true);
     }
   };
 
   const handleOpenApproval = (task: TaskRecord_Serialize) => {
     setActiveApprovalTaskId(task.spec.task_id);
-    setDrawerMode("fix");
+    setInspectorMode("fix");
+    setRightRailTab("inspector");
+    setRightRailOpen(true);
+  };
+
+  const handleToggleCopilot = () => {
+    if (rightRailOpen && rightRailTab === "agent") {
+      setRightRailOpen(false);
+    } else {
+      setRightRailTab("agent");
+      setRightRailOpen(true);
+    }
   };
 
   const handleTriggerUpstreamEdit = () => {
@@ -207,7 +155,9 @@ export default function App() {
       {
         onSuccess: () => {
           setSelectedNodeId(id);
-          setDrawerMode("node");
+          setInspectorMode("node");
+          setRightRailTab("inspector");
+          setRightRailOpen(true);
         },
       },
     );
@@ -231,16 +181,24 @@ export default function App() {
     setSettingsModalOpen(true);
   };
 
-  const handleResolveApproval = (taskId: string, decision: ApprovalDecision) => {
+  const handleResolveApproval = (
+    taskId: string,
+    decision: ApprovalDecision,
+    fromTab: RightRailTab,
+  ) => {
     resolveApproval.mutate(
       { taskId, decision },
       {
         onSuccess: (updated) => {
+          if (fromTab === "agent") {
+            return;
+          }
           if (updated.evidence_node_id) {
             setSelectedNodeId(updated.evidence_node_id);
-            setDrawerMode("node");
+            setInspectorMode("node");
+            setRightRailTab("inspector");
           } else {
-            setDrawerMode("closed");
+            setRightRailTab("agent");
           }
         },
       },
@@ -255,7 +213,9 @@ export default function App() {
         headCommitSha={dag?.head_commit_sha ?? null}
         staleCount={dag?.stale_count ?? 0}
         theme={theme}
-        onToggleTheme={handleToggleTheme}
+        isCopilotOpen={rightRailOpen && rightRailTab === "agent"}
+        onToggleTheme={toggleTheme}
+        onToggleCopilot={handleToggleCopilot}
         onOpenPairModal={() => setPairModalOpen(true)}
         onOpenRunTask={() => setTaskModalOpen(true)}
         onOpenRepoSettings={() => handleOpenSettings("repo")}
@@ -273,8 +233,9 @@ export default function App() {
           onSwitchMode={(mode) => switchMode.mutate(mode)}
           onTriggerUpstreamEdit={handleTriggerUpstreamEdit}
           onResetDemo={() => {
-            setDrawerMode("closed");
             setSelectedNodeId(null);
+            setInspectorMode("node");
+            setRightRailTab("agent");
             resetDemo.mutate();
           }}
           isSimulatingEdit={simulateEdit.isPending}
@@ -290,16 +251,29 @@ export default function App() {
           onOpenDispatchTask={() => setTaskModalOpen(true)}
         />
 
-        <InspectorDrawer
-          mode={drawerMode}
+        <RightWorkbenchRail
+          isOpen={rightRailOpen}
+          activeTab={rightRailTab}
+          onTabChange={setRightRailTab}
+          onClose={() => {
+            setRightRailOpen(false);
+            setSelectedNodeId(null);
+          }}
+          inspectorMode={inspectorMode}
           selectedNode={selectedNode}
           pendingFixTask={pendingFixTask}
           onResolveApproval={handleResolveApproval}
           isResolvingApproval={resolveApproval.isPending}
-          onClose={() => {
-            setDrawerMode("closed");
-            setSelectedNodeId(null);
-          }}
+          messages={copilot.messages}
+          isStreaming={copilot.isStreaming}
+          streamingMessageId={copilot.streamingMessageId}
+          sendError={copilot.sendError}
+          llmSettings={llmSettings}
+          onSendMessage={copilot.sendMessage}
+          onCancelTurn={copilot.cancelTurn}
+          onClearChat={copilot.clearChat}
+          isClearingChat={copilot.isClearing}
+          onOpenLlmSettings={() => handleOpenSettings("llm")}
         />
       </main>
 

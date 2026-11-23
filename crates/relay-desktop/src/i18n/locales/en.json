@@ -7,6 +7,7 @@
     "connected": "Connected",
     "offline": "Offline",
     "runTask": "Run Task",
+    "copilot": "Agent",
     "outdatedCount_one": "{{count}} outdated",
     "outdatedCount_other": "{{count}} outdated",
     "toggleTheme": "Switch theme",
@@ -98,7 +99,49 @@
     "fixCheckPassed": "Quick check passed",
     "fixCheckLog": "View check output",
     "dismissFix": "Dismiss",
-    "applyAndRun": "Apply & Run"
+    "applyAndRun": "Apply & Run",
+    "emptyTitle": "No item selected",
+    "emptyDesc": "Click any node on the canvas or a run in the sidebar to inspect its details."
+  },
+  "copilot": {
+    "tabAgent": "Agent",
+    "tabDetails": "Details",
+    "newChat": "New chat",
+    "emptyTitle": "Relay Agent",
+    "emptyDesc": "Inspect your project graph, run whitelisted tasks, or troubleshoot failed runs — grounded in live tool data.",
+    "thinking": "Thinking…",
+    "inputLabel": "Ask Relay Agent",
+    "placeholder": "Ask about results, code diff, or run a preset…",
+    "send": "Send message",
+    "stop": "Stop generating",
+    "configureModel": "Configure AI Model",
+    "errorTitle": "Could not complete request",
+    "approvalTitle": "Confirmation required",
+    "approvalPending": "Waiting",
+    "approvalApproved": "Approved",
+    "approvalRejected": "Dismissed",
+    "approvalApprovedNote": "Approved — running on host.",
+    "approvalRejectedNote": "Dismissed by user.",
+    "suggestions": {
+      "checkOutdated": "Check if any experiment results are outdated",
+      "inspectEnv": "Inspect host sync status and Python environment",
+      "runAndCheck": "Run train_grid and check for issues"
+    },
+    "tools": {
+      "inspect_sync_status": "Checked sync status",
+      "list_handoffs": "Listed handoffs",
+      "check_env_diff": "Checked Python environment",
+      "get_dag_snapshot": "Inspected project graph",
+      "read_evidence_log": "Read verified result log",
+      "run_preflight_in_worktree": "Ran isolated pre-check",
+      "propose_worktree_patch": "Prepared verified fix",
+      "approve_and_execute_task": "Requested run confirmation",
+      "submit_task": "Submitted task preset",
+      "record_decision": "Saved decision note",
+      "read_repo_file": "Read repository file",
+      "git_diff": "Checked uncommitted Git diff",
+      "runningPrefix": "Running {{name}}…"
+    }
   },
   "modals": {
     "note": {

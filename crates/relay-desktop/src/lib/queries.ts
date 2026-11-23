@@ -18,6 +18,7 @@ export const relayKeys = {
   dag: (includeStale: boolean) => [...relayKeys.all, "dag", includeStale] as const,
   tasks: () => [...relayKeys.all, "tasks"] as const,
   handoffs: () => [...relayKeys.all, "handoffs"] as const,
+  chat: () => [...relayKeys.all, "chat"] as const,
 };
 
 export function useRelayEventSync() {
@@ -121,6 +122,23 @@ export function useHandoffs() {
   return useQuery({
     queryKey: relayKeys.handoffs(),
     queryFn: () => relayApi.listHandoffs(),
+  });
+}
+
+export function useChatMessages() {
+  return useQuery({
+    queryKey: relayKeys.chat(),
+    queryFn: () => relayApi.listChatMessages(100),
+  });
+}
+
+export function useClearChatMessages() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: () => relayApi.clearChatMessages(),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: relayKeys.chat() });
+    },
   });
 }
 

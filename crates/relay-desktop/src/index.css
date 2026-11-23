@@ -2,7 +2,10 @@
 @import "@xyflow/react/dist/style.css";
 @import "tw-animate-css";
 @import "shadcn/tailwind.css";
+@import "streamdown/styles.css";
 @import "@fontsource-variable/inter";
+
+@source "../node_modules/streamdown/dist/*.js";
 
 @custom-variant dark (&:is(.dark, .dark *, [data-theme="dark"], [data-theme="dark"] *));
 
@@ -241,4 +244,13 @@
 
 .relay-node-stale {
   animation: relayStalePulse 2.6s ease-in-out infinite;
+}
+
+.relay-markdown {
+  overflow-wrap: anywhere;
+}
+
+.relay-markdown pre {
+  max-width: 100%;
+  overflow-x: auto;
 }

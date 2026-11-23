@@ -7,6 +7,7 @@
     "connected": "已连接",
     "offline": "离线",
     "runTask": "运行任务",
+    "copilot": "Agent",
     "outdatedCount_one": "{{count}} 项结果已过期",
     "outdatedCount_other": "{{count}} 项结果已过期",
     "toggleTheme": "切换明暗主题",
@@ -98,7 +99,49 @@
     "fixCheckPassed": "预检已通过",
     "fixCheckLog": "查看预检输出",
     "dismissFix": "忽略",
-    "applyAndRun": "确认并运行"
+    "applyAndRun": "确认并运行",
+    "emptyTitle": "未选中节点",
+    "emptyDesc": "点击画布上的任意节点或左侧任务记录，即可在此查看详情或审核修复。"
+  },
+  "copilot": {
+    "tabAgent": "Agent",
+    "tabDetails": "详情",
+    "newChat": "新建对话",
+    "emptyTitle": "Relay Agent",
+    "emptyDesc": "直接查询当前图谱与最新结果、提交白名单实验任务，或协助排查报错与修复。",
+    "thinking": "思考中…",
+    "inputLabel": "向 Relay Agent 提问",
+    "placeholder": "询问最新指标、代码变更，或让 Agent 运行预设任务…",
+    "send": "发送消息",
+    "stop": "停止生成",
+    "configureModel": "配置 AI 模型",
+    "errorTitle": "请求未能完成",
+    "approvalTitle": "需要你的确认",
+    "approvalPending": "待确认",
+    "approvalApproved": "已批准",
+    "approvalRejected": "已忽略",
+    "approvalApprovedNote": "已批准，正在主机执行。",
+    "approvalRejectedNote": "已忽略该建议。",
+    "suggestions": {
+      "checkOutdated": "检查当前有哪些实验结果已过期",
+      "inspectEnv": "查看主机同步状态和 Python 环境差异",
+      "runAndCheck": "运行 train_grid 实验并排查报错"
+    },
+    "tools": {
+      "inspect_sync_status": "查询设备同步状态",
+      "list_handoffs": "读取跨设备交接记录",
+      "check_env_diff": "比对 Python 环境依赖",
+      "get_dag_snapshot": "读取项目状态图谱",
+      "read_evidence_log": "读取最新结果日志",
+      "run_preflight_in_worktree": "在隔离副本执行预检",
+      "propose_worktree_patch": "生成并验证修复方案",
+      "approve_and_execute_task": "请求人工确认并执行",
+      "submit_task": "提交预设实验任务",
+      "record_decision": "记录决策备注节点",
+      "read_repo_file": "读取仓库代码文件",
+      "git_diff": "查看未提交 Git 差异",
+      "runningPrefix": "正在执行 {{name}}…"
+    }
   },
   "modals": {
     "note": {

@@ -226,44 +226,36 @@ function NodeTechnicalDetails({ node }: { node: GraphNode }) {
   );
 }
 
-export function InspectorDrawer({
+export function InspectorPanelBody({
   mode,
   selectedNode,
   pendingFixTask,
   onResolveApproval,
   isResolvingApproval,
-  onClose,
-}: InspectorDrawerProps) {
+}: Omit<InspectorDrawerProps, "onClose">) {
   const { t } = useTranslation();
-
-  if (mode === "closed") return null;
 
   const proposal = pendingFixTask?.active_proposal ?? null;
   const isFixMode = mode === "fix" && proposal != null && pendingFixTask != null;
 
-  if (!isFixMode && !selectedNode) return null;
+  if (!isFixMode && !selectedNode) {
+    return (
+      <div className="flex flex-1 flex-col items-center justify-center gap-2 px-6 text-center">
+        <h3 className="text-sm font-medium text-foreground">{t("detail.emptyTitle")}</h3>
+        <p className="text-xs leading-relaxed text-muted-foreground">{t("detail.emptyDesc")}</p>
+      </div>
+    );
+  }
 
   return (
-    <aside className="z-20 flex h-full w-[380px] shrink-0 flex-col border-l border-border bg-card text-card-foreground shadow-xl">
-      <div className="flex items-center justify-between gap-2 border-b border-border px-4 py-3">
-        <div className="min-w-0">
-          <div className="text-[11px] font-medium text-muted-foreground">
-            {isFixMode ? t("detail.fixTitle") : t(`canvas.kind.${selectedNode!.payload.kind}`)}
-          </div>
-          <h3 className="truncate text-sm font-semibold text-foreground">
-            {isFixMode ? pendingFixTask.spec.command_preset : selectedNode!.label}
-          </h3>
+    <div className="flex min-h-0 flex-1 flex-col">
+      <div className="border-b border-border px-4 py-2.5">
+        <div className="text-[11px] font-medium text-muted-foreground">
+          {isFixMode ? t("detail.fixTitle") : t(`canvas.kind.${selectedNode!.payload.kind}`)}
         </div>
-
-        <Button
-          size="icon"
-          variant="ghost"
-          aria-label={t("detail.close")}
-          onClick={onClose}
-          className="shrink-0"
-        >
-          <X />
-        </Button>
+        <h3 className="truncate text-sm font-semibold text-foreground">
+          {isFixMode ? pendingFixTask.spec.command_preset : selectedNode!.label}
+        </h3>
       </div>
 
       <div className="flex flex-1 flex-col gap-4 overflow-y-auto p-4">
@@ -314,6 +306,57 @@ export function InspectorDrawer({
           </Button>
         </div>
       )}
+    </div>
+  );
+}
+
+export function InspectorDrawer({
+  mode,
+  selectedNode,
+  pendingFixTask,
+  onResolveApproval,
+  isResolvingApproval,
+  onClose,
+}: InspectorDrawerProps) {
+  const { t } = useTranslation();
+
+  if (mode === "closed") return null;
+
+  const proposal = pendingFixTask?.active_proposal ?? null;
+  const isFixMode = mode === "fix" && proposal != null && pendingFixTask != null;
+
+  if (!isFixMode && !selectedNode) return null;
+
+  return (
+    <aside className="z-20 flex h-full w-[380px] shrink-0 flex-col border-l border-border bg-card text-card-foreground shadow-xl">
+      <div className="flex items-center justify-between gap-2 border-b border-border px-4 py-3">
+        <div className="min-w-0">
+          <div className="text-[11px] font-medium text-muted-foreground">
+            {isFixMode ? t("detail.fixTitle") : t(`canvas.kind.${selectedNode!.payload.kind}`)}
+          </div>
+          <h3 className="truncate text-sm font-semibold text-foreground">
+            {isFixMode ? pendingFixTask.spec.command_preset : selectedNode!.label}
+          </h3>
+        </div>
+
+        <Button
+          size="icon"
+          variant="ghost"
+          aria-label={t("detail.close")}
+          onClick={onClose}
+          className="shrink-0"
+        >
+          <X />
+        </Button>
+      </div>
+
+      <InspectorPanelBody
+        mode={mode}
+        selectedNode={selectedNode}
+        pendingFixTask={pendingFixTask}
+        onResolveApproval={onResolveApproval}
+        isResolvingApproval={isResolvingApproval}
+      />
     </aside>
   );
 }

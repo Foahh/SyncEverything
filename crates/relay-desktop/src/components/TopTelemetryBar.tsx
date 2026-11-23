@@ -10,6 +10,7 @@ import {
   Moon,
   Play,
   SlidersHorizontal,
+  Sparkles,
   Sun,
 } from "lucide-react";
 import { useTranslation } from "react-i18next";
@@ -22,7 +23,9 @@ interface TopTelemetryBarProps {
   headCommitSha: string | null;
   staleCount: number;
   theme: "light" | "dark";
+  isCopilotOpen: boolean;
   onToggleTheme: () => void;
+  onToggleCopilot: () => void;
   onOpenPairModal: () => void;
   onOpenRunTask: () => void;
   onOpenRepoSettings: () => void;
@@ -35,7 +38,9 @@ export function TopTelemetryBar({
   headCommitSha,
   staleCount,
   theme,
+  isCopilotOpen,
   onToggleTheme,
+  onToggleCopilot,
   onOpenPairModal,
   onOpenRunTask,
   onOpenRepoSettings,
@@ -127,6 +132,16 @@ export function TopTelemetryBar({
         <Button variant="default" size="default" onClick={onOpenRunTask}>
           <Play data-icon="inline-start" />
           <span className="relay-text-trim leading-none">{t("topbar.runTask")}</span>
+        </Button>
+
+        <Button
+          variant={isCopilotOpen ? "secondary" : "outline"}
+          size="default"
+          onClick={onToggleCopilot}
+          aria-pressed={isCopilotOpen}
+        >
+          <Sparkles data-icon="inline-start" className="text-primary" />
+          <span className="relay-text-trim leading-none">{t("topbar.copilot")}</span>
         </Button>
 
         <Separator orientation="vertical" className="my-auto h-4 data-vertical:self-center" />

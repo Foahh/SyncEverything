@@ -1,6 +1,10 @@
 import {
   commands,
   events,
+  type AgentApprovalCard_Serialize,
+  type AgentChatMessage_Serialize,
+  type AgentChatStreamEvent_Serialize,
+  type AgentToolTrace_Serialize,
   type ApprovalDecision,
   type DagSnapshot_Serialize,
   type DagStaleAlertEvent,
@@ -30,6 +34,7 @@ interface MockWorkspaceState {
   dag: DagSnapshot_Serialize;
   tasks: TaskRecord_Serialize[];
   handoffs: HandoffSummary[];
+  chatMessages: AgentChatMessage_Serialize[];
 }
 
 function createInitialMockState(): MockWorkspaceState {
@@ -249,12 +254,320 @@ function createInitialMockState(): MockWorkspaceState {
     },
     tasks,
     handoffs,
+    chatMessages: [],
   };
 }
 
 let mockState: MockWorkspaceState = createInitialMockState();
+const mockChatListeners = new Set<(event: AgentChatStreamEvent_Serialize) => void>();
+let activeMockChatAbort: { cancelled: boolean } | null = null;
+
+function emitMockChatEvent(event: AgentChatStreamEvent_Serialize): void {
+  for (const listener of mockChatListeners) {
+    listener(event);
+  }
+}
+
+function sleepMs(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    window.setTimeout(resolve, ms);
+  });
+}
+
+function hasCjk(text: string): boolean {
+  return /[\u3400-\u9fff]/.test(text);
+}
+
+async function runMockCopilotTurn(
+  prompt: string,
+  assistantMsg: AgentChatMessage_Serialize,
+  abort: { cancelled: boolean },
+): Promise<void> {
+  const turnId = `mock-turn-${Date.now()}`;
+  const isZh = hasCjk(prompt);
+  const lower = prompt.toLowerCase();
+
+  emitMockChatEvent({
+    turn_id: turnId,
+    message_id: assistantMsg.id,
+    kind: "turn_started",
+    delta: null,
+    trace: null,
+    approval: null,
+    error: null,
+  });
+
+  const runTool = async (
+    toolName: string,
+    argsPreview: string,
+    computeOutput: () => { output: string; approval?: AgentApprovalCard_Serialize },
+  ): Promise<AgentApprovalCard_Serialize | null> => {
+    const trace: AgentToolTrace_Serialize = {
+      id: `${toolName}-${assistantMsg.traces.length}`,
+      tool_name: toolName,
+      args_preview: argsPreview,
+      status: "running",
+      output_preview: null,
+      duration_ms: null,
+    };
+    assistantMsg.traces.push(trace);
+    emitMockChatEvent({
+      turn_id: turnId,
+      message_id: assistantMsg.id,
+      kind: "tool_started",
+      delta: null,
+      trace: structuredClone(trace),
+      approval: null,
+      error: null,
+    });
+
+    await sleepMs(260);
+    if (abort.cancelled) return null;
+
+    const { output, approval } = computeOutput();
+    trace.status = "done";
+    trace.output_preview = output;
+    trace.duration_ms = 18 + assistantMsg.traces.length * 11;
+    emitMockChatEvent({
+      turn_id: turnId,
+      message_id: assistantMsg.id,
+      kind: "tool_finished",
+      delta: null,
+      trace: structuredClone(trace),
+      approval: null,
+      error: null,
+    });
+    return approval ?? null;
+  };
+
+  let responseText = "";
+  let pendingApproval: AgentApprovalCard_Serialize | null = null;
+
+  const wantsRun =
+    lower.includes("train_grid") ||
+    lower.includes("run") ||
+    lower.includes("fix") ||
+    prompt.includes("运行") ||
+    prompt.includes("排查") ||
+    prompt.includes("修复");
+  const wantsOutdated =
+    lower.includes("outdated") || lower.includes("stale") || prompt.includes("过期");
+  const wantsEnv =
+    lower.includes("env") ||
+    lower.includes("sync") ||
+    lower.includes("python") ||
+    prompt.includes("环境") ||
+    prompt.includes("同步");
+
+  if (wantsRun) {
+    await runTool("check_env_diff", '{"commit_sha":"HEAD"}', () => ({
+      output: JSON.stringify(
+        {
+          commit_sha: mockState.dag.head_commit_sha ?? "a91f0c2",
+          in_sync: false,
+          missing_packages: ["scipy"],
+        },
+        null,
+        2,
+      ),
+    }));
+    if (!abort.cancelled) {
+      pendingApproval = await runTool(
+        "approve_and_execute_task",
+        '{"preset":"train_grid","require_approval":true}',
+        () => {
+          let task = mockState.tasks.find(
+            (t) => t.state === "self_healing_proposed" && t.active_proposal != null,
+          );
+          if (!task) {
+            const now = new Date().toISOString();
+            task = {
+              spec: {
+                task_id: crypto.randomUUID(),
+                repo_id: mockState.workspace.repo_id,
+                base_commit_sha: mockState.dag.head_commit_sha ?? "a91f0c2",
+                command_preset: "train_grid",
+                params: { windows: "7,14,28", alpha: "0.45" },
+                require_approval: true,
+                requested_by_device: "Relay Agent",
+                user_note: prompt,
+              },
+              state: "self_healing_proposed",
+              active_proposal: {
+                patch_id: `patch-${Date.now().toString(36)}`,
+                task_id: "",
+                kind: "uv_spec",
+                summary:
+                  "Missing package `scipy` blocked the smoke check. Added `scipy>=1.15.2` in an isolated worktree and verified exit code 0.",
+                diff_preview:
+                  '--- a/pyproject.toml\n+++ b/pyproject.toml\n@@ -6,1 +6,3 @@\n-dependencies = []\n+dependencies = [\n+    "scipy>=1.15.2",\n+]',
+                worktree_branch: "relay/heal/copilot",
+                smoke_verified: true,
+                smoke_stdout_tail: "[smoke] best_window=7 best_mae=2.464\n[ok] Exit code 0",
+                created_at: now,
+              },
+              preflight_summary: "Missing package `scipy` — verified fix ready.",
+              evidence_node_id: null,
+              error_message: null,
+              created_at: now,
+              updated_at: now,
+            };
+            task.active_proposal!.task_id = task.spec.task_id;
+            mockState.tasks = [task, ...mockState.tasks];
+          }
+          const proposal = task.active_proposal!;
+          const card: AgentApprovalCard_Serialize = {
+            task_id: task.spec.task_id,
+            patch_id: proposal.patch_id,
+            summary: proposal.summary,
+            diff_preview: proposal.diff_preview,
+            resolved: null,
+          };
+          return {
+            output: JSON.stringify(
+              {
+                status: "approval_required",
+                task_id: card.task_id,
+                patch_id: card.patch_id,
+                smoke_verified: true,
+              },
+              null,
+              2,
+            ),
+            approval: card,
+          };
+        },
+      );
+    }
+    responseText = isZh
+      ? "我在隔离副本中检查了 `train_grid` 任务的运行环境，发现缺少依赖 **`scipy`**。\n\n已自动生成并预检通过修复补丁（原工作区未改动）。请直接确认下方卡片中的改动预览，点击 **确认并运行** 即可在主机完成完整扫描。"
+      : "I checked the isolated worktree for `train_grid` and found missing dependency **`scipy`**.\n\nA verified fix is ready without touching your working tree. Review the diff preview below and click **Apply & Run** to execute the full sweep on the host.";
+  } else if (wantsOutdated) {
+    await runTool("get_dag_snapshot", '{"include_stale":true}', () => ({
+      output: JSON.stringify(
+        {
+          repo_id: mockState.dag.repo_id,
+          head_commit_sha: mockState.dag.head_commit_sha,
+          stale_count: mockState.dag.stale_count,
+          node_count: mockState.dag.nodes.length,
+        },
+        null,
+        2,
+      ),
+    }));
+    const staleNodes = mockState.dag.nodes.filter((n) => n.freshness.status === "stale");
+    const freshEvidence = mockState.dag.nodes.filter(
+      (n) => n.payload.kind === "evidence" && n.freshness.status === "fresh",
+    );
+    if (staleNodes.length > 0) {
+      responseText = isZh
+        ? `当前图谱检测到 **${staleNodes.length} 项过期结果**（代码已推进至 \`${(mockState.dag.head_commit_sha ?? "HEAD").slice(0, 7)}\`），这些旧指标已被自动隔离，不会作为当前版本的依据：\n\n${staleNodes.map((n) => `- **${n.label}**（\`${n.id}\`）`).join("\n")}\n\n建议重新运行 \`train_grid\` 以生成基于最新提交的结果。`
+        : `Found **${staleNodes.length} outdated result(s)** against current HEAD \`${(mockState.dag.head_commit_sha ?? "HEAD").slice(0, 7)}\`. Quarantined metrics are excluded from reasoning:\n\n${staleNodes.map((n) => `- **${n.label}** (\`${n.id}\`)`).join("\n")}\n\nRun \`train_grid\` again to record fresh metrics for this commit.`;
+    } else {
+      const latest = freshEvidence[freshEvidence.length - 1];
+      const mae =
+        latest?.payload.kind === "evidence" &&
+        typeof latest.payload.metrics_json === "object" &&
+        latest.payload.metrics_json &&
+        !Array.isArray(latest.payload.metrics_json)
+          ? latest.payload.metrics_json.best_mae
+          : null;
+      responseText = isZh
+        ? `当前没有过期结果（\`stale_count = 0\`），所有结果均与最新提交 \`${(mockState.dag.head_commit_sha ?? "HEAD").slice(0, 7)}\` 一致。\n\n- 最新有效结果：**${latest?.label ?? "Window sweep"}**${mae != null ? `（\`best_mae = ${String(mae)}\`）` : ""}\n- 如需测试过期联动，可在左下角「开发测试工具」触发一次代码变更。`
+        : `No outdated results right now (\`stale_count = 0\`). All recorded results match current HEAD \`${(mockState.dag.head_commit_sha ?? "HEAD").slice(0, 7)}\`.\n\n- Latest valid result: **${latest?.label ?? "Window sweep"}**${mae != null ? ` (\`best_mae = ${String(mae)}\`)` : ""}\n- Note: there is still 1 pending suggested fix waiting for review on \`train_grid\`.`;
+    }
+  } else if (wantsEnv) {
+    await runTool("inspect_sync_status", "{}", () => ({
+      output: JSON.stringify(mockState.status, null, 2),
+    }));
+    if (!abort.cancelled) {
+      await runTool("check_env_diff", '{"commit_sha":"HEAD"}', () => ({
+        output: JSON.stringify(
+          {
+            commit_sha: mockState.dag.head_commit_sha,
+            host_env_fingerprint: "uv:blake3:9c8f4a21",
+            in_sync: false,
+            missing_packages: ["scipy"],
+          },
+          null,
+          2,
+        ),
+      }));
+    }
+    responseText = isZh
+      ? `### 同步与环境概览\n\n- **连接状态**：已连接（\`${mockState.status.transport_path}\`，延迟 \`${mockState.status.rtt_ms ?? 2}ms\`，待同步队列 \`${mockState.status.pending_outbox_count}\`）\n- **当前代码提交**：\`${(mockState.dag.head_commit_sha ?? "HEAD").slice(0, 7)}\`\n- **Python 环境差异**：检测到主机缺少 \`scipy\`，可通过左侧「查看修复建议」或让我直接触发验证修复。`
+      : `### Sync & Environment Summary\n\n- **Link**: Connected (\`${mockState.status.transport_path}\`, RTT \`${mockState.status.rtt_ms ?? 2}ms\`, outbox \`${mockState.status.pending_outbox_count}\`)\n- **HEAD commit**: \`${(mockState.dag.head_commit_sha ?? "HEAD").slice(0, 7)}\`\n- **Python environment**: Missing \`scipy\` on host — ask me to run \`train_grid\` or review the ready fix proposal.`;
+  } else {
+    await runTool("get_dag_snapshot", '{"include_stale":true}', () => ({
+      output: JSON.stringify(
+        {
+          repo_id: mockState.dag.repo_id,
+          head_commit_sha: mockState.dag.head_commit_sha,
+          nodes: mockState.dag.nodes.length,
+          stale_count: mockState.dag.stale_count,
+          presets: mockState.workspace.presets.map((p) => p.name),
+        },
+        null,
+        2,
+      ),
+    }));
+    responseText = isZh
+      ? `已检查当前工作区 **${mockState.workspace.repo_id}**（HEAD \`${(mockState.dag.head_commit_sha ?? "HEAD").slice(0, 7)}\`）：\n\n- 当前共有 **${mockState.dag.nodes.length}** 个图谱节点、**${mockState.dag.stale_count}** 项过期结果\n- ` +
+        "`relay.toml`" +
+        ` 可执行预设：${mockState.workspace.presets.map((p) => `\`${p.name}\``).join("、")}\n\n你可以直接让我检查过期结果、比对环境，或运行某个预设任务。`
+      : `Inspected workspace **${mockState.workspace.repo_id}** (HEAD \`${(mockState.dag.head_commit_sha ?? "HEAD").slice(0, 7)}\`):\n\n- **${mockState.dag.nodes.length}** graph nodes (**${mockState.dag.stale_count}** outdated)\n- Whitelisted presets in \`relay.toml\`: ${mockState.workspace.presets.map((p) => `\`${p.name}\``).join(", ")}\n\nAsk me to check outdated results, inspect environment drift, or run \`train_grid\`.`;
+  }
+
+  // Stream text chunks smoothly.
+  const chunks = responseText.match(/.{1,12}/gs) ?? [responseText];
+  for (const chunk of chunks) {
+    if (abort.cancelled) break;
+    assistantMsg.content += chunk;
+    emitMockChatEvent({
+      turn_id: turnId,
+      message_id: assistantMsg.id,
+      kind: "token_delta",
+      delta: chunk,
+      trace: null,
+      approval: null,
+      error: null,
+    });
+    await sleepMs(18);
+  }
+
+  if (pendingApproval && !abort.cancelled) {
+    assistantMsg.approval = pendingApproval;
+    emitMockChatEvent({
+      turn_id: turnId,
+      message_id: assistantMsg.id,
+      kind: "approval_needed",
+      delta: null,
+      trace: null,
+      approval: structuredClone(pendingApproval),
+      error: null,
+    });
+  }
+
+  if (activeMockChatAbort === abort) {
+    activeMockChatAbort = null;
+  }
+
+  emitMockChatEvent({
+    turn_id: turnId,
+    message_id: assistantMsg.id,
+    kind: "turn_completed",
+    delta: null,
+    trace: null,
+    approval: assistantMsg.approval ? structuredClone(assistantMsg.approval) : null,
+    error: null,
+  });
+}
 
 export function resetBrowserPreviewState(): void {
+  if (activeMockChatAbort) {
+    activeMockChatAbort.cancelled = true;
+    activeMockChatAbort = null;
+  }
   mockState = createInitialMockState();
 }
 
@@ -477,6 +790,11 @@ export const relayApi = {
       task.updated_at = now;
       task.preflight_summary = "Suggested fix dismissed.";
     }
+    for (const msg of mockState.chatMessages) {
+      if (msg.approval && msg.approval.task_id === taskId) {
+        msg.approval.resolved = decision;
+      }
+    }
     return structuredClone(task);
   },
 
@@ -596,6 +914,88 @@ export const relayApi = {
     mockState.status.transport_path = "direct_lan";
     mockState.status.rtt_ms = 3;
     return structuredClone(mockState.status);
+  },
+
+  async listChatMessages(limit = 100): Promise<AgentChatMessage_Serialize[]> {
+    if (isTauriRuntime()) {
+      return commands.listChatMessages(limit);
+    }
+    return structuredClone(mockState.chatMessages.slice(-limit));
+  },
+
+  async sendChatMessage(prompt: string): Promise<AgentChatMessage_Serialize> {
+    if (isTauriRuntime()) {
+      return commands.sendChatMessage(prompt);
+    }
+    const trimmed = prompt.trim();
+    if (!trimmed) {
+      throw new Error("Message cannot be empty.");
+    }
+    if (activeMockChatAbort) {
+      activeMockChatAbort.cancelled = true;
+    }
+    const now = Date.now();
+    const userMsg: AgentChatMessage_Serialize = {
+      id: `user-${now}`,
+      repo_id: mockState.workspace.repo_id,
+      role: "user",
+      content: trimmed,
+      traces: [],
+      approval: null,
+      error: null,
+      created_at: new Date(now).toISOString(),
+    };
+    const assistantMsg: AgentChatMessage_Serialize = {
+      id: `assistant-${now + 1}`,
+      repo_id: mockState.workspace.repo_id,
+      role: "assistant",
+      content: "",
+      traces: [],
+      approval: null,
+      error: null,
+      created_at: new Date(now + 1).toISOString(),
+    };
+    mockState.chatMessages.push(userMsg, assistantMsg);
+    const abort = { cancelled: false };
+    activeMockChatAbort = abort;
+    void runMockCopilotTurn(trimmed, assistantMsg, abort);
+    return structuredClone(assistantMsg);
+  },
+
+  async cancelChatTurn(): Promise<boolean> {
+    if (isTauriRuntime()) {
+      return commands.cancelChatTurn();
+    }
+    if (activeMockChatAbort) {
+      activeMockChatAbort.cancelled = true;
+      activeMockChatAbort = null;
+      return true;
+    }
+    return false;
+  },
+
+  async clearChatMessages(): Promise<void> {
+    if (isTauriRuntime()) {
+      await commands.clearChatMessages();
+      return;
+    }
+    if (activeMockChatAbort) {
+      activeMockChatAbort.cancelled = true;
+      activeMockChatAbort = null;
+    }
+    mockState.chatMessages = [];
+  },
+
+  async subscribeAgentChatEvents(
+    onEvent: (payload: AgentChatStreamEvent_Serialize) => void,
+  ): Promise<() => void> {
+    if (isTauriRuntime()) {
+      return events.agentChatStreamEvent.listen((ev) => onEvent(ev.payload));
+    }
+    mockChatListeners.add(onEvent);
+    return () => {
+      mockChatListeners.delete(onEvent);
+    };
   },
 
   async subscribeEvents(handlers: {
