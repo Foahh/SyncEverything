@@ -64,19 +64,65 @@ def run_sweep(windows: Iterable[int], alpha: float, smoke: bool) -> dict[str, ob
     }
 
 
+def run_alpha_sweep(windows: Iterable[int], alphas: Iterable[float]) -> dict[str, object]:
+    """Sweep EWMA smoothing factors against the window grid in deterministic order."""
+    t0 = time.perf_counter()
+    series = generate_series(360)
+    results = []
+    for alpha in alphas:
+        for window in windows:
+            metrics = evaluate_window(series, window, alpha=alpha)
+            results.append(
+                {
+                    "window": int(metrics["window"]),
+                    "alpha": alpha,
+                    "mae": metrics["mae"],
+                    "rmse": metrics["rmse"],
+                }
+            )
+    best = min(results, key=lambda r: (r["mae"], r["window"], r["alpha"]))
+    elapsed_ms = round((time.perf_counter() - t0) * 1000.0, 2)
+    return {
+        "mode": "alpha_sweep",
+        "windows": [int(window) for window in windows],
+        "alphas": list(alphas),
+        "elapsed_ms": elapsed_ms,
+        "best": best,
+        "runs": results,
+    }
+
+
+def parse_int_list(raw: str) -> list[int]:
+    return [int(part.strip()) for part in raw.split(",") if part.strip()]
+
+
+def parse_float_list(raw: str) -> list[float]:
+    return [float(part.strip()) for part in raw.split(",") if part.strip()]
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Relay rolling-window forecast benchmark")
     parser.add_argument("--smoke", action="store_true", help="Run fast smoke preflight")
     parser.add_argument("--window", type=int, default=None, help="Single smoke window size")
     parser.add_argument("--windows", default="7,14,28", help="Comma-separated window sizes")
     parser.add_argument("--alpha", type=float, default=0.35, help="EWMA smoothing factor")
+    parser.add_argument(
+        "--alphas",
+        default="",
+        help="Comma-separated EWMA alphas for the calibration sweep (e.g. 0.2,0.35,0.5)",
+    )
     args = parser.parse_args()
 
-    if args.smoke:
-        windows = [args.window if args.window is not None else 7]
+    if args.alphas.strip():
+        if args.smoke:
+            parser.error("--alphas cannot be combined with --smoke")
+        report = run_alpha_sweep(parse_int_list(args.windows), parse_float_list(args.alphas))
     else:
-        windows = [int(w.strip()) for w in args.windows.split(",") if w.strip()]
-    report = run_sweep(windows=windows, alpha=args.alpha, smoke=args.smoke)
+        if args.smoke:
+            windows = [args.window if args.window is not None else 7]
+        else:
+            windows = parse_int_list(args.windows)
+        report = run_sweep(windows=windows, alpha=args.alpha, smoke=args.smoke)
     print(json.dumps(report, indent=2))
 
 

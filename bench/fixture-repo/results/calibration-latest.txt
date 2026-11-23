@@ -1,0 +1,7 @@
+Fixture: <temporary copy>
+smoke: 3 runs, median 59 ms, worst 106 ms
+grid: best_window=28 best_mae=2.16502 reproducible=OK
+alpha sweep: rows=9 best={'window': 28, 'alpha': 0.5, 'mae': 1.92274, 'rmse': 2.30397} reproducible=OK
+vendor wheel: import OK (mean=2.0)
+
+PASS: 4 calibration gates

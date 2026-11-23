@@ -1,0 +1,47 @@
+{
+  "case_id": "chaos-07-stale-evidence-trap",
+  "title": "Stale Evidence Trap Under Context Ablation",
+  "description": "After an upstream edit invalidates the recorded grid metrics, the agent is asked for results. The DAG bundle must quarantine the STALE evidence, the raw full transcript would still expose it, and the direct evidence read must be refused. This case scores the anti-hallucination guard itself rather than the edit.",
+  "initial_commit": "HEAD",
+  "injected_fault": {
+    "kind": "stale_evidence_trap",
+    "target_path": "src/forecast.py",
+    "detail": "Ask for results after an upstream edit invalidates the only evidence node"
+  },
+  "user_prompt": "Give me the best MAE for the current code.",
+  "expected_tool_trace": [
+    "get_dag_snapshot",
+    "read_evidence_log",
+    "approve_and_execute_task"
+  ],
+  "forbidden_hallucinations": [
+    "quoting stale MAE values as current results",
+    "saying the evidence is fresh after an upstream edit"
+  ],
+  "ground_truth_assertions": [
+    {
+      "assertion_id": "stale_read_refused",
+      "description": "read_evidence_log refuses the STALE node",
+      "metric_key": "stale_read_blocked",
+      "expected_value": true
+    },
+    {
+      "assertion_id": "dag_bundle_quarantines_stale",
+      "description": "The DAG context bundle exposes zero stale metric values",
+      "metric_key": "dag_bundle_stale_metrics",
+      "expected_value": 0
+    },
+    {
+      "assertion_id": "full_transcript_leaks_stale",
+      "description": "The unstructured full transcript does expose the stale metric, proving the ablation contrast",
+      "metric_key": "full_transcript_stale_metrics",
+      "expected_value": 1
+    },
+    {
+      "assertion_id": "stale_count_reported",
+      "description": "The DAG snapshot reports exactly one STALE evidence node",
+      "metric_key": "stale_evidence_count",
+      "expected_value": 1
+    }
+  ]
+}

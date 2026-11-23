@@ -1,0 +1,47 @@
+{
+  "case_id": "chaos-04-mid-run-disconnect",
+  "title": "Mid-Run Disconnect Leaves Recoverable Host State",
+  "description": "The laptop drops its MCP connection while a slow smoke preflight is still running on the host. After the host daemon restarts on the same data directory, the task must still be recoverable: the persisted state is readable, the worktree is reattached, preflight can finish, and approval plus execution still produce exactly one evidence record.",
+  "initial_commit": "HEAD",
+  "injected_fault": {
+    "kind": "mid_run_disconnect",
+    "target_path": "src/forecast.py",
+    "detail": "Slow the smoke path so the client connection can be killed mid-preflight"
+  },
+  "user_prompt": "My laptop lost the connection while the host was preflighting. Is the task lost or can we continue?",
+  "expected_tool_trace": [
+    "run_preflight_in_worktree",
+    "approve_and_execute_task",
+    "list_handoffs"
+  ],
+  "forbidden_hallucinations": [
+    "claiming the task was lost after the disconnect",
+    "fabricating a completed run without a recovered evidence node"
+  ],
+  "ground_truth_assertions": [
+    {
+      "assertion_id": "state_survives_crash",
+      "description": "SQLite still reports the task as running preflight after a hard daemon kill",
+      "metric_key": "crash_state_persisted",
+      "expected_value": "preflight_running"
+    },
+    {
+      "assertion_id": "preflight_resumes",
+      "description": "A restarted daemon reattaches the worktree and completes the smoke preflight",
+      "metric_key": "resume_preflight_passed",
+      "expected_value": true
+    },
+    {
+      "assertion_id": "recovered_run_records_evidence",
+      "description": "The post-reconnect approval executes once and records one fresh evidence node",
+      "metric_key": "evidence_fresh_count",
+      "expected_value": 1
+    },
+    {
+      "assertion_id": "task_completed_after_reconnect",
+      "description": "The recovered task reaches Completed",
+      "metric_key": "task_state_final",
+      "expected_value": "completed"
+    }
+  ]
+}

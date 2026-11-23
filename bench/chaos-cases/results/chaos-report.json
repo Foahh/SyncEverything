@@ -1,0 +1,443 @@
+{
+  "suite": "relay-track4-chaos",
+  "generated_at": "2026-11-24T03:33:35+0800",
+  "daemon_bin": "target/debug/relay-daemon",
+  "python": "3.14.7",
+  "summary": {
+    "total": 8,
+    "passed": 8,
+    "failed": 0
+  },
+  "cases": [
+    {
+      "case_id": "chaos-01-missing-dep",
+      "title": "Missing Python Dependency Auto-Healing",
+      "fault_kind": "missing_dependency",
+      "passed": true,
+      "duration_ms": 1367.1,
+      "metrics": {
+        "detected_missing_module": "tiny_stats",
+        "proposal_smoke_verified": true,
+        "approval_required_observed": true,
+        "task_state_final": "completed",
+        "evidence_count": 1,
+        "evidence_fresh_count": 1,
+        "stale_evidence_count": 0,
+        "main_worktree_dirty": false,
+        "best_mae": 2.16502
+      },
+      "assertions": [
+        {
+          "assertion_id": "missing_module_detected",
+          "metric_key": "detected_missing_module",
+          "expected": "tiny_stats",
+          "actual": "tiny_stats",
+          "passed": true,
+          "description": "Preflight traceback is attributed to the injected tiny_stats import"
+        },
+        {
+          "assertion_id": "host_main_tree_untouched",
+          "metric_key": "main_worktree_dirty",
+          "expected": false,
+          "actual": false,
+          "passed": true,
+          "description": "User main working tree remains unmodified during preflight and self-healing"
+        },
+        {
+          "assertion_id": "smoke_verified_before_elicitation",
+          "metric_key": "proposal_smoke_verified",
+          "expected": true,
+          "actual": true,
+          "passed": true,
+          "description": "Candidate uv_spec patch passes smoke preflight inside the isolated worktree prior to approval"
+        },
+        {
+          "assertion_id": "approval_gate_observed",
+          "metric_key": "approval_required_observed",
+          "expected": true,
+          "actual": true,
+          "passed": true,
+          "description": "Execution waits for an explicit human decision instead of auto-running"
+        },
+        {
+          "assertion_id": "grid_executed_with_evidence",
+          "metric_key": "evidence_fresh_count",
+          "expected": 1,
+          "actual": 1,
+          "passed": true,
+          "description": "The approved grid run records exactly one fresh evidence node"
+        },
+        {
+          "assertion_id": "task_completed",
+          "metric_key": "task_state_final",
+          "expected": "completed",
+          "actual": "completed",
+          "passed": true,
+          "description": "Task reaches the Completed state after approval"
+        }
+      ],
+      "notes": [],
+      "repo": null
+    },
+    {
+      "case_id": "chaos-02-upstream-edit",
+      "title": "Upstream Code Edit Invalidates Host Evidence",
+      "fault_kind": "upstream_code_edit",
+      "passed": true,
+      "duration_ms": 1082.9,
+      "metrics": {
+        "sync_head_status": "superseded",
+        "stale_read_blocked": true,
+        "task_state_final": "completed",
+        "evidence_count": 1,
+        "evidence_fresh_count": 0,
+        "stale_evidence_count": 1,
+        "main_worktree_dirty": false
+      },
+      "assertions": [
+        {
+          "assertion_id": "single_evidence_invalidated",
+          "metric_key": "stale_evidence_count",
+          "expected": 1,
+          "actual": 1,
+          "passed": true,
+          "description": "The upstream commit flips exactly one downstream evidence node to STALE"
+        },
+        {
+          "assertion_id": "no_fresh_evidence_left",
+          "metric_key": "evidence_fresh_count",
+          "expected": 0,
+          "actual": 0,
+          "passed": true,
+          "description": "No evidence node for the previous commit is still advertised as fresh"
+        },
+        {
+          "assertion_id": "task_record_preserved",
+          "metric_key": "task_state_final",
+          "expected": "completed",
+          "actual": "completed",
+          "passed": true,
+          "description": "The completed task record survives the invalidation instead of being rewritten or deleted"
+        },
+        {
+          "assertion_id": "stale_log_read_blocked",
+          "metric_key": "stale_read_blocked",
+          "expected": true,
+          "actual": true,
+          "passed": true,
+          "description": "Reading the STALE evidence log is refused at the engine boundary"
+        }
+      ],
+      "notes": [],
+      "repo": null
+    },
+    {
+      "case_id": "chaos-03-same-line-conflict",
+      "title": "Two-Sided Same-Line Conflict Preserved",
+      "fault_kind": "same_line_conflict",
+      "passed": true,
+      "duration_ms": 1056.5,
+      "metrics": {
+        "conflict_apply_failed": true,
+        "client_edit_preserved": true,
+        "task_state_final": "completed",
+        "evidence_fresh_count": 1,
+        "stale_evidence_count": 0,
+        "main_worktree_dirty": false
+      },
+      "assertions": [
+        {
+          "assertion_id": "client_apply_conflict",
+          "metric_key": "conflict_apply_failed",
+          "expected": true,
+          "actual": true,
+          "passed": true,
+          "description": "Applying the approved diff to the dirty laptop checkout is rejected by Git"
+        },
+        {
+          "assertion_id": "client_edit_preserved",
+          "metric_key": "client_edit_preserved",
+          "expected": true,
+          "actual": true,
+          "passed": true,
+          "description": "The laptop's uncommitted value survives untouched"
+        },
+        {
+          "assertion_id": "host_run_still_verified",
+          "metric_key": "evidence_fresh_count",
+          "expected": 1,
+          "actual": 1,
+          "passed": true,
+          "description": "The host still completes its isolated, smoke-verified run"
+        },
+        {
+          "assertion_id": "host_main_tree_untouched",
+          "metric_key": "main_worktree_dirty",
+          "expected": false,
+          "actual": false,
+          "passed": true,
+          "description": "The host repository never receives the patch in its main working tree"
+        }
+      ],
+      "notes": [],
+      "repo": null
+    },
+    {
+      "case_id": "chaos-04-mid-run-disconnect",
+      "title": "Mid-Run Disconnect Leaves Recoverable Host State",
+      "fault_kind": "mid_run_disconnect",
+      "passed": true,
+      "duration_ms": 15237.9,
+      "metrics": {
+        "crash_state_persisted": "preflight_running",
+        "resume_preflight_passed": true,
+        "task_state_final": "completed",
+        "evidence_count": 1,
+        "evidence_fresh_count": 1,
+        "main_worktree_dirty": false
+      },
+      "assertions": [
+        {
+          "assertion_id": "state_survives_crash",
+          "metric_key": "crash_state_persisted",
+          "expected": "preflight_running",
+          "actual": "preflight_running",
+          "passed": true,
+          "description": "SQLite still reports the task as running preflight after a hard daemon kill"
+        },
+        {
+          "assertion_id": "preflight_resumes",
+          "metric_key": "resume_preflight_passed",
+          "expected": true,
+          "actual": true,
+          "passed": true,
+          "description": "A restarted daemon reattaches the worktree and completes the smoke preflight"
+        },
+        {
+          "assertion_id": "recovered_run_records_evidence",
+          "metric_key": "evidence_fresh_count",
+          "expected": 1,
+          "actual": 1,
+          "passed": true,
+          "description": "The post-reconnect approval executes once and records one fresh evidence node"
+        },
+        {
+          "assertion_id": "task_completed_after_reconnect",
+          "metric_key": "task_state_final",
+          "expected": "completed",
+          "actual": "completed",
+          "passed": true,
+          "description": "The recovered task reaches Completed"
+        }
+      ],
+      "notes": [],
+      "repo": null
+    },
+    {
+      "case_id": "chaos-05-runtime-exception",
+      "title": "Runtime Traceback Self-Healing",
+      "fault_kind": "runtime_exception",
+      "passed": true,
+      "duration_ms": 1145.0,
+      "metrics": {
+        "preflight_error": [
+          "NameError: name 'DEFAULT_ALPHA' is not defined"
+        ],
+        "proposal_smoke_verified": true,
+        "task_state_final": "completed",
+        "evidence_fresh_count": 1,
+        "main_worktree_dirty": false,
+        "host_metrics_best_window": 28,
+        "host_metrics_best_mae": 2.16502
+      },
+      "assertions": [
+        {
+          "assertion_id": "smoke_verified_after_fix",
+          "metric_key": "proposal_smoke_verified",
+          "expected": true,
+          "actual": true,
+          "passed": true,
+          "description": "The code_diff candidate passes smoke inside the isolated worktree before approval"
+        },
+        {
+          "assertion_id": "host_main_tree_untouched",
+          "metric_key": "main_worktree_dirty",
+          "expected": false,
+          "actual": false,
+          "passed": true,
+          "description": "No fix is written into the user main working tree"
+        },
+        {
+          "assertion_id": "grid_metrics_match_fixture",
+          "metric_key": "host_metrics_best_window",
+          "expected": 28,
+          "actual": 28,
+          "passed": true,
+          "description": "The executed grid selects the calibrated best window"
+        },
+        {
+          "assertion_id": "task_completed",
+          "metric_key": "task_state_final",
+          "expected": "completed",
+          "actual": "completed",
+          "passed": true,
+          "description": "Task reaches Completed with fresh evidence"
+        }
+      ],
+      "notes": [],
+      "repo": null
+    },
+    {
+      "case_id": "chaos-06-corrupted-lock",
+      "title": "Corrupted Lockfile Recovery",
+      "fault_kind": "corrupted_env_lock",
+      "passed": true,
+      "duration_ms": 1039.7,
+      "metrics": {
+        "uv_lock_parse_failed": true,
+        "proposal_smoke_verified": true,
+        "task_state_final": "completed",
+        "evidence_fresh_count": 1,
+        "main_worktree_dirty": false
+      },
+      "assertions": [
+        {
+          "assertion_id": "lock_parse_failure_detected",
+          "metric_key": "uv_lock_parse_failed",
+          "expected": true,
+          "actual": true,
+          "passed": true,
+          "description": "Preflight fails on the corrupted lockfile instead of running the experiment"
+        },
+        {
+          "assertion_id": "repair_smoke_verified",
+          "metric_key": "proposal_smoke_verified",
+          "expected": true,
+          "actual": true,
+          "passed": true,
+          "description": "The lockfile-restoring patch passes smoke inside the worktree"
+        },
+        {
+          "assertion_id": "host_main_tree_untouched",
+          "metric_key": "main_worktree_dirty",
+          "expected": false,
+          "actual": false,
+          "passed": true,
+          "description": "The corrupted lockfile in the user main tree is never edited in place"
+        },
+        {
+          "assertion_id": "task_completed",
+          "metric_key": "task_state_final",
+          "expected": "completed",
+          "actual": "completed",
+          "passed": true,
+          "description": "Task reaches Completed with one fresh evidence node"
+        }
+      ],
+      "notes": [],
+      "repo": null
+    },
+    {
+      "case_id": "chaos-07-stale-evidence-trap",
+      "title": "Stale Evidence Trap Under Context Ablation",
+      "fault_kind": "stale_evidence_trap",
+      "passed": true,
+      "duration_ms": 1126.9,
+      "metrics": {
+        "stale_read_blocked": true,
+        "dag_bundle_stale_metrics": 0,
+        "full_transcript_stale_metrics": 1,
+        "evidence_fresh_count": 0,
+        "stale_evidence_count": 1,
+        "task_state_final": "completed",
+        "main_worktree_dirty": false
+      },
+      "assertions": [
+        {
+          "assertion_id": "stale_read_refused",
+          "metric_key": "stale_read_blocked",
+          "expected": true,
+          "actual": true,
+          "passed": true,
+          "description": "read_evidence_log refuses the STALE node"
+        },
+        {
+          "assertion_id": "dag_bundle_quarantines_stale",
+          "metric_key": "dag_bundle_stale_metrics",
+          "expected": 0,
+          "actual": 0,
+          "passed": true,
+          "description": "The DAG context bundle exposes zero stale metric values"
+        },
+        {
+          "assertion_id": "full_transcript_leaks_stale",
+          "metric_key": "full_transcript_stale_metrics",
+          "expected": 1,
+          "actual": 1,
+          "passed": true,
+          "description": "The unstructured full transcript does expose the stale metric, proving the ablation contrast"
+        },
+        {
+          "assertion_id": "stale_count_reported",
+          "metric_key": "stale_evidence_count",
+          "expected": 1,
+          "actual": 1,
+          "passed": true,
+          "description": "The DAG snapshot reports exactly one STALE evidence node"
+        }
+      ],
+      "notes": [],
+      "repo": null
+    },
+    {
+      "case_id": "chaos-08-duplicate-replay",
+      "title": "Duplicate Execution Replay Stays Idempotent",
+      "fault_kind": "duplicate_task_replay",
+      "passed": true,
+      "duration_ms": 830.2,
+      "metrics": {
+        "replay_response": "execution_started",
+        "replay_evidence_count": 1,
+        "evidence_node_id_stable": true,
+        "task_state_final": "completed",
+        "main_worktree_dirty": false
+      },
+      "assertions": [
+        {
+          "assertion_id": "replay_reports_completed_state",
+          "metric_key": "replay_response",
+          "expected": "execution_started",
+          "actual": "execution_started",
+          "passed": true,
+          "description": "The replayed approval answers with the already-started execution handle instead of re-running"
+        },
+        {
+          "assertion_id": "single_evidence_record",
+          "metric_key": "replay_evidence_count",
+          "expected": 1,
+          "actual": 1,
+          "passed": true,
+          "description": "Only one evidence node exists for the task after the replay"
+        },
+        {
+          "assertion_id": "task_stays_completed",
+          "metric_key": "task_state_final",
+          "expected": "completed",
+          "actual": "completed",
+          "passed": true,
+          "description": "The replayed task remains Completed"
+        },
+        {
+          "assertion_id": "main_tree_untouched",
+          "metric_key": "main_worktree_dirty",
+          "expected": false,
+          "actual": false,
+          "passed": true,
+          "description": "The replay does not modify the user main working tree"
+        }
+      ],
+      "notes": [],
+      "repo": null
+    }
+  ]
+}

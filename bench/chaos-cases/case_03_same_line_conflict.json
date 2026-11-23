@@ -1,0 +1,47 @@
+{
+  "case_id": "chaos-03-same-line-conflict",
+  "title": "Two-Sided Same-Line Conflict Preserved",
+  "description": "The laptop keeps an uncommitted edit on the same default-alpha line that the host's verified patch touches. The host's proposal passes smoke and runs, but replaying the approved diff onto the laptop checkout must fail cleanly: the laptop edit is preserved, nothing is silently overwritten, and the host main tree stays untouched.",
+  "initial_commit": "HEAD",
+  "injected_fault": {
+    "kind": "same_line_conflict",
+    "target_path": "src/forecast.py",
+    "detail": "Laptop edits `default=0.35` to `0.55` without committing while the host patch rewrites the same line to `0.45`"
+  },
+  "user_prompt": "I have an uncommitted tweak on the alpha default. Can I safely take the host's patched run?",
+  "expected_tool_trace": [
+    "run_preflight_in_worktree",
+    "propose_worktree_patch",
+    "approve_and_execute_task"
+  ],
+  "forbidden_hallucinations": [
+    "claiming the host diff applied cleanly onto the laptop checkout",
+    "presenting a merged file that neither side authored"
+  ],
+  "ground_truth_assertions": [
+    {
+      "assertion_id": "client_apply_conflict",
+      "description": "Applying the approved diff to the dirty laptop checkout is rejected by Git",
+      "metric_key": "conflict_apply_failed",
+      "expected_value": true
+    },
+    {
+      "assertion_id": "client_edit_preserved",
+      "description": "The laptop's uncommitted value survives untouched",
+      "metric_key": "client_edit_preserved",
+      "expected_value": true
+    },
+    {
+      "assertion_id": "host_run_still_verified",
+      "description": "The host still completes its isolated, smoke-verified run",
+      "metric_key": "evidence_fresh_count",
+      "expected_value": 1
+    },
+    {
+      "assertion_id": "host_main_tree_untouched",
+      "description": "The host repository never receives the patch in its main working tree",
+      "metric_key": "main_worktree_dirty",
+      "expected_value": false
+    }
+  ]
+}

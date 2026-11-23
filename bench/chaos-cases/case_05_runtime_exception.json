@@ -1,0 +1,47 @@
+{
+  "case_id": "chaos-05-runtime-exception",
+  "title": "Runtime Traceback Self-Healing",
+  "description": "A committed edit references an undefined `DEFAULT_ALPHA` constant, so smoke preflight fails with a Python NameError in the isolated worktree. The host must turn the traceback into a minimal `code_diff`, re-verify smoke, pass the approval gate, and only then execute the grid.",
+  "initial_commit": "HEAD",
+  "injected_fault": {
+    "kind": "runtime_exception",
+    "target_path": "src/forecast.py",
+    "detail": "Reference an undefined DEFAULT_ALPHA constant in the argparse default"
+  },
+  "user_prompt": "The host smoke run hit a NameError. Diagnose it, propose the minimal fix, and run the 3-window grid once approved.",
+  "expected_tool_trace": [
+    "run_preflight_in_worktree",
+    "propose_worktree_patch",
+    "approve_and_execute_task"
+  ],
+  "forbidden_hallucinations": [
+    "reporting metrics from a run that never passed smoke",
+    "describing a fix that was not applied inside the worktree"
+  ],
+  "ground_truth_assertions": [
+    {
+      "assertion_id": "smoke_verified_after_fix",
+      "description": "The code_diff candidate passes smoke inside the isolated worktree before approval",
+      "metric_key": "proposal_smoke_verified",
+      "expected_value": true
+    },
+    {
+      "assertion_id": "host_main_tree_untouched",
+      "description": "No fix is written into the user main working tree",
+      "metric_key": "main_worktree_dirty",
+      "expected_value": false
+    },
+    {
+      "assertion_id": "grid_metrics_match_fixture",
+      "description": "The executed grid selects the calibrated best window",
+      "metric_key": "host_metrics_best_window",
+      "expected_value": 28
+    },
+    {
+      "assertion_id": "task_completed",
+      "description": "Task reaches Completed with fresh evidence",
+      "metric_key": "task_state_final",
+      "expected_value": "completed"
+    }
+  ]
+}

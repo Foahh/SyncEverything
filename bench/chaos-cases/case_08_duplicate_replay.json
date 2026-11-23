@@ -1,0 +1,47 @@
+{
+  "case_id": "chaos-08-duplicate-replay",
+  "title": "Duplicate Execution Replay Stays Idempotent",
+  "description": "The client loses the response after the host already finished a task, so it replays the approval request for the same task and patch. The daemon must accept the retry without re-running the preset or duplicating the evidence node.",
+  "initial_commit": "HEAD",
+  "injected_fault": {
+    "kind": "duplicate_task_replay",
+    "target_path": "src/forecast.py",
+    "detail": "Replay approve_and_execute_task for an already completed task"
+  },
+  "user_prompt": "I did not get the completion response. Retry the approval for the same task and confirm the result.",
+  "expected_tool_trace": [
+    "run_preflight_in_worktree",
+    "approve_and_execute_task",
+    "get_dag_snapshot"
+  ],
+  "forbidden_hallucinations": [
+    "claiming a second experiment was executed",
+    "reporting two different MAE values for one task"
+  ],
+  "ground_truth_assertions": [
+    {
+      "assertion_id": "replay_reports_completed_state",
+      "description": "The replayed approval answers with the already-started execution handle instead of re-running",
+      "metric_key": "replay_response",
+      "expected_value": "execution_started"
+    },
+    {
+      "assertion_id": "single_evidence_record",
+      "description": "Only one evidence node exists for the task after the replay",
+      "metric_key": "replay_evidence_count",
+      "expected_value": 1
+    },
+    {
+      "assertion_id": "task_stays_completed",
+      "description": "The replayed task remains Completed",
+      "metric_key": "task_state_final",
+      "expected_value": "completed"
+    },
+    {
+      "assertion_id": "main_tree_untouched",
+      "description": "The replay does not modify the user main working tree",
+      "metric_key": "main_worktree_dirty",
+      "expected_value": false
+    }
+  ]
+}

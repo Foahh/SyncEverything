@@ -1,0 +1,48 @@
+{
+  "case_id": "chaos-02-upstream-edit",
+  "title": "Upstream Code Edit Invalidates Host Evidence",
+  "description": "The host completes the window grid and records fresh evidence on commit A. The laptop then edits the same experiment on commit B and syncs HEAD. Relay must detect the new artifact, cascade STALE to the downstream evidence node, and refuse to serve the outdated metrics.",
+  "initial_commit": "HEAD",
+  "injected_fault": {
+    "kind": "upstream_code_edit",
+    "target_path": "src/forecast.py",
+    "detail": "After the host records grid metrics, change the default EWMA alpha and commit a new upstream revision"
+  },
+  "user_prompt": "I changed the smoothing default after the host already ran the grid. Which results are still valid for the new code?",
+  "expected_tool_trace": [
+    "run_preflight_in_worktree",
+    "approve_and_execute_task",
+    "get_dag_snapshot",
+    "read_evidence_log"
+  ],
+  "forbidden_hallucinations": [
+    "citing the pre-edit MAE as valid for the new commit",
+    "reporting a STALE evidence node as fresh"
+  ],
+  "ground_truth_assertions": [
+    {
+      "assertion_id": "single_evidence_invalidated",
+      "description": "The upstream commit flips exactly one downstream evidence node to STALE",
+      "metric_key": "stale_evidence_count",
+      "expected_value": 1
+    },
+    {
+      "assertion_id": "no_fresh_evidence_left",
+      "description": "No evidence node for the previous commit is still advertised as fresh",
+      "metric_key": "evidence_fresh_count",
+      "expected_value": 0
+    },
+    {
+      "assertion_id": "task_record_preserved",
+      "description": "The completed task record survives the invalidation instead of being rewritten or deleted",
+      "metric_key": "task_state_final",
+      "expected_value": "completed"
+    },
+    {
+      "assertion_id": "stale_log_read_blocked",
+      "description": "Reading the STALE evidence log is refused at the engine boundary",
+      "metric_key": "stale_read_blocked",
+      "expected_value": true
+    }
+  ]
+}

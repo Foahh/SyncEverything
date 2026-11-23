@@ -16,3 +16,10 @@ program = "uv"
 args = ["run", "python", "src/forecast.py", "--windows", "7,14,28"]
 timeout_secs = 120
 allowed_params = ["windows", "alpha"]
+
+[presets.alpha_sweep]
+description = "Sweep EWMA alphas (0.2, 0.35, 0.5) over the window grid for calibration replay"
+program = "uv"
+args = ["run", "python", "src/forecast.py", "--windows", "7,14,28", "--alphas", "0.2,0.35,0.5"]
+timeout_secs = 120
+allowed_params = ["windows", "alphas"]
