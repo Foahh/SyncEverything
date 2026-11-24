@@ -55,6 +55,9 @@ pub enum WireRequest {
     FetchTaskState {
         task_id: TaskId,
     },
+    CancelTask {
+        task_id: TaskId,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

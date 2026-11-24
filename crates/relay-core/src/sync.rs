@@ -47,6 +47,7 @@ pub struct RelayNodeConfig {
 #[derive(Debug)]
 pub enum RelayNodeEvent {
     TaskSubmitted(TaskId),
+    TaskCancelled(TaskId),
     ApprovalResolved(TaskId, Option<String>, ApprovalDecision),
     DagChanged,
     PeerPaired,
@@ -389,6 +390,15 @@ impl RelayNode {
         self.send_task_rpc(peer_addr, request).await
     }
 
+    pub async fn cancel_remote_task(
+        &self,
+        peer_addr: EndpointAddr,
+        task_id: TaskId,
+    ) -> RelayResult<TaskRecord> {
+        self.send_task_rpc(peer_addr, WireRequest::CancelTask { task_id })
+            .await
+    }
+
     async fn send_task_rpc(
         &self,
         peer_addr: EndpointAddr,
@@ -512,7 +522,8 @@ fn reply_kind(request: &WireRequest) -> &'static str {
         WireRequest::SyncDagDelta { .. } | WireRequest::FetchDagSnapshot { .. } => "dag_snapshot",
         WireRequest::SubmitTask { .. }
         | WireRequest::ResolveApproval { .. }
-        | WireRequest::FetchTaskState { .. } => "task_state",
+        | WireRequest::FetchTaskState { .. }
+        | WireRequest::CancelTask { .. } => "task_state",
     }
 }
 

@@ -16,6 +16,7 @@ export const relayKeys = {
   llm: () => [...relayKeys.all, "llm"] as const,
   dag: (includeStale: boolean) => [...relayKeys.all, "dag", includeStale] as const,
   tasks: () => [...relayKeys.all, "tasks"] as const,
+  taskLog: (taskId: string) => [...relayKeys.all, "taskLog", taskId] as const,
   handoffs: () => [...relayKeys.all, "handoffs"] as const,
   chat: () => [...relayKeys.all, "chat"] as const,
 };
@@ -170,6 +171,26 @@ export function useSubmitTask() {
       void queryClient.invalidateQueries({ queryKey: relayKeys.tasks() });
       void queryClient.invalidateQueries({ queryKey: relayKeys.handoffs() });
     },
+  });
+}
+
+export function useCancelTask() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (taskId: string) => relayApi.cancelTask(taskId),
+    onSettled: (_data, _error, taskId) => {
+      void queryClient.invalidateQueries({ queryKey: relayKeys.tasks() });
+      void queryClient.invalidateQueries({ queryKey: relayKeys.taskLog(taskId) });
+      void queryClient.invalidateQueries({ queryKey: relayKeys.status() });
+    },
+  });
+}
+
+export function useTaskLog(taskId: string | null, enabled: boolean) {
+  return useQuery({
+    queryKey: relayKeys.taskLog(taskId ?? ""),
+    queryFn: () => (taskId ? relayApi.getTaskLog(taskId) : Promise.resolve(null)),
+    enabled: Boolean(taskId) && enabled,
   });
 }
 

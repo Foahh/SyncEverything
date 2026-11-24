@@ -2,7 +2,8 @@ mod copilot;
 mod network;
 
 use crate::{
-    DagStaleAlertEvent, LlmSettingsUpdate, PresetInfo, WorkspaceInfo, emit_state,
+    DagStaleAlertEvent, LlmSettingsUpdate, PresetInfo, TaskLogStreamEvent, WorkspaceInfo,
+    emit_state,
 };
 use chrono::Utc;
 use network::{Network, NodeEvents, fetch_dag, rpc_error};
@@ -148,6 +149,7 @@ impl DesktopRuntime {
             shutdown,
         });
         runtime.listen(events, mode);
+        runtime.start_task_log_forwarder();
         runtime.start_peer_sync();
         runtime.start_git_head_watcher();
         Ok(runtime)
@@ -429,6 +431,44 @@ impl DesktopRuntime {
         Ok(result)
     }
 
+    pub(crate) async fn cancel_task(&self, task_id: TaskId) -> RelayResult<TaskRecord> {
+        let guard = self.network.lock().await;
+        let network = guard
+            .as_ref()
+            .ok_or_else(|| RelayError::Transport("Runtime is shutting down".into()))?;
+        let record = match network.mode {
+            RuntimeMode::LocalDualSandbox => {
+                let host = network.loopback_host.as_ref().expect("loopback host");
+                network
+                    .local
+                    .cancel_remote_task(host.addr(), task_id)
+                    .await?
+            }
+            RuntimeMode::Host => self.engine.cancel_task(task_id).await?,
+            RuntimeMode::Client => {
+                if let Some(address) = network.remote.clone() {
+                    let request = WireRequest::CancelTask { task_id };
+                    match network.local.send_rpc(address, request).await {
+                        Ok(response) => {
+                            let record = task_response(response)?;
+                            self.engine.mirror_peer_task(&record).await?;
+                            record
+                        }
+                        Err(RelayError::Transport(error)) => {
+                            tracing::debug!(%error, "Queueing task cancellation for the disconnected host");
+                            self.engine.queue_peer_cancel(task_id).await?
+                        }
+                        Err(error) => return Err(error),
+                    }
+                } else {
+                    self.engine.queue_peer_cancel(task_id).await?
+                }
+            }
+        };
+        emit_state(&self.app, "task_cancelled", format!("Task {task_id} cancelled"));
+        Ok(record)
+    }
+
     pub(crate) async fn resolve_approval(
         self: &Arc<Self>,
         task_id: TaskId,
@@ -647,6 +687,13 @@ impl DesktopRuntime {
                             let execute = mode != RuntimeMode::Client;
                             match event {
                                 RelayNodeEvent::TaskSubmitted(id) => runtime.task_submitted(id, execute),
+                                RelayNodeEvent::TaskCancelled(id) => {
+                                    emit_state(
+                                        &runtime.app,
+                                        "task_cancelled",
+                                        format!("Task {id} cancelled"),
+                                    );
+                                }
                                 RelayNodeEvent::ApprovalResolved(id, patch_id, decision) => {
                                     runtime.approval_resolved(id, patch_id, decision, execute);
                                 }
@@ -690,6 +737,13 @@ impl DesktopRuntime {
                     Ok(HostTaskOutcome::AwaitingApproval) => {
                         emit_state(
                             &runtime.app, "task_updated", format!("Task {id} is ready for approval"),
+                        );
+                    }
+                    Ok(HostTaskOutcome::Cancelled) => {
+                        emit_state(
+                            &runtime.app,
+                            "task_cancelled",
+                            format!("Task {id} cancelled"),
                         );
                     }
                     Ok(HostTaskOutcome::Skipped) => {
@@ -747,6 +801,44 @@ impl DesktopRuntime {
                 }
             });
         }
+    }
+
+    fn start_task_log_forwarder(self: &Arc<Self>) {
+        let mut rx = self.engine.subscribe_task_logs();
+        let app = self.app.clone();
+        let mut shutdown_rx = self.shutdown.subscribe();
+        tauri::async_runtime::spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = shutdown_rx.changed() => {
+                        if *shutdown_rx.borrow() {
+                            break;
+                        }
+                    }
+                    result = rx.recv() => {
+                        match result {
+                            Ok(chunk) => {
+                                let event = TaskLogStreamEvent {
+                                    task_id: chunk.task_id,
+                                    preset: chunk.preset,
+                                    stream: chunk.stream,
+                                    seq: chunk.seq,
+                                    text: chunk.text,
+                                    timestamp: chunk.timestamp,
+                                };
+                                if let Err(error) = event.emit(&app) {
+                                    tracing::warn!(%error, "Unable to emit task log stream event");
+                                }
+                            }
+                            Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                                tracing::debug!(skipped, "Task log stream forwarder lagged");
+                            }
+                            Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                        }
+                    }
+                }
+            }
+        });
     }
 
     fn start_peer_sync(self: &Arc<Self>) {

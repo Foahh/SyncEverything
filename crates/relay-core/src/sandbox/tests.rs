@@ -747,3 +747,255 @@ async fn first_dispatch_can_use_a_starter_manifest_before_it_is_committed() {
     assert_eq!(engine.get_task(id).await.unwrap().unwrap().state, TaskState::Completed);
     assert_eq!(git(&repo, &["status", "--short"]).await, "?? relay.toml");
 }
+
+#[tokio::test]
+async fn run_preset_streaming_emits_incremental_stdout_and_stderr_with_identical_hash() {
+    use crate::contracts::{TaskLogChunk, TaskLogStreamKind};
+    use std::sync::Arc;
+    use tokio::sync::mpsc;
+
+    let temp = TempDir::new();
+    let repo = temp.join("stream-repo");
+    init_repo(&repo).await;
+    fs::create_dir(repo.join("src")).unwrap();
+    fs::write(
+        repo.join("src/stream.py"),
+        r#"import json, sys, time
+print("stdout line 1", flush=True)
+print("stderr line 1", file=sys.stderr, flush=True)
+time.sleep(0.15)
+print("stdout line 2", flush=True)
+print(json.dumps({"loss": 0.125}), flush=True)
+print("stderr line 2", file=sys.stderr, flush=True)
+"#,
+    )
+    .unwrap();
+    fs::write(repo.join("pyproject.toml"), PYPROJECT).unwrap();
+    fs::write(
+        repo.join("relay.toml"),
+        r#"[project]
+repo_id = "stream-test"
+name = "Stream Test"
+smoke_preset = "stream_ok"
+
+[presets.stream_ok]
+description = "Emit incremental stdout and stderr"
+program = "uv"
+args = ["run", "--quiet", "--offline", "python", "src/stream.py"]
+timeout_secs = 30
+"#,
+    )
+    .unwrap();
+    fs::write(repo.join(".gitignore"), ".venv/\n__pycache__/\n").unwrap();
+    let sha = create_initial_commit(&repo).await;
+
+    let sandbox = WorktreeSandbox::new(&repo, temp.join("worktrees"));
+    let manifest = load_manifest(&repo).unwrap();
+    let task_id = Uuid::now_v7();
+    let worktree = sandbox.prepare_worktree(task_id, &sha).await.unwrap();
+
+    let (tx, mut rx) = mpsc::unbounded_channel::<TaskLogChunk>();
+    let sandbox_clone = sandbox.clone();
+    let worktree_path = worktree.worktree_path().to_owned();
+    let manifest_clone = manifest.clone();
+    let run_handle = tokio::spawn(async move {
+        sandbox_clone
+            .run_preset_streaming(
+                &worktree_path,
+                &manifest_clone,
+                "stream_ok",
+                &BTreeMap::new(),
+                PresetRunOptions {
+                    task_id: Some(task_id),
+                    on_log_chunk: Some(Arc::new(move |chunk| {
+                        let _ = tx.send(chunk);
+                    })),
+                    cancel_token: None,
+                    seq_counter: None,
+                },
+            )
+            .await
+    });
+
+    // Verify we receive live chunks BEFORE the child process exits.
+    let first_chunk = tokio::time::timeout(std::time::Duration::from_secs(10), rx.recv())
+        .await
+        .expect("timed out waiting for first live chunk")
+        .expect("log channel closed prematurely");
+    assert_eq!(first_chunk.task_id, task_id.to_string());
+    assert_eq!(first_chunk.preset, "stream_ok");
+
+    let streamed_output = run_handle.await.unwrap().unwrap();
+    assert!(streamed_output.success, "{}", streamed_output.raw_log);
+    assert!(!streamed_output.timed_out);
+    assert!(!streamed_output.cancelled);
+
+    let mut chunks = vec![first_chunk];
+    while let Ok(chunk) = rx.try_recv() {
+        chunks.push(chunk);
+    }
+    for window in chunks.windows(2) {
+        assert!(
+            window[0].seq < window[1].seq,
+            "expected strictly increasing seq: {:?}",
+            chunks
+        );
+    }
+
+    let mut combined_stdout = String::new();
+    let mut combined_stderr = String::new();
+    for chunk in &chunks {
+        match chunk.stream {
+            TaskLogStreamKind::Stdout => combined_stdout.push_str(&chunk.text),
+            TaskLogStreamKind::Stderr => combined_stderr.push_str(&chunk.text),
+        }
+    }
+    assert!(combined_stdout.contains("stdout line 1"));
+    assert!(combined_stdout.contains("stdout line 2"));
+    assert!(combined_stderr.contains("stderr line 1"));
+    assert!(combined_stderr.contains("stderr line 2"));
+    assert_eq!(combined_stdout, streamed_output.stdout);
+    assert_eq!(combined_stderr, streamed_output.stderr);
+
+    // Compare against non-streaming `run_preset` for identical raw_log and BLAKE3 hash.
+    let baseline = sandbox
+        .run_preset(worktree.worktree_path(), &manifest, "stream_ok", &BTreeMap::new())
+        .await
+        .unwrap();
+    assert_eq!(streamed_output.raw_log, baseline.raw_log);
+    assert_eq!(streamed_output.log_blob_hash, baseline.log_blob_hash);
+    assert_eq!(
+        streamed_output.metrics_json,
+        Some(serde_json::json!({"loss": 0.125}).into())
+    );
+    worktree.cleanup().await.unwrap();
+}
+
+#[tokio::test]
+async fn run_preset_streaming_distinguishes_timeout_from_cancellation() {
+    use crate::contracts::TaskLogChunk;
+    use crate::engine::TaskCancellationToken;
+    use std::sync::Arc;
+    use tokio::sync::mpsc;
+
+    let temp = TempDir::new();
+    let repo = temp.join("cancel-timeout-repo");
+    init_repo(&repo).await;
+    fs::create_dir(repo.join("src")).unwrap();
+    fs::write(
+        repo.join("src/slow.py"),
+        r#"import sys, time
+print("partial stdout before sleep", flush=True)
+print("partial stderr before sleep", file=sys.stderr, flush=True)
+time.sleep(30)
+print("should never finish", flush=True)
+"#,
+    )
+    .unwrap();
+    fs::write(repo.join("pyproject.toml"), PYPROJECT).unwrap();
+    fs::write(
+        repo.join("relay.toml"),
+        r#"[project]
+repo_id = "cancel-timeout"
+name = "Cancel & Timeout Test"
+smoke_preset = "slow_cancel"
+
+[presets.slow_cancel]
+description = "Long-running preset for cancellation test"
+program = "uv"
+args = ["run", "--offline", "python", "src/slow.py"]
+timeout_secs = 30
+
+[presets.slow_timeout]
+description = "Short-timeout preset"
+program = "uv"
+args = ["run", "--offline", "python", "src/slow.py"]
+timeout_secs = 1
+"#,
+    )
+    .unwrap();
+    fs::write(repo.join(".gitignore"), ".venv/\n__pycache__/\n").unwrap();
+    let sha = create_initial_commit(&repo).await;
+
+    let sandbox = WorktreeSandbox::new(&repo, temp.join("worktrees"));
+    let manifest = load_manifest(&repo).unwrap();
+    let task_id = Uuid::now_v7();
+    let worktree = sandbox.prepare_worktree(task_id, &sha).await.unwrap();
+
+    // 1) Cancellation kills promptly and preserves partial stdout/stderr.
+    let (cancel_tx, cancel_token) = TaskCancellationToken::new();
+    let (chunk_tx, mut chunk_rx) = mpsc::unbounded_channel::<TaskLogChunk>();
+    let sb = sandbox.clone();
+    let wt_path = worktree.worktree_path().to_owned();
+    let mf = manifest.clone();
+    let started = std::time::Instant::now();
+    let cancel_run = tokio::spawn(async move {
+        sb.run_preset_streaming(
+            &wt_path,
+            &mf,
+            "slow_cancel",
+            &BTreeMap::new(),
+            PresetRunOptions {
+                task_id: Some(task_id),
+                on_log_chunk: Some(Arc::new(move |chunk| {
+                    let _ = chunk_tx.send(chunk);
+                })),
+                cancel_token: Some(cancel_token),
+                seq_counter: None,
+            },
+        )
+        .await
+    });
+
+    // Wait until partial output is observed from the running child, then cancel.
+    let mut saw_partial = false;
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(15);
+    while tokio::time::Instant::now() < deadline {
+        if let Ok(Some(chunk)) =
+            tokio::time::timeout(std::time::Duration::from_secs(5), chunk_rx.recv()).await
+            && chunk.text.contains("partial stdout before sleep")
+        {
+            saw_partial = true;
+            break;
+        }
+    }
+    assert!(saw_partial, "expected partial stdout chunk before cancelling");
+    let _ = cancel_tx.send(true);
+
+    let cancelled_out = tokio::time::timeout(std::time::Duration::from_secs(10), cancel_run)
+        .await
+        .expect("cancelled preset did not terminate promptly")
+        .unwrap()
+        .unwrap();
+    assert!(started.elapsed() < std::time::Duration::from_secs(15));
+    assert!(cancelled_out.cancelled);
+    assert!(!cancelled_out.timed_out);
+    assert!(!cancelled_out.success);
+    assert!(cancelled_out.raw_log.contains("partial stdout before sleep"));
+    assert!(!cancelled_out.raw_log.contains("should never finish"));
+    assert_eq!(
+        cancelled_out.log_blob_hash,
+        format!(
+            "blake3:{}",
+            blake3::hash(cancelled_out.raw_log.as_bytes()).to_hex()
+        )
+    );
+
+    // 2) Timeout marks timed_out=true and cancelled=false.
+    let timed_out = sandbox
+        .run_preset_streaming(
+            worktree.worktree_path(),
+            &manifest,
+            "slow_timeout",
+            &BTreeMap::new(),
+            PresetRunOptions::default(),
+        )
+        .await
+        .unwrap();
+    assert!(timed_out.timed_out);
+    assert!(!timed_out.cancelled);
+    assert!(!timed_out.success);
+    assert!(timed_out.stderr.contains("timed out after 1 seconds"));
+
+    worktree.cleanup().await.unwrap();
+}

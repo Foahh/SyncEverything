@@ -8,26 +8,29 @@ import {
   ChevronUp,
   Cpu,
   Link2,
+  Loader2,
   Play,
   Settings2,
   Sparkles,
+  Square,
+  Terminal,
 } from "lucide-react";
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
-import type {
-  PeerStatus_Serialize,
-  RuntimeMode,
-  TaskRecord_Serialize,
-  TaskState,
-} from "../bindings";
+import type { PeerStatus_Serialize, RuntimeMode, TaskRecord_Serialize } from "../bindings";
 import { isTauriRuntime, needsTaskApproval } from "../lib/relayApi";
+import { isTaskCancellable, isTaskRunning, taskStateBadgeProps } from "../lib/taskLogStream";
 
 interface LeftRailProps {
   status: PeerStatus_Serialize | undefined;
   tasks: TaskRecord_Serialize[];
+  selectedTaskId: string | null;
+  cancellingTaskId: string | null;
   onOpenRunTask: () => void;
   onOpenPairModal: () => void;
   onOpenApproval: (task: TaskRecord_Serialize) => void;
+  onInspectTask: (task: TaskRecord_Serialize) => void;
+  onCancelTask: (taskId: string) => void;
   onSelectEvidenceNode: (nodeId: string) => void;
   onSwitchMode: (mode: RuntimeMode) => void;
   onTriggerUpstreamEdit: () => void;
@@ -37,39 +40,16 @@ interface LeftRailProps {
 
 const RUNTIME_MODES: RuntimeMode[] = ["client", "host", "local_dual_sandbox"];
 
-function stateBadgeProps(state: TaskState): {
-  variant: "default" | "secondary" | "destructive" | "outline";
-  className?: string;
-} {
-  switch (state) {
-    case "completed":
-      return {
-        variant: "secondary",
-        className:
-          "bg-emerald-500/12 text-emerald-700 dark:bg-emerald-500/20 dark:text-emerald-300",
-      };
-    case "self_healing_proposed":
-      return { variant: "default" };
-    case "queued":
-    case "preflight_running":
-    case "executing":
-      return {
-        variant: "secondary",
-        className: "bg-amber-500/15 text-amber-700 dark:bg-amber-500/20 dark:text-amber-300",
-      };
-    case "failed":
-    case "stale":
-    case "rejected":
-      return { variant: "destructive" };
-  }
-}
-
 export function LeftRail({
   status,
   tasks,
+  selectedTaskId,
+  cancellingTaskId,
   onOpenRunTask,
   onOpenPairModal,
   onOpenApproval,
+  onInspectTask,
+  onCancelTask,
   onSelectEvidenceNode,
   onSwitchMode,
   onTriggerUpstreamEdit,
@@ -148,18 +128,30 @@ export function LeftRail({
             <div className="flex flex-col gap-2">
               {tasks.map((task) => {
                 const needsFixReview = needsTaskApproval(task);
-                const badge = stateBadgeProps(task.state);
+                const badge = taskStateBadgeProps(task.state);
+                const running = isTaskRunning(task.state);
+                const cancellable = isTaskCancellable(task.state);
+                const isCancelling = cancellingTaskId === task.spec.task_id;
+                const isSelected = selectedTaskId === task.spec.task_id;
 
                 return (
                   <div
                     key={task.spec.task_id}
                     className={cn(
-                      "rounded-lg border p-3 transition-colors",
+                      "relative overflow-hidden rounded-lg border p-3 transition-colors",
                       needsFixReview
                         ? "border-primary/40 bg-[var(--relay-heal-soft)]"
-                        : "border-border bg-card hover:border-foreground/20",
+                        : isSelected
+                          ? "border-primary/50 bg-card ring-1 ring-primary/20"
+                          : "border-border bg-card hover:border-foreground/20",
                     )}
                   >
+                    {running && (
+                      <div
+                        className="absolute inset-x-0 top-0 h-0.5 animate-pulse bg-amber-500"
+                        aria-hidden="true"
+                      />
+                    )}
                     <div className="flex items-center justify-between gap-2">
                       <span className="truncate text-xs font-semibold text-foreground">
                         {task.spec.command_preset}
@@ -193,18 +185,53 @@ export function LeftRail({
                       </Button>
                     )}
 
-                    {task.evidence_node_id && (
-                      <button
-                        type="button"
-                        onClick={() => onSelectEvidenceNode(task.evidence_node_id!)}
-                        className="mt-2 inline-flex cursor-pointer items-center gap-1 text-[11.5px] font-medium text-primary hover:underline"
-                      >
-                        <CheckCircle2 className="size-3 shrink-0" />
-                        <span className="relay-text-trim leading-none">
-                          {t("sidebar.viewResult")}
-                        </span>
-                      </button>
-                    )}
+                    <div className="mt-2 flex flex-wrap items-center justify-between gap-2">
+                      <div className="flex items-center gap-3">
+                        <button
+                          type="button"
+                          onClick={() => onInspectTask(task)}
+                          className="inline-flex cursor-pointer items-center gap-1 text-[11.5px] font-medium text-muted-foreground transition-colors hover:text-foreground"
+                        >
+                          <Terminal className="size-3 shrink-0" />
+                          <span className="relay-text-trim leading-none">
+                            {t(running ? "sidebar.liveLogs" : "sidebar.viewLogs")}
+                          </span>
+                        </button>
+
+                        {task.evidence_node_id && (
+                          <button
+                            type="button"
+                            onClick={() => onSelectEvidenceNode(task.evidence_node_id!)}
+                            className="inline-flex cursor-pointer items-center gap-1 text-[11.5px] font-medium text-primary hover:underline"
+                          >
+                            <CheckCircle2 className="size-3 shrink-0" />
+                            <span className="relay-text-trim leading-none">
+                              {t("sidebar.viewResult")}
+                            </span>
+                          </button>
+                        )}
+                      </div>
+
+                      {cancellable && (
+                        <Button
+                          type="button"
+                          size="xs"
+                          variant="outline"
+                          disabled={isCancelling}
+                          onClick={() => onCancelTask(task.spec.task_id)}
+                          className="h-6 gap-1 border-destructive/30 px-2 text-[11px] text-destructive hover:bg-destructive/10 hover:text-destructive"
+                        >
+                          {isCancelling ? (
+                            <Loader2 className="size-3 shrink-0 animate-spin" />
+                          ) : (
+                            <Square className="size-2.5 shrink-0" />
+                          )}
+                          <span className="relay-text-trim leading-none">
+                            {t(isCancelling ? "sidebar.cancellingTask" : "sidebar.cancelTask")}
+                          </span>
+                        </Button>
+                      )}
+                    </div>
                   </div>
                 );
               })}

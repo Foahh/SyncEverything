@@ -2,25 +2,88 @@ use crate::agent::AgentChatMessage;
 use crate::contracts::{
     ApprovalDecision, DagDelta, DagSnapshot, EdgeKind, Freshness, GraphEdge, GraphNode,
     HandoffSummary, NodeKind, PatchProposal, RuntimeMode, StalePropagationReport, TaskId,
-    TaskRecord, TaskSpec, TaskState, WireRequest,
+    TaskLogChunk, TaskRecord, TaskSpec, TaskState, WireRequest,
 };
 use crate::dag::{DagEngine, supersedes_edge};
 use crate::error::{RelayError, RelayResult};
-use crate::sandbox::HeadSyncOutcome;
+use crate::sandbox::{HeadSyncOutcome, PresetRunOptions};
 use crate::state::{is_active, validate_transition};
 use crate::storage::{
-    RelayStore, fetch_task, fetch_tasks, insert_task, write_edge, write_freshness, write_handoff,
-    write_log_blob, write_node, write_outbox, write_task,
+    RelayStore, fetch_task, fetch_task_log_ref, fetch_tasks, insert_task, write_edge,
+    write_freshness, write_handoff, write_log_blob, write_node, write_outbox, write_task,
+    write_task_log_ref,
 };
 use chrono::Utc;
 use serde_json::Value;
 use sqlx::{Sqlite, SqliteConnection, Transaction};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, Ordering};
-use tokio::sync::{Mutex, MutexGuard, OwnedMutexGuard, watch};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::{Arc, RwLock as StdRwLock};
+use tokio::sync::{Mutex, MutexGuard, OwnedMutexGuard, broadcast, watch};
 use uuid::Uuid;
+
+const TASK_LOG_BROADCAST_CAPACITY: usize = 1024;
+
+#[derive(Debug, Clone)]
+pub struct TaskCancellationToken {
+    rx: watch::Receiver<bool>,
+}
+
+impl TaskCancellationToken {
+    pub fn new() -> (watch::Sender<bool>, Self) {
+        let (tx, rx) = watch::channel(false);
+        (tx, Self { rx })
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        *self.rx.borrow()
+    }
+
+    pub async fn cancelled(&mut self) {
+        if *self.rx.borrow() {
+            return;
+        }
+        while self.rx.changed().await.is_ok() {
+            if *self.rx.borrow() {
+                return;
+            }
+        }
+    }
+}
+
+#[derive(Debug)]
+struct CancellationEntry {
+    id: u64,
+    tx: watch::Sender<bool>,
+}
+
+/// RAII handle that removes a task's active cancellation signal from `RelayEngine` on drop.
+#[derive(Debug)]
+pub struct TaskCancellationGuard {
+    registry: Arc<StdRwLock<HashMap<TaskId, CancellationEntry>>>,
+    task_id: TaskId,
+    entry_id: u64,
+    token: TaskCancellationToken,
+}
+
+impl TaskCancellationGuard {
+    pub fn token(&self) -> TaskCancellationToken {
+        self.token.clone()
+    }
+}
+
+impl Drop for TaskCancellationGuard {
+    fn drop(&mut self) {
+        if let Ok(mut handles) = self.registry.write()
+            && handles
+                .get(&self.task_id)
+                .is_some_and(|entry| entry.id == self.entry_id)
+        {
+            handles.remove(&self.task_id);
+        }
+    }
+}
 
 enum EvidenceArtifact<'a> {
     Existing(&'a str),
@@ -61,6 +124,10 @@ pub struct RelayEngine {
     pending_outbox: Arc<AtomicU32>,
     metadata_writes: Arc<Mutex<()>>,
     outbox_flush: Arc<Mutex<()>>,
+    cancellation_handles: Arc<StdRwLock<HashMap<TaskId, CancellationEntry>>>,
+    next_cancel_entry_id: Arc<AtomicU64>,
+    log_tx: broadcast::Sender<TaskLogChunk>,
+    log_seqs: Arc<StdRwLock<HashMap<TaskId, Arc<AtomicU32>>>>,
     repo_root: Option<PathBuf>,
 }
 
@@ -109,6 +176,7 @@ impl RelayEngine {
             .await?
             .unwrap_or(default_mode);
         let pending_outbox = store.count_repo_pending_outbox(Some(&repo_id)).await?;
+        let (log_tx, _) = broadcast::channel(TASK_LOG_BROADCAST_CAPACITY);
         Ok(Self {
             repo_id,
             store,
@@ -117,8 +185,90 @@ impl RelayEngine {
             pending_outbox: Arc::new(AtomicU32::new(pending_outbox)),
             metadata_writes: Arc::new(Mutex::new(())),
             outbox_flush: Arc::new(Mutex::new(())),
+            cancellation_handles: Arc::new(StdRwLock::new(HashMap::new())),
+            next_cancel_entry_id: Arc::new(AtomicU64::new(1)),
+            log_tx,
+            log_seqs: Arc::new(StdRwLock::new(HashMap::new())),
             repo_root,
         })
+    }
+
+    pub fn subscribe_task_logs(&self) -> broadcast::Receiver<TaskLogChunk> {
+        self.log_tx.subscribe()
+    }
+
+    pub fn publish_task_log(&self, chunk: TaskLogChunk) {
+        let _ = self.log_tx.send(chunk);
+    }
+
+    pub fn task_log_seq_counter(&self, task_id: TaskId) -> Arc<AtomicU32> {
+        let mut seqs = self.log_seqs.write().expect("task log seq lock poisoned");
+        seqs.entry(task_id)
+            .or_insert_with(|| Arc::new(AtomicU32::new(0)))
+            .clone()
+    }
+
+    fn clear_task_log_seq(&self, task_id: TaskId) {
+        if let Ok(mut seqs) = self.log_seqs.write() {
+            seqs.remove(&task_id);
+        }
+    }
+
+    pub fn preset_run_options(
+        &self,
+        task_id: TaskId,
+        cancel_token: TaskCancellationToken,
+    ) -> PresetRunOptions {
+        let engine = self.clone();
+        PresetRunOptions {
+            task_id: Some(task_id),
+            on_log_chunk: Some(Arc::new(move |chunk| engine.publish_task_log(chunk))),
+            cancel_token: Some(cancel_token),
+            seq_counter: Some(self.task_log_seq_counter(task_id)),
+        }
+    }
+
+    /// Register an RAII cancellation guard for a running task. Returns `TaskCancelled`
+    /// immediately if the task was already cancelled before registration.
+    pub async fn register_task_cancellation(
+        &self,
+        task_id: TaskId,
+    ) -> RelayResult<TaskCancellationGuard> {
+        let entry_id = self.next_cancel_entry_id.fetch_add(1, Ordering::Relaxed);
+        let (tx, token) = TaskCancellationToken::new();
+        {
+            let mut handles = self
+                .cancellation_handles
+                .write()
+                .expect("cancellation registry poisoned");
+            handles.insert(task_id, CancellationEntry { id: entry_id, tx });
+        }
+        let guard = TaskCancellationGuard {
+            registry: self.cancellation_handles.clone(),
+            task_id,
+            entry_id,
+            token,
+        };
+        if let Some(task) = self.get_task(task_id).await?
+            && task.state == TaskState::Cancelled
+        {
+            return Err(RelayError::TaskCancelled(task_id.to_string()));
+        }
+        Ok(guard)
+    }
+
+    pub fn has_active_cancellation(&self, task_id: TaskId) -> bool {
+        self.cancellation_handles
+            .read()
+            .expect("cancellation registry poisoned")
+            .contains_key(&task_id)
+    }
+
+    pub fn active_cancellation_count(&self) -> usize {
+        self.cancellation_handles
+            .read()
+            .expect("cancellation registry poisoned")
+            .len()
     }
 
     pub fn repo_id(&self) -> &str {
@@ -483,6 +633,106 @@ impl RelayEngine {
         Ok((record, inserted || updated))
     }
 
+    pub async fn cancel_task(&self, task_id: TaskId) -> RelayResult<TaskRecord> {
+        self.cancel_task_inner(task_id, None).await
+    }
+
+    /// Record an offline cancellation and its replay request in the same SQLite transaction.
+    pub async fn queue_peer_cancel(&self, task_id: TaskId) -> RelayResult<TaskRecord> {
+        let payload = serde_json::to_value(WireRequest::CancelTask { task_id })?;
+        let guard = self.metadata_writes.clone().lock_owned().await;
+        let engine = self.clone();
+        tokio::spawn(async move {
+            let _guard = guard;
+            let record = engine.cancel_task_inner(task_id, Some(&payload)).await?;
+            engine.pending_outbox.fetch_add(1, Ordering::Relaxed);
+            Ok(record)
+        })
+        .await
+        .map_err(|err| RelayError::Internal(err.to_string()))?
+    }
+
+    async fn cancel_task_inner(
+        &self,
+        task_id: TaskId,
+        outbox: Option<&Value>,
+    ) -> RelayResult<TaskRecord> {
+        let mut tx = self.store.begin_write().await?;
+        let mut record = self.require_task(&mut tx, task_id).await?;
+        move_task(&mut record, TaskState::Cancelled)?;
+        if record.preflight_summary.is_none() {
+            record.preflight_summary = Some("Cancelled by user".into());
+        }
+        record.error_message = None;
+        write_task(&mut tx, &record).await?;
+        if let Some(payload) = outbox {
+            write_outbox(&mut tx, &self.repo_id, payload).await?;
+        }
+        tx.commit().await?;
+
+        let sender = self
+            .cancellation_handles
+            .read()
+            .expect("cancellation registry poisoned")
+            .get(&task_id)
+            .map(|entry| entry.tx.clone());
+        if let Some(cancel_tx) = sender {
+            let _ = cancel_tx.send(true);
+        }
+        Ok(record)
+    }
+
+    /// Persist partial stdout/stderr captured when a running task is cancelled and ensure
+    /// the task is recorded in `TaskState::Cancelled`.
+    pub async fn record_cancelled_task_log(
+        &self,
+        task_id: TaskId,
+        raw_log: &str,
+    ) -> RelayResult<(TaskRecord, String)> {
+        let hash = blake3::hash(raw_log.as_bytes()).to_hex().to_string();
+        let mut tx = self.store.begin_write().await?;
+        let mut task = self.require_task(&mut tx, task_id).await?;
+        write_log_blob(&mut tx, &hash, raw_log).await?;
+        write_task_log_ref(&mut tx, &self.repo_id, task_id, &hash).await?;
+        if task.state != TaskState::Cancelled {
+            move_task(&mut task, TaskState::Cancelled)?;
+        }
+        task.preflight_summary = Some(if raw_log.is_empty() {
+            "Cancelled by user".into()
+        } else {
+            format!("Cancelled by user (partial log blake3:{})", &hash[..12])
+        });
+        task.error_message = None;
+        task.updated_at = task.updated_at.max(Utc::now());
+        write_task(&mut tx, &task).await?;
+        tx.commit().await?;
+        self.clear_task_log_seq(task_id);
+        Ok((task, hash))
+    }
+
+    /// Persist a task's captured log blob and associate it with `task_id` for inspection.
+    pub async fn record_task_log(&self, task_id: TaskId, raw_log: &str) -> RelayResult<String> {
+        let hash = blake3::hash(raw_log.as_bytes()).to_hex().to_string();
+        let mut tx = self.store.begin_write().await?;
+        let _ = self.require_task(&mut tx, task_id).await?;
+        write_log_blob(&mut tx, &hash, raw_log).await?;
+        write_task_log_ref(&mut tx, &self.repo_id, task_id, &hash).await?;
+        tx.commit().await?;
+        Ok(hash)
+    }
+
+    /// Read the stored `(log_blob_hash, content)` for a task, if any log has been persisted.
+    pub async fn read_task_log(&self, task_id: TaskId) -> RelayResult<Option<(String, String)>> {
+        let mut tx = self.store.pool().begin().await?;
+        let Some(hash) = fetch_task_log_ref(&mut tx, &self.repo_id, task_id).await? else {
+            tx.commit().await?;
+            return Ok(None);
+        };
+        let content = RelayStore::fetch_log_blob(&mut tx, &hash).await?;
+        tx.commit().await?;
+        Ok(content.map(|text| (hash, text)))
+    }
+
     pub async fn transition_task(
         &self,
         task_id: TaskId,
@@ -743,12 +993,14 @@ impl RelayEngine {
         task.error_message = None;
 
         write_log_blob(&mut tx, &hash, raw_log).await?;
+        write_task_log_ref(&mut tx, &self.repo_id, task_id, &hash).await?;
         write_node(&mut tx, &self.repo_id, &evidence_node).await?;
         write_edge(&mut tx, &self.repo_id, &edge).await?;
         let stale_nodes: Vec<_> = invalidated.iter().filter_map(|id| staged.get_node(id)).collect();
         write_freshness(&mut tx, stale_nodes).await?;
         write_task(&mut tx, &task).await?;
         commit_dag(tx, dag, staged).await?;
+        self.clear_task_log_seq(task_id);
         Ok(task)
     }
 

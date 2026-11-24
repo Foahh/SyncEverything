@@ -4,6 +4,7 @@ import type { GraphNode, TaskRecord_Serialize } from "./bindings";
 import { formatErrorMessage } from "./lib/formatError";
 import { findCommitArtifact, needsTaskApproval, type ApprovalInput } from "./lib/relayApi";
 import { DagCanvas } from "./components/DagCanvas";
+import type { InspectorMode } from "./components/InspectorDrawer";
 import { LeftRail } from "./components/LeftRail";
 import { RightWorkbenchRail, type RightRailTab } from "./components/RightWorkbenchRail";
 import { TopTelemetryBar } from "./components/TopTelemetryBar";
@@ -19,7 +20,9 @@ import {
 } from "./components/modals/WorkspaceSettingsModal";
 import { useCopilotChat } from "./hooks/useCopilotChat";
 import { useRelayTheme } from "./hooks/useRelayTheme";
+import { useTaskLogStream } from "./hooks/useTaskLogStream";
 import {
+  useCancelTask,
   useDagSnapshot,
   useInitWorkspaceManifest,
   useLlmSettings,
@@ -30,10 +33,12 @@ import {
   useSimulateArtifactUpdate,
   useSubmitTask,
   useSwitchRuntimeMode,
+  useTaskLog,
   useTasks,
   useUpsertDagNode,
   useWorkspaceInfo,
 } from "./lib/queries";
+import { isTaskRunning } from "./lib/taskLogStream";
 
 export default function App() {
   useRelayEventSync();
@@ -42,9 +47,10 @@ export default function App() {
 
   const [includeStale, setIncludeStale] = useState(true);
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
+  const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
   const [rightRailOpen, setRightRailOpen] = useState(true);
   const [rightRailTab, setRightRailTab] = useState<RightRailTab>("agent");
-  const [inspectorMode, setInspectorMode] = useState<"node" | "fix">("node");
+  const [inspectorMode, setInspectorMode] = useState<InspectorMode>("node");
   const [activeApprovalTaskId, setActiveApprovalTaskId] = useState<string | null>(null);
   const [decisionModalOpen, setDecisionModalOpen] = useState(false);
   const [taskModalOpen, setTaskModalOpen] = useState(false);
@@ -59,9 +65,11 @@ export default function App() {
   const { data: dag } = useDagSnapshot(includeStale);
   const { data: tasks = [] } = useTasks();
   const copilot = useCopilotChat();
+  const { logsByTask, clearTaskLogs } = useTaskLogStream();
 
   const switchMode = useSwitchRuntimeMode();
   const submitTask = useSubmitTask();
+  const cancelTask = useCancelTask();
   const resolveApproval = useResolvePatchApproval();
   const simulateEdit = useSimulateArtifactUpdate();
   const upsertNode = useUpsertDagNode();
@@ -72,6 +80,16 @@ export default function App() {
     if (!selectedNodeId || !dag) return null;
     return dag.nodes.find((n) => n.id === selectedNodeId) ?? null;
   }, [dag, selectedNodeId]);
+
+  const selectedTask: TaskRecord_Serialize | null = useMemo(() => {
+    if (!selectedTaskId) return null;
+    return tasks.find((t) => t.spec.task_id === selectedTaskId) ?? null;
+  }, [tasks, selectedTaskId]);
+
+  const { data: persistedTaskLog } = useTaskLog(
+    selectedTaskId,
+    inspectorMode === "task" && selectedTask != null && !isTaskRunning(selectedTask.state),
+  );
 
   const pendingFixTask: TaskRecord_Serialize | null = useMemo(() => {
     if (activeApprovalTaskId) {
@@ -97,9 +115,21 @@ export default function App() {
 
   const handleOpenApproval = (task: TaskRecord_Serialize) => {
     setActiveApprovalTaskId(task.spec.task_id);
+    setSelectedTaskId(task.spec.task_id);
     setInspectorMode("fix");
     setRightRailTab("inspector");
     setRightRailOpen(true);
+  };
+
+  const handleInspectTask = (task: TaskRecord_Serialize) => {
+    setSelectedTaskId(task.spec.task_id);
+    setInspectorMode("task");
+    setRightRailTab("inspector");
+    setRightRailOpen(true);
+  };
+
+  const handleCancelTask = (taskId: string) => {
+    cancelTask.mutate(taskId);
   };
 
   const handleToggleCopilot = () => {
@@ -161,7 +191,7 @@ export default function App() {
   };
 
   const handleDispatchTask = async (values: DispatchTaskFormValues) => {
-    await submitTask.mutateAsync({
+    const created = await submitTask.mutateAsync({
       task_id: values.taskId,
       repo_id: workspace?.repo_id ?? dag?.repo_id ?? "default-workspace",
       base_commit_sha: dag?.head_commit_sha ?? "HEAD",
@@ -171,6 +201,10 @@ export default function App() {
       requested_by_device: status?.mode === "host" ? "Workstation" : "Laptop",
       user_note: values.userNote.trim() || null,
     });
+    setSelectedTaskId(created.spec.task_id);
+    setInspectorMode("task");
+    setRightRailTab("inspector");
+    setRightRailOpen(true);
   };
 
   const handleOpenSettings = (tab: SettingsTab) => {
@@ -227,14 +261,20 @@ export default function App() {
         <LeftRail
           status={status}
           tasks={tasks}
+          selectedTaskId={inspectorMode === "task" ? selectedTaskId : null}
+          cancellingTaskId={cancelTask.isPending ? (cancelTask.variables ?? null) : null}
           onOpenRunTask={() => setTaskModalOpen(true)}
           onOpenPairModal={openPairing}
           onOpenApproval={handleOpenApproval}
+          onInspectTask={handleInspectTask}
+          onCancelTask={handleCancelTask}
           onSelectEvidenceNode={handleSelectNode}
           onSwitchMode={(mode) => switchMode.mutate(mode)}
           onTriggerUpstreamEdit={handleTriggerUpstreamEdit}
           onResetDemo={() => {
             setSelectedNodeId(null);
+            setSelectedTaskId(null);
+            clearTaskLogs();
             setInspectorMode("node");
             setRightRailTab("agent");
             resetDemo.mutate();
@@ -267,9 +307,13 @@ export default function App() {
           onClose={() => {
             setRightRailOpen(false);
             setSelectedNodeId(null);
+            setSelectedTaskId(null);
           }}
           inspectorMode={inspectorMode}
           selectedNode={selectedNode}
+          selectedTask={selectedTask}
+          taskLogBuffer={selectedTask ? logsByTask[selectedTask.spec.task_id] : undefined}
+          persistedTaskLog={persistedTaskLog}
           pendingFixTask={pendingFixTask}
           onResolveApproval={handleResolveApproval}
           isResolvingApproval={resolveApproval.isPending}
@@ -277,6 +321,12 @@ export default function App() {
             resolveApproval.error == null ? null : formatErrorMessage(resolveApproval.error, t)
           }
           onDismissApprovalError={() => resolveApproval.reset()}
+          onCancelTask={handleCancelTask}
+          cancellingTaskId={cancelTask.isPending ? (cancelTask.variables ?? null) : null}
+          cancelError={cancelTask.error == null ? null : formatErrorMessage(cancelTask.error, t)}
+          onDismissCancelError={() => cancelTask.reset()}
+          onOpenApproval={handleOpenApproval}
+          onSelectEvidenceNode={handleSelectNode}
           messages={copilot.messages}
           isStreaming={copilot.isStreaming}
           streamingMessageId={copilot.streamingMessageId}

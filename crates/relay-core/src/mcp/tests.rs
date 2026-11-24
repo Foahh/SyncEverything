@@ -425,3 +425,89 @@ async fn mcp_rejection_and_failed_preset_clean_up_worktrees() {
     assert!(server.context.active_worktrees.lock().await.is_empty());
     assert!(!fixture.sandbox.is_working_tree_dirty().await.unwrap());
 }
+
+#[tokio::test]
+async fn cancelling_running_preset_kills_child_persists_partial_logs_and_cleans_registry() {
+    let slow_script = r#"import argparse, sys, time
+parser = argparse.ArgumentParser()
+parser.add_argument("--smoke", action="store_true")
+parser.add_argument("--alpha", type=float)
+args = parser.parse_args()
+if args.smoke:
+    print("smoke ok", flush=True)
+else:
+    print("running partial output", flush=True)
+    print("partial stderr notice", file=sys.stderr, flush=True)
+    time.sleep(30)
+    print("never reached", flush=True)
+"#;
+    let fixture = Fixture::with_script(slow_script).await;
+    let server = fixture.server();
+    let id = fixture.submit("0.5", false).await;
+
+    let preflight = server
+        .handle_run_preflight(RunPreflightArgs {
+            task_id: id.to_string(),
+        })
+        .await
+        .unwrap();
+    assert!(preflight.smoke_passed);
+
+    let mut log_rx = fixture.engine.subscribe_task_logs();
+    let server_clone = server.clone();
+    let exec_handle = tokio::spawn(async move {
+        server_clone
+            .handle_approve_and_execute(approval(id, None, false), None)
+            .await
+    });
+
+    // Wait for real-time streamed output from the running `train_grid` subprocess.
+    let mut saw_running_chunk = false;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    while tokio::time::Instant::now() < deadline {
+        if let Ok(Ok(chunk)) =
+            tokio::time::timeout(Duration::from_secs(5), log_rx.recv()).await
+            && chunk.task_id == id.to_string()
+            && chunk.preset == "train_grid"
+            && chunk.text.contains("running partial output")
+        {
+            saw_running_chunk = true;
+            break;
+        }
+    }
+    assert!(
+        saw_running_chunk,
+        "expected real-time stdout chunk from running train_grid task"
+    );
+    assert!(fixture.engine.has_active_cancellation(id));
+
+    let cancel_started = std::time::Instant::now();
+    let cancelled = fixture.engine.cancel_task(id).await.unwrap();
+    assert_eq!(cancelled.state, TaskState::Cancelled);
+
+    let exec_result = tokio::time::timeout(Duration::from_secs(10), exec_handle)
+        .await
+        .expect("cancelled task did not terminate promptly")
+        .unwrap();
+    assert!(cancel_started.elapsed() < Duration::from_secs(10));
+    assert!(matches!(exec_result, Err(RelayError::TaskCancelled(_))));
+
+    // Verify task stays Cancelled, partial log is persisted in SQLite, registry & worktree are clean.
+    let final_task = fixture.task(id).await;
+    assert_eq!(final_task.state, TaskState::Cancelled);
+    assert!(final_task.error_message.is_none());
+    assert!(final_task.evidence_node_id.is_none());
+    assert_eq!(fixture.engine.active_cancellation_count(), 0);
+    assert!(!fixture.sandbox.task_worktree(id).unwrap().0.exists());
+    assert!(server.context.active_worktrees.lock().await.is_empty());
+
+    let (hash, content) = fixture
+        .engine
+        .read_task_log(id)
+        .await
+        .unwrap()
+        .expect("partial log should be persisted in SQLite");
+    assert!(content.contains("running partial output"));
+    assert!(!content.contains("never reached"));
+    assert_eq!(hash, blake3::hash(content.as_bytes()).to_hex().to_string());
+}

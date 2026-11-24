@@ -670,6 +670,9 @@ fn spawn_host_event_loop(
                         }
                     });
                 }
+                RelayNodeEvent::TaskCancelled(task_id) => {
+                    info!(%task_id, "Task cancellation requested via peer RPC");
+                }
                 RelayNodeEvent::ApprovalResolved(task_id, _, decision) => {
                     if sandbox.is_none() {
                         continue;

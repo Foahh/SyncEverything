@@ -20,6 +20,8 @@ export const commands = {
 	listTasks: (options?: InvokeOptions) => __TAURI_INVOKE<TaskRecord_Serialize[]>("list_tasks", undefined, options),
 	listHandoffs: (options?: InvokeOptions) => __TAURI_INVOKE<HandoffSummary[]>("list_handoffs", undefined, options),
 	submitTask: (spec: TaskSpec_Deserialize, options?: InvokeOptions) => __TAURI_INVOKE<TaskRecord_Serialize>("submit_task", { spec }, options),
+	cancelTask: (taskId: string, options?: InvokeOptions) => __TAURI_INVOKE<TaskRecord_Serialize>("cancel_task", { taskId }, options),
+	getTaskLog: (taskId: string, options?: InvokeOptions) => __TAURI_INVOKE<TaskLogSnapshot | null>("get_task_log", { taskId }, options),
 	resolvePatchApproval: (taskId: string, patchId: string | null, decision: ApprovalDecision, options?: InvokeOptions) => __TAURI_INVOKE<TaskRecord_Serialize>("resolve_patch_approval", { taskId, patchId, decision }, options),
 	simulateArtifactUpdate: (oldArtifactId: string, newCommitSha: string, reason: string, options?: InvokeOptions) => __TAURI_INVOKE<StalePropagationReport>("simulate_artifact_update", { oldArtifactId, newCommitSha, reason }, options),
 	upsertDagNode: (node: GraphNode, edges: GraphEdge[], options?: InvokeOptions) => __TAURI_INVOKE<DagSnapshot_Serialize>("upsert_dag_node", { node, edges }, options),
@@ -36,6 +38,7 @@ export const events = {
 	agentChatStreamEvent: makeEvent<AgentChatStreamEvent_Serialize, AgentChatStreamEvent_Deserialize>("agent-chat-stream-event"),
 	dagStaleAlertEvent: makeEvent<DagStaleAlertEvent, DagStaleAlertEvent>("dag-stale-alert-event"),
 	relayStateChangedEvent: makeEvent<RelayStateChangedEvent, RelayStateChangedEvent>("relay-state-changed-event"),
+	taskLogStreamEvent: makeEvent<TaskLogStreamEvent, TaskLogStreamEvent>("task-log-stream-event"),
 };
 
 /* Types */
@@ -313,6 +316,23 @@ export type StalePropagationReport = {
 	reason: string,
 };
 
+export type TaskLogSnapshot = {
+	task_id: string,
+	log_blob_hash: string,
+	content: string,
+};
+
+export type TaskLogStreamEvent = {
+	task_id: string,
+	preset: string,
+	stream: TaskLogStreamKind,
+	seq: number,
+	text: string,
+	timestamp: string,
+};
+
+export type TaskLogStreamKind = "stdout" | "stderr";
+
 export type TaskRecord = TaskRecord_Serialize | TaskRecord_Deserialize;
 
 export type TaskRecord_Deserialize = {
@@ -361,7 +381,7 @@ export type TaskSpec_Serialize = {
 	user_note: string | null,
 };
 
-export type TaskState = "queued" | "preflight_running" | "self_healing_proposed" | "executing" | "completed" | "failed" | "stale" | "rejected";
+export type TaskState = "queued" | "preflight_running" | "self_healing_proposed" | "executing" | "completed" | "failed" | "stale" | "rejected" | "cancelled";
 
 export type ToolTraceStatus = "running" | "done" | "error";
 

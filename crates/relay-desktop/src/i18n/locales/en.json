@@ -34,6 +34,10 @@
     "reviewRun": "Confirm Run",
     "awaitingApproval": "Awaiting approval",
     "viewResult": "View result",
+    "liveLogs": "Live logs",
+    "viewLogs": "View logs",
+    "cancelTask": "Cancel",
+    "cancellingTask": "Cancelling…",
     "settingsButton": "Device Role",
     "modeLabel": "Device Role",
     "mode": {
@@ -53,7 +57,8 @@
     "completed": "Done",
     "failed": "Failed",
     "stale": "Outdated",
-    "rejected": "Dismissed"
+    "rejected": "Dismissed",
+    "cancelled": "Cancelled"
   },
   "canvas": {
     "kind": {
@@ -117,6 +122,28 @@
     "fixCheckLog": "View check output",
     "dismissFix": "Dismiss",
     "applyAndRun": "Apply & Run",
+    "taskTitle": "Task Run",
+    "taskLogsTitle": "Task output",
+    "taskStatusStreaming": "Streaming live",
+    "taskStatusQueued": "Queued",
+    "taskStatusCancelled": "Cancelled — partial log saved",
+    "taskStatusFinished": "Finished",
+    "pauseAutoScroll": "Pause auto-scroll",
+    "resumeAutoScroll": "Resume auto-scroll",
+    "autoScrollPaused": "Auto-scroll paused",
+    "noLogsYet": "Waiting for task output…",
+    "noLogsRecorded": "No output was captured for this task.",
+    "logsTruncated": "Showing most recent log chunks.",
+    "cancelTaskBtn": "Cancel Task",
+    "cancellingTaskBtn": "Cancelling…",
+    "cancelError": "Could not cancel task",
+    "partialLogSaved": "Partial output preserved in local store.",
+    "taskNote": "Note",
+    "taskError": "Error",
+    "taskPreset": "Preset",
+    "taskCommit": "Base commit",
+    "stdoutLabel": "OUT",
+    "stderrLabel": "ERR",
     "emptyTitle": "No item selected",
     "emptyDesc": "Click any node on the canvas or a run in the sidebar to inspect its details."
   },
@@ -290,6 +317,8 @@
     "manifestAlreadyExists": "relay.toml already exists in this repository.",
     "openRepoFirst": "Open a local Git repository first.",
     "repoPathEmpty": "Enter a local repository folder path.",
-    "runtimeShuttingDown": "SyncEverything is shutting down. Please try again shortly."
+    "runtimeShuttingDown": "SyncEverything is shutting down. Please try again shortly.",
+    "taskNotCancellable": "This task can no longer be cancelled.",
+    "taskNotFound": "Task not found."
   }
 }

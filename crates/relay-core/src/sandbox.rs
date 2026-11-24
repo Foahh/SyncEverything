@@ -4,8 +4,8 @@ pub mod pm;
 
 pub use env::compute_env_fingerprint;
 pub use execution::{
-    ErrorSourceSnippet, PatchInput, PreflightReport, PresetRunOutput, detect_missing_python_module,
-    extract_error_snippets, extract_metrics_json,
+    ErrorSourceSnippet, PatchInput, PreflightReport, PresetRunOptions, PresetRunOutput,
+    TaskLogCallback, detect_missing_python_module, extract_error_snippets, extract_metrics_json,
 };
 pub use pm::{
     DependencyChange, DependencyDiff, EnvFileSnapshot, GeneratedManifest, PackageManagerAdapter,

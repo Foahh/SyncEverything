@@ -595,6 +595,8 @@ pub enum HostTaskOutcome {
     PatchProposed,
     /// Smoke failed, self-healing verified a patch, and `require_approval == false` auto-ran it.
     HealedAndCompleted,
+    /// Task was cancelled by user before or during execution.
+    Cancelled,
     /// Task state changed externally (e.g. marked stale) while preflight was running.
     Skipped,
 }
@@ -606,9 +608,26 @@ pub async fn run_host_task_pipeline(
     llm_config: LlmEndpointConfig,
     id: TaskId,
 ) -> RelayResult<HostTaskOutcome> {
-    engine
+    if engine
+        .get_task(id)
+        .await?
+        .is_some_and(|task| task.state == TaskState::Cancelled)
+    {
+        return Ok(HostTaskOutcome::Cancelled);
+    }
+    if let Err(error) = engine
         .transition_task(id, TaskState::PreflightRunning, None, None)
-        .await?;
+        .await
+    {
+        if engine
+            .get_task(id)
+            .await?
+            .is_some_and(|task| task.state == TaskState::Cancelled)
+        {
+            return Ok(HostTaskOutcome::Cancelled);
+        }
+        return Err(error);
+    }
     let task_id = id.to_string();
     let report = match mcp
         .handle_run_preflight(RunPreflightArgs {
@@ -617,6 +636,7 @@ pub async fn run_host_task_pipeline(
         .await
     {
         Ok(report) => report,
+        Err(RelayError::TaskCancelled(_)) => return Ok(HostTaskOutcome::Cancelled),
         Err(error) => {
             let _ = engine
                 .transition_task(id, TaskState::Failed, None, Some(error.to_string()))
@@ -629,20 +649,29 @@ pub async fn run_host_task_pipeline(
         .get_task(id)
         .await?
         .ok_or_else(|| RelayError::TaskNotFound(task_id.clone()))?;
+    if task.state == TaskState::Cancelled {
+        return Ok(HostTaskOutcome::Cancelled);
+    }
     if task.state != TaskState::PreflightRunning {
         return Ok(HostTaskOutcome::Skipped);
     }
 
     if report.smoke_passed {
-        let outcome = mcp.handle_approve_and_execute(
-            ApproveAndExecuteArgs {
-                task_id,
-                patch_id: None,
-                approved_via_ui: None,
-            },
-            None,
-        )
-        .await?;
+        let outcome = match mcp
+            .handle_approve_and_execute(
+                ApproveAndExecuteArgs {
+                    task_id,
+                    patch_id: None,
+                    approved_via_ui: None,
+                },
+                None,
+            )
+            .await
+        {
+            Ok(outcome) => outcome,
+            Err(RelayError::TaskCancelled(_)) => return Ok(HostTaskOutcome::Cancelled),
+            Err(error) => return Err(error),
+        };
         return Ok(match outcome {
             ApprovalExecutionResponse::ApprovalRequired { .. } => HostTaskOutcome::AwaitingApproval,
             ApprovalExecutionResponse::ExecutionStarted { .. } => HostTaskOutcome::Completed,
@@ -659,9 +688,19 @@ pub async fn run_host_task_pipeline(
             build_safe_dag_context(&engine.dag_snapshot(true).await?),
         );
         let llm = LlmClient::new(llm_config, Duration::from_secs(30))?;
-        let proposal = SelfHealingAgent::new(llm)
-            .diagnose_preflight_failure(&report, &context)
-            .await?;
+        let healer = SelfHealingAgent::new(llm);
+        let cancel_guard = engine.register_task_cancellation(id).await?;
+        let mut token = cancel_guard.token();
+        let proposal = tokio::select! {
+            biased;
+            () = token.cancelled() => {
+                return Err(RelayError::TaskCancelled(task_id.clone()));
+            }
+            res = healer.diagnose_preflight_failure(&report, &context) => {
+                res?
+            }
+        };
+        drop(cancel_guard);
         let patch_kind = match proposal.patch_kind {
             PatchKind::DependencySpec => "dependency_spec",
             PatchKind::CodeDiff => "code_diff",
@@ -691,12 +730,16 @@ pub async fn run_host_task_pipeline(
     }
     .await;
 
-    if let Err(error) = &heal_result {
-        let _ = engine
-            .transition_task(id, TaskState::Failed, None, Some(error.to_string()))
-            .await;
+    match heal_result {
+        Err(RelayError::TaskCancelled(_)) => Ok(HostTaskOutcome::Cancelled),
+        Err(error) => {
+            let _ = engine
+                .transition_task(id, TaskState::Failed, None, Some(error.to_string()))
+                .await;
+            Err(error)
+        }
+        Ok(outcome) => Ok(outcome),
     }
-    heal_result
 }
 
 fn strip_markdown_fence(raw: &str) -> &str {

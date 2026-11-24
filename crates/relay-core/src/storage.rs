@@ -61,6 +61,13 @@ CREATE TABLE IF NOT EXISTS log_blobs (
     content TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS task_log_refs (
+    task_id TEXT PRIMARY KEY NOT NULL,
+    repo_id TEXT NOT NULL,
+    log_blob_hash TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS runtime_modes (
     repo_id TEXT PRIMARY KEY NOT NULL,
     mode TEXT NOT NULL
@@ -820,6 +827,43 @@ pub(crate) async fn write_log_blob(
         .execute(conn)
         .await?;
     Ok(())
+}
+
+pub(crate) async fn write_task_log_ref(
+    conn: &mut SqliteConnection,
+    repo_id: &str,
+    task_id: TaskId,
+    blob_hash: &str,
+) -> RelayResult<()> {
+    sqlx::query(
+        "INSERT INTO task_log_refs (task_id, repo_id, log_blob_hash, updated_at)
+         VALUES (?, ?, ?, ?)
+         ON CONFLICT (task_id) DO UPDATE SET
+             log_blob_hash = excluded.log_blob_hash,
+             updated_at = excluded.updated_at
+         WHERE task_log_refs.repo_id = excluded.repo_id",
+    )
+    .bind(task_id.to_string())
+    .bind(repo_id)
+    .bind(blob_hash)
+    .bind(timestamp(Utc::now()))
+    .execute(conn)
+    .await?;
+    Ok(())
+}
+
+pub(crate) async fn fetch_task_log_ref(
+    conn: &mut SqliteConnection,
+    repo_id: &str,
+    task_id: TaskId,
+) -> RelayResult<Option<String>> {
+    Ok(sqlx::query_scalar(
+        "SELECT log_blob_hash FROM task_log_refs WHERE task_id = ? AND repo_id = ?",
+    )
+    .bind(task_id.to_string())
+    .bind(repo_id)
+    .fetch_optional(conn)
+    .await?)
 }
 
 fn timestamp(value: DateTime<Utc>) -> String {

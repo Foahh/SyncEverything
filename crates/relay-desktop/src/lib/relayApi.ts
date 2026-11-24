@@ -17,10 +17,13 @@ import {
   type RelayStateChangedEvent,
   type RuntimeMode,
   type StalePropagationReport,
+  type TaskLogSnapshot,
+  type TaskLogStreamEvent,
   type TaskRecord_Serialize,
   type TaskSpec_Deserialize,
   type WorkspaceInfo_Serialize,
 } from "../bindings";
+import { isTaskCancellable } from "./taskLogStream";
 
 export interface ApprovalInput {
   taskId: string;
@@ -73,6 +76,7 @@ interface MockWorkspaceState {
   llm: LlmSettingsView_Serialize;
   dag: DagSnapshot_Serialize;
   tasks: TaskRecord_Serialize[];
+  taskLogs: Record<string, TaskLogSnapshot>;
   handoffs: HandoffSummary[];
   chatMessages: AgentChatMessage_Serialize[];
 }
@@ -121,6 +125,7 @@ function createInitialMockState(): MockWorkspaceState {
       captured_at: now,
     },
     tasks: [],
+    taskLogs: {},
     handoffs: [],
     chatMessages: [],
   };
@@ -129,10 +134,24 @@ function createInitialMockState(): MockWorkspaceState {
 let mockState: MockWorkspaceState = createInitialMockState();
 const previewWorkspaces = new Map<string, MockWorkspaceState>();
 const mockChatListeners = new Set<(event: AgentChatStreamEvent_Serialize) => void>();
+const mockTaskLogListeners = new Set<(event: TaskLogStreamEvent) => void>();
 let activeMockChatAbort: { cancelled: boolean } | null = null;
 
 function emitMockChatEvent(event: AgentChatStreamEvent_Serialize): void {
   for (const listener of mockChatListeners) {
+    listener(event);
+  }
+}
+
+export function emitPreviewTaskLogEvent(event: TaskLogStreamEvent): void {
+  const existing = mockState.taskLogs[event.task_id];
+  const content = (existing?.content ?? "") + event.text;
+  mockState.taskLogs[event.task_id] = {
+    task_id: event.task_id,
+    log_blob_hash: existing?.log_blob_hash ?? `preview-${event.task_id.slice(0, 8)}`,
+    content,
+  };
+  for (const listener of mockTaskLogListeners) {
     listener(event);
   }
 }
@@ -551,6 +570,34 @@ export const relayApi = {
     return structuredClone(record);
   },
 
+  async cancelTask(taskId: string): Promise<TaskRecord_Serialize> {
+    if (isTauriRuntime()) {
+      return commands.cancelTask(taskId);
+    }
+    const task = mockState.tasks.find((t) => t.spec.task_id === taskId);
+    if (!task) {
+      throw new Error(`task not found: ${taskId}`);
+    }
+    if (!isTaskCancellable(task.state)) {
+      throw new Error("This task can no longer be cancelled.");
+    }
+    task.state = "cancelled";
+    task.preflight_summary = mockState.taskLogs[taskId]?.content
+      ? "Cancelled by user (partial log saved)"
+      : "Cancelled by user";
+    task.error_message = null;
+    task.updated_at = new Date().toISOString();
+    return structuredClone(task);
+  },
+
+  async getTaskLog(taskId: string): Promise<TaskLogSnapshot | null> {
+    if (isTauriRuntime()) {
+      return commands.getTaskLog(taskId);
+    }
+    const log = mockState.taskLogs[taskId];
+    return log ? structuredClone(log) : null;
+  },
+
   async resolvePatchApproval({
     taskId,
     patchId,
@@ -807,6 +854,18 @@ export const relayApi = {
     mockChatListeners.add(onEvent);
     return () => {
       mockChatListeners.delete(onEvent);
+    };
+  },
+
+  async subscribeTaskLogEvents(
+    onEvent: (payload: TaskLogStreamEvent) => void,
+  ): Promise<() => void> {
+    if (isTauriRuntime()) {
+      return events.taskLogStreamEvent.listen((ev) => onEvent(ev.payload));
+    }
+    mockTaskLogListeners.add(onEvent);
+    return () => {
+      mockTaskLogListeners.delete(onEvent);
     };
   },
 

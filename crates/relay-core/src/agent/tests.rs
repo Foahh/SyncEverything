@@ -15,6 +15,8 @@ fn failure(module: &str) -> PreflightReport {
         worktree_branch: "relay/worktree/test".into(),
         smoke_passed: false,
         exit_code: Some(1),
+        timed_out: false,
+        cancelled: false,
         stdout_tail: String::new(),
         stderr_tail: traceback.clone(),
         detected_missing_module: Some(module.into()),

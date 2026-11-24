@@ -532,3 +532,73 @@ async fn desktop_mode_and_queued_peer_decisions_survive_restart() {
     ));
     close(engine).await;
 }
+
+#[tokio::test]
+async fn cancellation_handles_queued_active_raii_cleanup_and_persisted_partial_logs() {
+    let db = TempDb::new();
+    let engine = db.open().await;
+
+    // 1) Queued task cancels immediately.
+    let queued_id = Uuid::now_v7();
+    engine.submit_task(spec(queued_id, "base")).await.unwrap();
+    let cancelled_queued = engine.cancel_task(queued_id).await.unwrap();
+    assert_eq!(cancelled_queued.state, TaskState::Cancelled);
+
+    // 2) Re-cancelling a terminal task or cancelling an unknown task fails cleanly.
+    assert!(matches!(
+        engine.cancel_task(queued_id).await,
+        Err(RelayError::InvalidStateTransition { from, to, .. })
+            if from == "Cancelled" && to == "Cancelled"
+    ));
+    assert!(matches!(
+        engine.cancel_task(Uuid::now_v7()).await,
+        Err(RelayError::TaskNotFound(_))
+    ));
+
+    // 3) Registering a cancellation guard on an already-cancelled task fails immediately
+    //    and leaves no leaked registry handle.
+    assert!(matches!(
+        engine.register_task_cancellation(queued_id).await,
+        Err(RelayError::TaskCancelled(_))
+    ));
+    assert_eq!(engine.active_cancellation_count(), 0);
+
+    // 4) Active executing task receives signal, cleans up handle on drop, and persists partial log.
+    let running_id = Uuid::now_v7();
+    engine.submit_task(spec(running_id, "base")).await.unwrap();
+    engine
+        .transition_task(running_id, TaskState::Executing, None, None)
+        .await
+        .unwrap();
+    let guard = engine.register_task_cancellation(running_id).await.unwrap();
+    assert!(engine.has_active_cancellation(running_id));
+    assert_eq!(engine.active_cancellation_count(), 1);
+    assert!(!guard.token().is_cancelled());
+
+    let cancelled_running = engine.cancel_task(running_id).await.unwrap();
+    assert_eq!(cancelled_running.state, TaskState::Cancelled);
+    assert!(guard.token().is_cancelled());
+    drop(guard);
+    assert!(!engine.has_active_cancellation(running_id));
+    assert_eq!(engine.active_cancellation_count(), 0);
+
+    let partial = "epoch 1 loss=0.42\nwarning: shutting down\n";
+    let (updated, hash) = engine
+        .record_cancelled_task_log(running_id, partial)
+        .await
+        .unwrap();
+    assert_eq!(updated.state, TaskState::Cancelled);
+    assert_eq!(hash, blake3::hash(partial.as_bytes()).to_hex().to_string());
+    assert!(
+        updated
+            .preflight_summary
+            .as_deref()
+            .is_some_and(|s| s.contains(&hash[..12]))
+    );
+    close(engine).await;
+
+    let reopened = db.open().await;
+    let stored = reopened.read_task_log(running_id).await.unwrap().unwrap();
+    assert_eq!(stored, (hash, partial.to_owned()));
+    close(reopened).await;
+}

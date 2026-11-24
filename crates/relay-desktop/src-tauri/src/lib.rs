@@ -1,13 +1,13 @@
 mod runtime;
 
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use relay_core::agent::{
     AgentApprovalCard, AgentChatMessage, AgentToolTrace, InferenceTier, LlmProbeResult,
     LlmSettingsView,
 };
 use relay_core::contracts::{
     ApprovalDecision, DagSnapshot, GraphEdge, GraphNode, HandoffSummary, PeerStatus, RuntimeMode,
-    StalePropagationReport, TaskRecord, TaskSpec,
+    StalePropagationReport, TaskLogStreamKind, TaskRecord, TaskSpec,
 };
 use runtime::{DesktopRuntime, validate_user_repo};
 use serde::{Deserialize, Serialize};
@@ -41,6 +41,23 @@ pub struct AgentChatStreamEvent {
     pub trace: Option<AgentToolTrace>,
     pub approval: Option<AgentApprovalCard>,
     pub error: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, Type, Event)]
+pub struct TaskLogStreamEvent {
+    pub task_id: String,
+    pub preset: String,
+    pub stream: TaskLogStreamKind,
+    pub seq: u32,
+    pub text: String,
+    pub timestamp: DateTime<Utc>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, Type)]
+pub struct TaskLogSnapshot {
+    pub task_id: String,
+    pub log_blob_hash: String,
+    pub content: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Type)]
@@ -339,6 +356,41 @@ async fn submit_task(
 
 #[tauri::command]
 #[specta::specta]
+async fn cancel_task(
+    app: AppHandle,
+    state: State<'_, RuntimeManager>,
+    task_id: Uuid,
+) -> Result<TaskRecord, String> {
+    state
+        .get_or_init(&app)
+        .await?
+        .cancel_task(task_id)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+#[specta::specta]
+async fn get_task_log(
+    app: AppHandle,
+    state: State<'_, RuntimeManager>,
+    task_id: Uuid,
+) -> Result<Option<TaskLogSnapshot>, String> {
+    let runtime = state.get_or_init(&app).await?;
+    let log = runtime
+        .engine
+        .read_task_log(task_id)
+        .await
+        .map_err(|error| error.to_string())?;
+    Ok(log.map(|(log_blob_hash, content)| TaskLogSnapshot {
+        task_id: task_id.to_string(),
+        log_blob_hash,
+        content,
+    }))
+}
+
+#[tauri::command]
+#[specta::specta]
 async fn resolve_patch_approval(
     app: AppHandle,
     state: State<'_, RuntimeManager>,
@@ -489,6 +541,8 @@ pub fn specta_builder() -> Builder<tauri::Wry> {
             list_tasks,
             list_handoffs,
             submit_task,
+            cancel_task,
+            get_task_log,
             resolve_patch_approval,
             simulate_artifact_update,
             upsert_dag_node,
@@ -503,6 +557,7 @@ pub fn specta_builder() -> Builder<tauri::Wry> {
             RelayStateChangedEvent,
             DagStaleAlertEvent,
             AgentChatStreamEvent,
+            TaskLogStreamEvent,
         ])
 }
 

@@ -5,7 +5,9 @@ use super::{
 };
 use crate::contracts::{
     CommandPreset, FileEdit, JsonValue, PatchKind, PatchProposal, RelayManifest, TaskId,
+    TaskLogChunk, TaskLogStreamKind,
 };
+use crate::engine::TaskCancellationToken;
 use crate::error::{RelayError, RelayResult};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
@@ -14,9 +16,12 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::io;
 use std::path::{Component, Path, PathBuf};
 use std::process::Stdio;
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
-use tokio::io::AsyncReadExt;
+use tokio::io::{AsyncBufReadExt, AsyncRead, BufReader};
 use tokio::process::Command;
+use tokio::sync::mpsc;
 use uuid::Uuid;
 
 pub use super::pm::uv::detect_missing_python_module;
@@ -24,6 +29,22 @@ pub use super::pm::uv::detect_missing_python_module;
 const SMOKE_TAIL_LINES: usize = 30;
 const ERROR_SNIPPET_RADIUS: usize = 10;
 const MAX_ERROR_SNIPPETS: usize = 3;
+const STREAM_BATCH_WINDOW: Duration = Duration::from_millis(40);
+const STREAM_BATCH_MAX_BYTES: usize = 4096;
+const STREAM_BATCH_MAX_LINES: usize = 32;
+const STREAM_DRAIN_TIMEOUT: Duration = Duration::from_millis(750);
+const STREAM_EXITED_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
+const CHILD_KILL_WAIT_TIMEOUT: Duration = Duration::from_secs(2);
+
+pub type TaskLogCallback = Arc<dyn Fn(TaskLogChunk) + Send + Sync>;
+
+#[derive(Clone, Default)]
+pub struct PresetRunOptions {
+    pub task_id: Option<TaskId>,
+    pub on_log_chunk: Option<TaskLogCallback>,
+    pub cancel_token: Option<TaskCancellationToken>,
+    pub seq_counter: Option<Arc<AtomicU32>>,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ErrorSourceSnippet {
@@ -54,6 +75,8 @@ pub struct PresetRunOutput {
     pub raw_log: String,
     pub exit_code: Option<i32>,
     pub success: bool,
+    pub timed_out: bool,
+    pub cancelled: bool,
     pub duration_ms: u64,
     pub log_blob_hash: String,
     pub metrics_json: Option<JsonValue>,
@@ -66,6 +89,8 @@ pub struct PreflightReport {
     pub worktree_branch: String,
     pub smoke_passed: bool,
     pub exit_code: Option<i32>,
+    pub timed_out: bool,
+    pub cancelled: bool,
     pub stdout_tail: String,
     pub stderr_tail: String,
     pub detected_missing_module: Option<String>,
@@ -105,6 +130,24 @@ impl WorktreeSandbox {
         preset_name: &str,
         params: &BTreeMap<String, String>,
     ) -> RelayResult<PresetRunOutput> {
+        self.run_preset_streaming(
+            worktree_path,
+            manifest,
+            preset_name,
+            params,
+            PresetRunOptions::default(),
+        )
+        .await
+    }
+
+    pub async fn run_preset_streaming(
+        &self,
+        worktree_path: &Path,
+        manifest: &RelayManifest,
+        preset_name: &str,
+        params: &BTreeMap<String, String>,
+        options: PresetRunOptions,
+    ) -> RelayResult<PresetRunOutput> {
         let preset = resolve_preset(manifest, preset_name)?;
         let args = preset_args(preset, params)?;
 
@@ -117,6 +160,22 @@ impl WorktreeSandbox {
         }
 
         let start = Instant::now();
+        if options
+            .cancel_token
+            .as_ref()
+            .is_some_and(TaskCancellationToken::is_cancelled)
+        {
+            return Ok(build_preset_output(
+                Vec::new(),
+                Vec::new(),
+                None,
+                false,
+                false,
+                true,
+                start.elapsed(),
+            ));
+        }
+
         let worktree_path = std::path::absolute(worktree_path)?;
         let program = Path::new(&preset.program);
         #[cfg(windows)]
@@ -143,66 +202,147 @@ impl WorktreeSandbox {
             .stderr(Stdio::piped())
             .kill_on_drop(true)
             .spawn()?;
-        let mut stdout_pipe = child
+        let stdout_pipe = child
             .stdout
             .take()
             .ok_or_else(|| RelayError::Internal("preset stdout was not captured".into()))?;
-        let mut stderr_pipe = child
+        let stderr_pipe = child
             .stderr
             .take()
             .ok_or_else(|| RelayError::Internal("preset stderr was not captured".into()))?;
-        let mut stdout_bytes = Vec::new();
-        let mut stderr_bytes = Vec::new();
+
+        let stdout_bytes = Arc::new(StdMutex::new(Vec::<u8>::new()));
+        let stderr_bytes = Arc::new(StdMutex::new(Vec::<u8>::new()));
+
+        let seq_counter = options
+            .seq_counter
+            .unwrap_or_else(|| Arc::new(AtomicU32::new(0)));
+        let task_id_text = options
+            .task_id
+            .map_or_else(String::new, |id| id.to_string());
+        let preset_label = preset_name.to_owned();
+
+        let (line_tx, emitter_task) = match options.on_log_chunk.clone() {
+            Some(callback) => {
+                let (tx, rx) = mpsc::unbounded_channel::<(TaskLogStreamKind, String)>();
+                let emitter = tokio::spawn(run_log_emitter(
+                    rx,
+                    task_id_text.clone(),
+                    preset_label.clone(),
+                    seq_counter.clone(),
+                    callback,
+                ));
+                (Some(tx), Some(emitter))
+            }
+            None => (None, None),
+        };
+
+        let mut stdout_task = tokio::spawn(read_stream_incremental(
+            stdout_pipe,
+            TaskLogStreamKind::Stdout,
+            stdout_bytes.clone(),
+            line_tx.clone(),
+        ));
+        let mut stderr_task = tokio::spawn(read_stream_incremental(
+            stderr_pipe,
+            TaskLogStreamKind::Stderr,
+            stderr_bytes.clone(),
+            line_tx.clone(),
+        ));
+        drop(line_tx);
+
+        enum WaitOutcome {
+            Exited(io::Result<std::process::ExitStatus>),
+            TimedOut,
+            Cancelled,
+        }
+
         let timeout = Duration::from_secs(preset.timeout_secs.into());
-        let completed = tokio::time::timeout(timeout, async {
-            tokio::try_join!(
-                child.wait(),
-                stdout_pipe.read_to_end(&mut stdout_bytes),
-                stderr_pipe.read_to_end(&mut stderr_bytes),
-            )
-        })
-        .await;
-        let (exit_code, success) = match completed {
-            Ok(result) => {
-                let (status, _, _) = result?;
-                (status.code(), status.success())
+        let timeout_sleep = tokio::time::sleep(timeout);
+        tokio::pin!(timeout_sleep);
+
+        let mut cancel_token = options.cancel_token;
+        let cancel_wait = async {
+            match &mut cancel_token {
+                Some(token) => token.cancelled().await,
+                None => std::future::pending::<()>().await,
             }
-            Err(_) => {
-                let _ = child.start_kill();
-                if !stderr_bytes.is_empty() && !stderr_bytes.ends_with(b"\n") {
-                    stderr_bytes.push(b'\n');
+        };
+        tokio::pin!(cancel_wait);
+
+        let wait_outcome = tokio::select! {
+            biased;
+            () = &mut cancel_wait => WaitOutcome::Cancelled,
+            status = child.wait() => WaitOutcome::Exited(status),
+            () = &mut timeout_sleep => WaitOutcome::TimedOut,
+        };
+
+        let (exit_code, success, timed_out, cancelled) = match wait_outcome {
+            WaitOutcome::Exited(status_result) => {
+                let status = status_result?;
+                drain_reader_tasks(
+                    &mut stdout_task,
+                    &mut stderr_task,
+                    STREAM_EXITED_DRAIN_TIMEOUT,
+                )
+                .await?;
+                if let Some(emitter) = emitter_task {
+                    let _ = tokio::time::timeout(STREAM_EXITED_DRAIN_TIMEOUT, emitter).await;
                 }
-                stderr_bytes.extend_from_slice(
-                    format!(
-                        "preset '{preset_name}' timed out after {} seconds\n",
-                        preset.timeout_secs
-                    )
-                    .as_bytes(),
+                (status.code(), status.success(), false, false)
+            }
+            WaitOutcome::Cancelled => {
+                kill_child_tree(&mut child).await;
+                let _ = drain_reader_tasks(&mut stdout_task, &mut stderr_task, STREAM_DRAIN_TIMEOUT)
+                    .await;
+                if let Some(emitter) = emitter_task {
+                    let _ = tokio::time::timeout(STREAM_DRAIN_TIMEOUT, emitter).await;
+                }
+                (None, false, false, true)
+            }
+            WaitOutcome::TimedOut => {
+                kill_child_tree(&mut child).await;
+                let _ = drain_reader_tasks(&mut stdout_task, &mut stderr_task, STREAM_DRAIN_TIMEOUT)
+                    .await;
+                if let Some(emitter) = emitter_task {
+                    let _ = tokio::time::timeout(STREAM_DRAIN_TIMEOUT, emitter).await;
+                }
+                let timeout_msg = format!(
+                    "preset '{preset_name}' timed out after {} seconds\n",
+                    preset.timeout_secs
                 );
-                (None, false)
+                {
+                    let mut stderr = stderr_bytes.lock().expect("stderr buffer poisoned");
+                    if !stderr.is_empty() && !stderr.ends_with(b"\n") {
+                        stderr.push(b'\n');
+                    }
+                    stderr.extend_from_slice(timeout_msg.as_bytes());
+                }
+                if let Some(callback) = options.on_log_chunk {
+                    callback(TaskLogChunk {
+                        task_id: task_id_text,
+                        preset: preset_label,
+                        stream: TaskLogStreamKind::Stderr,
+                        seq: seq_counter.fetch_add(1, Ordering::Relaxed),
+                        text: timeout_msg,
+                        timestamp: Utc::now(),
+                    });
+                }
+                (None, false, true, false)
             }
         };
-        let duration_ms = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
-        let stdout = String::from_utf8_lossy(&stdout_bytes).into_owned();
-        let stderr = String::from_utf8_lossy(&stderr_bytes).into_owned();
-        let separator = if !stdout.is_empty() && !stdout.ends_with('\n') && !stderr.is_empty() {
-            "\n"
-        } else {
-            ""
-        };
-        let raw_log = format!("{stdout}{separator}{stderr}");
-        let log_blob_hash = format!("blake3:{}", blake3::hash(raw_log.as_bytes()).to_hex());
-        let metrics_json = extract_metrics_json(&stdout);
-        Ok(PresetRunOutput {
-            stdout,
-            stderr,
-            raw_log,
+
+        let stdout_buf = std::mem::take(&mut *stdout_bytes.lock().expect("stdout buffer poisoned"));
+        let stderr_buf = std::mem::take(&mut *stderr_bytes.lock().expect("stderr buffer poisoned"));
+        Ok(build_preset_output(
+            stdout_buf,
+            stderr_buf,
             exit_code,
             success,
-            duration_ms,
-            log_blob_hash,
-            metrics_json,
-        })
+            timed_out,
+            cancelled,
+            start.elapsed(),
+        ))
     }
 
     pub async fn run_preflight(
@@ -212,18 +352,43 @@ impl WorktreeSandbox {
         worktree_branch: &str,
         manifest: &RelayManifest,
     ) -> RelayResult<PreflightReport> {
+        self.run_preflight_with_options(
+            task_id,
+            worktree_path,
+            worktree_branch,
+            manifest,
+            PresetRunOptions {
+                task_id: Some(task_id),
+                ..PresetRunOptions::default()
+            },
+        )
+        .await
+    }
+
+    pub async fn run_preflight_with_options(
+        &self,
+        task_id: TaskId,
+        worktree_path: &Path,
+        worktree_branch: &str,
+        manifest: &RelayManifest,
+        mut options: PresetRunOptions,
+    ) -> RelayResult<PreflightReport> {
         self.validate_task_worktree(task_id, worktree_path, worktree_branch)
             .await?;
+        if options.task_id.is_none() {
+            options.task_id = Some(task_id);
+        }
         let output = self
-            .run_preset(
+            .run_preset_streaming(
                 worktree_path,
                 manifest,
                 self.authorized_smoke_preset(manifest)?,
                 &BTreeMap::new(),
+                options,
             )
             .await?;
         let adapter = pm::resolve_adapter(worktree_path, self.authorized_package_manager(manifest)?)?;
-        let error_snippets = if output.success {
+        let error_snippets = if output.success || output.cancelled {
             Vec::new()
         } else {
             extract_error_snippets(worktree_path, &output.stderr)
@@ -234,6 +399,8 @@ impl WorktreeSandbox {
             worktree_branch: worktree_branch.into(),
             smoke_passed: output.success,
             exit_code: output.exit_code,
+            timed_out: output.timed_out,
+            cancelled: output.cancelled,
             stdout_tail: tail_lines(&output.stdout),
             stderr_tail: tail_lines(&output.stderr),
             detected_missing_module: adapter.detect_missing_dependency(&output.stderr),
@@ -252,8 +419,37 @@ impl WorktreeSandbox {
         patch: PatchInput<'_>,
         summary: &str,
     ) -> RelayResult<PatchProposal> {
+        self.apply_and_verify_patch_with_options(
+            task_id,
+            worktree_path,
+            worktree_branch,
+            manifest,
+            patch,
+            summary,
+            PresetRunOptions {
+                task_id: Some(task_id),
+                ..PresetRunOptions::default()
+            },
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn apply_and_verify_patch_with_options(
+        &self,
+        task_id: TaskId,
+        worktree_path: &Path,
+        worktree_branch: &str,
+        manifest: &RelayManifest,
+        patch: PatchInput<'_>,
+        summary: &str,
+        mut options: PresetRunOptions,
+    ) -> RelayResult<PatchProposal> {
         self.validate_task_worktree(task_id, worktree_path, worktree_branch)
             .await?;
+        if options.task_id.is_none() {
+            options.task_id = Some(task_id);
+        }
         let worktree_path = std::path::absolute(worktree_path)?;
         let smoke_preset = self.authorized_smoke_preset(manifest)?;
         let adapter = pm::resolve_adapter(&worktree_path, self.authorized_package_manager(manifest)?)?;
@@ -275,11 +471,12 @@ impl WorktreeSandbox {
             return Err(RelayError::Internal("patch produced no worktree diff".into()));
         }
         let smoke = match self
-            .run_preset(
+            .run_preset_streaming(
                 &worktree_path,
                 manifest,
                 smoke_preset,
                 &BTreeMap::new(),
+                options,
             )
             .await
         {
@@ -289,6 +486,10 @@ impl WorktreeSandbox {
                 return Err(error);
             }
         };
+        if smoke.cancelled {
+            let _ = rollback_worktree(&worktree_path).await;
+            return Err(RelayError::TaskCancelled(task_id.to_string()));
+        }
         // Smoke can reconcile or create a lockfile. Approval must cover the complete final diff.
         if smoke.success {
             pm::security::stage_intent_to_add(
@@ -318,6 +519,205 @@ impl WorktreeSandbox {
             created_at: Utc::now(),
         })
     }
+}
+
+fn build_preset_output(
+    stdout_bytes: Vec<u8>,
+    stderr_bytes: Vec<u8>,
+    exit_code: Option<i32>,
+    success: bool,
+    timed_out: bool,
+    cancelled: bool,
+    elapsed: Duration,
+) -> PresetRunOutput {
+    let duration_ms = u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX);
+    let stdout = String::from_utf8_lossy(&stdout_bytes).into_owned();
+    let stderr = String::from_utf8_lossy(&stderr_bytes).into_owned();
+    let separator = if !stdout.is_empty() && !stdout.ends_with('\n') && !stderr.is_empty() {
+        "\n"
+    } else {
+        ""
+    };
+    let raw_log = format!("{stdout}{separator}{stderr}");
+    let log_blob_hash = format!("blake3:{}", blake3::hash(raw_log.as_bytes()).to_hex());
+    let metrics_json = extract_metrics_json(&stdout);
+    PresetRunOutput {
+        stdout,
+        stderr,
+        raw_log,
+        exit_code,
+        success,
+        timed_out,
+        cancelled,
+        duration_ms,
+        log_blob_hash,
+        metrics_json,
+    }
+}
+
+async fn read_stream_incremental<R: AsyncRead + Unpin>(
+    pipe: R,
+    stream: TaskLogStreamKind,
+    sink_bytes: Arc<StdMutex<Vec<u8>>>,
+    line_tx: Option<mpsc::UnboundedSender<(TaskLogStreamKind, String)>>,
+) -> io::Result<()> {
+    let mut reader = BufReader::new(pipe);
+    let mut buf = Vec::with_capacity(1024);
+    loop {
+        buf.clear();
+        let read = reader.read_until(b'\n', &mut buf).await?;
+        if read == 0 {
+            break;
+        }
+        {
+            let mut guard = sink_bytes.lock().expect("stream buffer poisoned");
+            guard.extend_from_slice(&buf);
+        }
+        if let Some(tx) = &line_tx {
+            let text = String::from_utf8_lossy(&buf).into_owned();
+            let _ = tx.send((stream, text));
+        }
+    }
+    Ok(())
+}
+
+async fn run_log_emitter(
+    mut rx: mpsc::UnboundedReceiver<(TaskLogStreamKind, String)>,
+    task_id: String,
+    preset: String,
+    seq_counter: Arc<AtomicU32>,
+    callback: TaskLogCallback,
+) {
+    struct PendingBatch {
+        stream: TaskLogStreamKind,
+        text: String,
+        lines: usize,
+    }
+
+    let mut pending: Option<PendingBatch> = None;
+    let mut last_emit: Option<(Instant, TaskLogStreamKind)> = None;
+
+    let emit_chunk = |stream: TaskLogStreamKind,
+                      text: String,
+                      last_emit: &mut Option<(Instant, TaskLogStreamKind)>| {
+        if text.is_empty() {
+            return;
+        }
+        callback(TaskLogChunk {
+            task_id: task_id.clone(),
+            preset: preset.clone(),
+            stream,
+            seq: seq_counter.fetch_add(1, Ordering::Relaxed),
+            text,
+            timestamp: Utc::now(),
+        });
+        *last_emit = Some((Instant::now(), stream));
+    };
+
+    loop {
+        let next = if pending.is_some() {
+            let deadline = last_emit
+                .map(|(at, _)| at + STREAM_BATCH_WINDOW)
+                .unwrap_or_else(|| Instant::now() + STREAM_BATCH_WINDOW);
+            let wait = deadline.saturating_duration_since(Instant::now());
+            tokio::select! {
+                item = rx.recv() => Some(item),
+                () = tokio::time::sleep(wait) => None,
+            }
+        } else {
+            Some(rx.recv().await)
+        };
+
+        match next {
+            None => {
+                if let Some(batch) = pending.take() {
+                    emit_chunk(batch.stream, batch.text, &mut last_emit);
+                }
+            }
+            Some(None) => {
+                if let Some(batch) = pending.take() {
+                    emit_chunk(batch.stream, batch.text, &mut last_emit);
+                }
+                break;
+            }
+            Some(Some((stream, text))) => {
+                if let Some(mut batch) = pending.take() {
+                    if batch.stream != stream {
+                        emit_chunk(batch.stream, batch.text, &mut last_emit);
+                        emit_chunk(stream, text, &mut last_emit);
+                    } else {
+                        batch.text.push_str(&text);
+                        batch.lines += 1;
+                        if batch.text.len() >= STREAM_BATCH_MAX_BYTES
+                            || batch.lines >= STREAM_BATCH_MAX_LINES
+                        {
+                            emit_chunk(batch.stream, batch.text, &mut last_emit);
+                        } else {
+                            pending = Some(batch);
+                        }
+                    }
+                } else {
+                    let emit_immediately = match last_emit {
+                        None => true,
+                        Some((at, prev_stream)) => {
+                            prev_stream != stream || at.elapsed() >= STREAM_BATCH_WINDOW
+                        }
+                    };
+                    if emit_immediately {
+                        emit_chunk(stream, text, &mut last_emit);
+                    } else {
+                        pending = Some(PendingBatch {
+                            stream,
+                            text,
+                            lines: 1,
+                        });
+                    }
+                }
+            }
+        }
+    }
+}
+
+async fn drain_reader_tasks(
+    stdout_task: &mut tokio::task::JoinHandle<io::Result<()>>,
+    stderr_task: &mut tokio::task::JoinHandle<io::Result<()>>,
+    timeout: Duration,
+) -> RelayResult<()> {
+    match tokio::time::timeout(timeout, async {
+        let (out_res, err_res) = tokio::join!(&mut *stdout_task, &mut *stderr_task);
+        if let Ok(Err(err)) = out_res {
+            return Err(RelayError::Io(err));
+        }
+        if let Ok(Err(err)) = err_res {
+            return Err(RelayError::Io(err));
+        }
+        Ok(())
+    })
+    .await
+    {
+        Ok(res) => res,
+        Err(_) => {
+            stdout_task.abort();
+            stderr_task.abort();
+            Ok(())
+        }
+    }
+}
+
+async fn kill_child_tree(child: &mut tokio::process::Child) {
+    #[cfg(windows)]
+    if let Some(pid) = child.id() {
+        let mut kill_cmd = Command::new("taskkill");
+        kill_cmd
+            .args(["/PID", &pid.to_string(), "/T", "/F"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .kill_on_drop(true);
+        let _ = tokio::time::timeout(CHILD_KILL_WAIT_TIMEOUT, kill_cmd.status()).await;
+    }
+    let _ = child.start_kill();
+    let _ = tokio::time::timeout(CHILD_KILL_WAIT_TIMEOUT, child.wait()).await;
 }
 
 #[cfg(all(windows, test))]
@@ -407,6 +807,7 @@ pub(crate) fn worktree_command(
         command.env_remove(key);
     }
     command.env("UV_PROJECT_ENVIRONMENT", worktree_path.join(".venv"));
+    command.env("PYTHONUNBUFFERED", "1");
     if Path::new(program)
         .file_stem()
         .and_then(|name| name.to_str())

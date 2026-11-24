@@ -108,7 +108,11 @@ impl RelayMcpServer {
                     context.cleanup_worktree(&task).await?;
                 }
                 (ApprovalDecision::Approved, TaskState::Executing) => {
-                    context.finish_approval(task, decision).await?;
+                    if let Err(error) = context.finish_approval(task, decision).await
+                        && !matches!(error, RelayError::TaskCancelled(_))
+                    {
+                        return Err(error);
+                    }
                 }
                 _ => return Ok(task),
             }
@@ -254,6 +258,10 @@ impl RelayMcpServer {
                 context.cleanup_worktree(&task).await?;
                 return Ok(rejected(task_id));
             }
+            TaskState::Cancelled => {
+                context.cleanup_worktree(&task).await?;
+                return Err(RelayError::TaskCancelled(task_id.to_string()));
+            }
             TaskState::Executing => {}
             state => validate_transition(task_id, state, TaskState::Executing)?,
         }
@@ -382,23 +390,59 @@ impl RelayMcpContext {
         let sandbox = self.sandbox()?;
         self.start_preflight(task).await?;
         let id = task.spec.task_id;
+        let cancel_guard = self.engine.register_task_cancellation(id).await?;
+        let options = self.engine.preset_run_options(id, cancel_guard.token());
         let result = async {
             let handle = self.worktree(task).await?;
             let manifest = sandbox.task_manifest(handle.worktree_path())?;
             let report = sandbox
-                .run_preflight(id, handle.worktree_path(), handle.branch_name(), &manifest)
+                .run_preflight_with_options(
+                    id,
+                    handle.worktree_path(),
+                    handle.branch_name(),
+                    &manifest,
+                    options,
+                )
                 .await?;
+            if report.cancelled || cancel_guard.token().is_cancelled() {
+                let _ = self
+                    .engine
+                    .record_cancelled_task_log(id, &report.raw_log)
+                    .await;
+                return Err(RelayError::TaskCancelled(id.to_string()));
+            }
+            if !report.raw_log.is_empty() {
+                let _ = self.engine.record_task_log(id, &report.raw_log).await;
+            }
             let summary = if report.smoke_passed {
                 "Smoke preflight passed".into()
+            } else if report.timed_out {
+                "Smoke preflight timed out".into()
             } else if let Some(module) = &report.detected_missing_module {
                 format!("Smoke preflight failed: missing dependency {module}")
             } else {
                 format!("Smoke preflight failed (exit code {:?})", report.exit_code)
             };
-            self.engine.set_preflight_summary(id, summary).await?;
+            if let Err(err) = self.engine.set_preflight_summary(id, summary).await {
+                if cancel_guard.token().is_cancelled()
+                    || self
+                        .engine
+                        .get_task(id)
+                        .await?
+                        .is_some_and(|t| t.state == TaskState::Cancelled)
+                {
+                    let _ = self
+                        .engine
+                        .record_cancelled_task_log(id, &report.raw_log)
+                        .await;
+                    return Err(RelayError::TaskCancelled(id.to_string()));
+                }
+                return Err(err);
+            }
             Ok(report)
         }
         .await;
+        drop(cancel_guard);
         if result.is_err() {
             self.cleanup_after_error(task).await;
         }
@@ -413,7 +457,11 @@ impl RelayMcpContext {
         let sandbox = self.sandbox()?;
         let handle = if matches!(
             task.state,
-            TaskState::Completed | TaskState::Rejected | TaskState::Failed | TaskState::Stale
+            TaskState::Completed
+                | TaskState::Rejected
+                | TaskState::Failed
+                | TaskState::Stale
+                | TaskState::Cancelled
         ) {
             self.find_worktree(task).await?.ok_or_else(|| {
                 RelayError::Internal(format!(
@@ -442,6 +490,13 @@ impl RelayMcpContext {
     ) -> RelayResult<PatchProposal> {
         let sandbox = self.sandbox()?;
         self.start_preflight(task).await?;
+        let cancel_guard = self
+            .engine
+            .register_task_cancellation(task.spec.task_id)
+            .await?;
+        let options = self
+            .engine
+            .preset_run_options(task.spec.task_id, cancel_guard.token());
         let handle = self.worktree(task).await?;
         let manifest = sandbox.task_manifest(handle.worktree_path())?;
         let patch_input = match args.patch_kind.as_str() {
@@ -473,16 +528,27 @@ impl RelayMcpContext {
                 )));
             }
         };
-        let proposal = sandbox
-            .apply_and_verify_patch(
+        let proposal = match sandbox
+            .apply_and_verify_patch_with_options(
                 task.spec.task_id,
                 handle.worktree_path(),
                 handle.branch_name(),
                 &manifest,
                 patch_input,
                 &args.summary,
+                options,
             )
-            .await?;
+            .await
+        {
+            Ok(proposal) => proposal,
+            Err(error @ RelayError::TaskCancelled(_)) => {
+                drop(cancel_guard);
+                self.cleanup_after_error(task).await;
+                return Err(error);
+            }
+            Err(error) => return Err(error),
+        };
+        drop(cancel_guard);
         if !proposal.smoke_verified {
             return Err(RelayError::Internal(format!(
                 "patch failed smoke verification (worktree rolled back cleanly for retry):\n{}",
@@ -522,6 +588,10 @@ impl RelayMcpContext {
                 self.cleanup_worktree(&task).await?;
                 Ok(response)
             }
+            Err(error @ RelayError::TaskCancelled(_)) => {
+                self.cleanup_after_error(&task).await;
+                Err(error)
+            }
             Err(error) => {
                 self.cleanup_after_error(&task).await;
                 if let Err(state_error) = self
@@ -546,8 +616,14 @@ impl RelayMcpContext {
         task: &TaskRecord,
     ) -> RelayResult<ApprovalExecutionResponse> {
         let spec = &task.spec;
+        let cancel_guard = self.engine.register_task_cancellation(spec.task_id).await?;
+        let options = self
+            .engine
+            .preset_run_options(spec.task_id, cancel_guard.token());
         let handle = self.worktree(task).await?;
-        let sha = sandbox.validate_worktree_base(spec.task_id, &handle, &spec.base_commit_sha).await?;
+        let sha = sandbox
+            .validate_worktree_base(spec.task_id, &handle, &spec.base_commit_sha)
+            .await?;
         let diff = handle.diff().await?;
         if let Some(patch) = &task.active_proposal {
             if !patch.smoke_verified
@@ -566,10 +642,41 @@ impl RelayMcpContext {
 
         let manifest = sandbox.task_manifest(handle.worktree_path())?;
         let output = sandbox
-            .run_preset(handle.worktree_path(), &manifest, &spec.command_preset, &spec.params)
+            .run_preset_streaming(
+                handle.worktree_path(),
+                &manifest,
+                &spec.command_preset,
+                &spec.params,
+                options,
+            )
             .await?;
+        let was_cancelled = output.cancelled || cancel_guard.token().is_cancelled();
+        drop(cancel_guard);
+        if was_cancelled {
+            let _ = self
+                .engine
+                .record_cancelled_task_log(spec.task_id, &output.raw_log)
+                .await;
+            return Err(RelayError::TaskCancelled(spec.task_id.to_string()));
+        }
         if !output.success {
-            let detail = output.raw_log.lines().rev().find(|line| !line.trim().is_empty());
+            if !output.raw_log.is_empty() {
+                let _ = self
+                    .engine
+                    .record_task_log(spec.task_id, &output.raw_log)
+                    .await;
+            }
+            if output.timed_out {
+                return Err(RelayError::Internal(format!(
+                    "preset '{}' timed out",
+                    spec.command_preset,
+                )));
+            }
+            let detail = output
+                .raw_log
+                .lines()
+                .rev()
+                .find(|line| !line.trim().is_empty());
             return Err(RelayError::Internal(format!(
                 "preset '{}' failed (exit code {:?}){}",
                 spec.command_preset,
@@ -616,9 +723,25 @@ impl RelayMcpContext {
             created_at: now,
             updated_at: now,
         };
-        self.engine
+        if let Err(err) = self
+            .engine
             .record_worktree_evidence(spec.task_id, &artifact, evidence, &output.raw_log)
-            .await?;
+            .await
+        {
+            if self
+                .engine
+                .get_task(spec.task_id)
+                .await?
+                .is_some_and(|t| t.state == TaskState::Cancelled)
+            {
+                let _ = self
+                    .engine
+                    .record_cancelled_task_log(spec.task_id, &output.raw_log)
+                    .await;
+                return Err(RelayError::TaskCancelled(spec.task_id.to_string()));
+            }
+            return Err(err);
+        }
         Ok(ApprovalExecutionResponse::ExecutionStarted {
             task_id: spec.task_id.to_string(),
             worktree_branch: handle.branch_name().into(),

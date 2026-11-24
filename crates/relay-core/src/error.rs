@@ -8,6 +8,9 @@ pub enum RelayError {
     #[error("task not found: {0}")]
     TaskNotFound(String),
 
+    #[error("task {0} was cancelled")]
+    TaskCancelled(String),
+
     #[error("proposal not found: {0}")]
     ProposalNotFound(String),
 

@@ -38,6 +38,7 @@ impl RelayRpcHandler {
                         RelayError::TaskNotFound(_) | RelayError::ProposalNotFound(_) => {
                             "not_found"
                         }
+                        RelayError::InvalidStateTransition { .. } => "invalid_state",
                         _ => "request_failed",
                     };
                     error_response(code, err.to_string())
@@ -140,6 +141,11 @@ impl RelayRpcHandler {
                     .get_task(task_id)
                     .await?
                     .ok_or_else(|| RelayError::TaskNotFound(task_id.to_string()))?;
+                Ok(WireResponse::TaskState(record))
+            }
+            WireRequest::CancelTask { task_id } => {
+                let record = engine.cancel_task(task_id).await?;
+                self.notify(RelayNodeEvent::TaskCancelled(task_id));
                 Ok(WireResponse::TaskState(record))
             }
         }

@@ -515,3 +515,107 @@ fn lan_ticket_keeps_dialable_ipv4_and_ipv6_only() {
     assert_eq!(direct.ip_addrs().count(), valid.len());
     assert!(valid.iter().all(|ip| direct.ip_addrs().any(|addr| addr == ip)));
 }
+
+#[tokio::test]
+async fn wire_cancel_task_cancels_queued_and_running_tasks_over_local_only_peer_rpc() {
+    let temp = TempDir::new();
+    let (host, host_engine) = start_local(&temp, "cancel-host", None).await;
+    let (client, client_engine) = start_local(&temp, "cancel-client", None).await;
+    client_engine
+        .set_runtime_mode(RuntimeMode::Client)
+        .await
+        .unwrap();
+
+    let queued_id = Uuid::now_v7();
+    let submitted = client
+        .submit_remote_task(
+            host.addr(),
+            TaskSpec {
+                task_id: queued_id,
+                repo_id: REPO.into(),
+                base_commit_sha: COMMIT.into(),
+                command_preset: "smoke".into(),
+                params: BTreeMap::new(),
+                require_approval: false,
+                requested_by_device: "client".into(),
+                user_note: None,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(submitted.state, TaskState::Queued);
+
+    // 1) Cancel queued task over LocalOnly QUIC RPC.
+    let cancelled = client
+        .cancel_remote_task(host.addr(), queued_id)
+        .await
+        .unwrap();
+    assert_eq!(cancelled.state, TaskState::Cancelled);
+    assert_eq!(
+        host_engine.get_task(queued_id).await.unwrap().unwrap().state,
+        TaskState::Cancelled
+    );
+
+    // 2) Cancelling already-terminal or unknown task returns clean RPC error codes.
+    let already_terminal = client
+        .send_rpc(host.addr(), WireRequest::CancelTask { task_id: queued_id })
+        .await
+        .unwrap();
+    assert!(matches!(
+        already_terminal,
+        WireResponse::Error { ref code, .. } if code == "invalid_state"
+    ));
+    let missing = client
+        .send_rpc(
+            host.addr(),
+            WireRequest::CancelTask {
+                task_id: Uuid::now_v7(),
+            },
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        missing,
+        WireResponse::Error { ref code, .. } if code == "not_found"
+    ));
+
+    // 3) Cancelling an actively executing task signals its cancellation token on Host.
+    let running_id = Uuid::now_v7();
+    client
+        .submit_remote_task(
+            host.addr(),
+            TaskSpec {
+                task_id: running_id,
+                repo_id: REPO.into(),
+                base_commit_sha: COMMIT.into(),
+                command_preset: "smoke".into(),
+                params: BTreeMap::new(),
+                require_approval: false,
+                requested_by_device: "client".into(),
+                user_note: None,
+            },
+        )
+        .await
+        .unwrap();
+    host_engine
+        .transition_task(running_id, TaskState::Executing, None, None)
+        .await
+        .unwrap();
+    let guard = host_engine
+        .register_task_cancellation(running_id)
+        .await
+        .unwrap();
+    assert!(!guard.token().is_cancelled());
+
+    let remote_cancelled = client
+        .cancel_remote_task(host.addr(), running_id)
+        .await
+        .unwrap();
+    assert_eq!(remote_cancelled.state, TaskState::Cancelled);
+    assert!(guard.token().is_cancelled());
+    drop(guard);
+    assert_eq!(host_engine.active_cancellation_count(), 0);
+
+    host.shutdown().await.unwrap();
+    client.shutdown().await.unwrap();
+}

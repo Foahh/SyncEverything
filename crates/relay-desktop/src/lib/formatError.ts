@@ -10,7 +10,9 @@ type ErrorTranslationKey =
   | "errors.manifestAlreadyExists"
   | "errors.openRepoFirst"
   | "errors.repoPathEmpty"
-  | "errors.runtimeShuttingDown";
+  | "errors.runtimeShuttingDown"
+  | "errors.taskNotCancellable"
+  | "errors.taskNotFound";
 
 const KNOWN_ERROR_KEYS: Readonly<Record<string, ErrorTranslationKey>> = {
   "Open the same Git repository on both devices before pairing.": "errors.openRepoBeforePairing",
@@ -23,6 +25,7 @@ const KNOWN_ERROR_KEYS: Readonly<Record<string, ErrorTranslationKey>> = {
   "Open a local Git repository first.": "errors.openRepoFirst",
   "Repository path cannot be empty.": "errors.repoPathEmpty",
   "Runtime is shutting down": "errors.runtimeShuttingDown",
+  "This task can no longer be cancelled.": "errors.taskNotCancellable",
 };
 
 const RELAY_ERROR_PREFIX_RE =
@@ -35,6 +38,15 @@ function matchKnownErrorKey(message: string): ErrorTranslationKey | null {
   }
   if (normalized.toLowerCase().includes("relay.toml already exists")) {
     return "errors.manifestAlreadyExists";
+  }
+  if (
+    normalized.includes("invalid state transition") &&
+    normalized.toLowerCase().includes("cancelled")
+  ) {
+    return "errors.taskNotCancellable";
+  }
+  if (normalized.toLowerCase().startsWith("task not found:")) {
+    return "errors.taskNotFound";
   }
   return null;
 }
