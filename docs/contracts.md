@@ -14,14 +14,15 @@ Exposed over both **Stdio** (`relay-daemon mcp-stdio`, compatible with Claude Co
 | `inspect_sync_status` | `{}` | Returns current runtime mode, local/peer `NodeId`, transport path (`DirectLan` / `Relay` / `Offline`), last synced commit, and pending outbox count. |
 | `list_handoffs` | `{ limit?: u32 }` | Lists recent cross-device handoff records with base commit SHA, summary note, and active task states. |
 | `check_env_diff` | `{ commit_sha: String }` | Compares target commit's `pyproject.toml` / `uv.lock` fingerprint against the Host environment fingerprint. |
-| `get_dag_snapshot` | `{ include_stale?: bool }` | Returns the Decision-Evidence DAG (`nodes`, `edges`, `stale_count`) with explicit `STALE` freshness flags and deterministically quarantines/redacts `metrics_json` on `STALE` evidence nodes at the MCP boundary so agents never cite outdated metrics. |
-| `read_evidence_log` | `{ node_id: String, max_lines?: u32 }` | Reads artifact/evidence metrics and truncated log blob; returns a prominent warning header if the evidence node is `STALE`. |
+| `get_dag_snapshot` | `{}` | Returns the complete Decision-Evidence DAG (`nodes`, `edges`, `stale_count`, `fresh_evidence_count`, `stale_evidence_count`, `metric_authority_note`) with explicit `STALE` freshness flags and deterministically quarantines/redacts `metrics_json` on `STALE` evidence nodes at the MCP boundary so agents treat the DAG as the sole metric SSOT and never cite outdated metrics. |
+| `read_evidence_log` | `{ node_id: String, max_lines?: u32 }` | Reads artifact/evidence metrics and truncated log blob; deterministically blocks `STALE` evidence nodes. |
+| `read_worktree_file` | `{ task_id: String, file_path: String, start_line?: u32, end_line?: u32 }` | Reads a UTF-8 file with 1-based line numbers strictly inside the task's isolated Git worktree (blocks `..`, symlink escape, `.git/`, `.venv/`, `.relay/`, `.env*`, and binary files). |
 
 ### Isolated Sandbox & Self-Healing Tools
 | Tool Name | Arguments | Purpose |
 |---|---|---|
-| `run_preflight_in_worktree` | `{ task_id: String }` | Checks out `base_commit_sha` into an isolated `git worktree`, reconciles `uv.lock`, and runs the repo's `smoke` preset from `relay.toml`. Captures traceback/missing dependencies without touching the main working tree. |
-| `propose_worktree_patch` | `{ task_id: String, patch_kind: "uv_spec" \| "code_diff", summary: String, content: String }` | Applies a candidate fix inside the isolated worktree, re-runs smoke preflight, persists a `PatchProposal` in SQLite, and transitions the task to `SelfHealingProposed`. |
+| `run_preflight_in_worktree` | `{ task_id: String }` | Checks out `base_commit_sha` into an isolated `git worktree`, reconciles `uv.lock`, and runs the repo's `smoke` preset from `relay.toml`. On failure, captures `stderr_tail`, `detected_missing_module`, and automatic ±10-line `error_snippets` around worktree-local error lines without touching the main working tree. |
+| `propose_worktree_patch` | `{ task_id: String, patch_kind: "uv_spec" \| "file_edits", summary: String, uv_spec?: String, edits?: Array<{ file_path, old_text?, new_text }> }` | Applies a dependency fix (`uv_spec`) or atomic exact search-and-replace / full-file overwrite edits (`file_edits`) inside the isolated worktree, re-runs smoke preflight (automatically rolling back tracked and untracked changes if smoke fails), generates a standard `git diff` `diff_preview`, persists a `PatchProposal` in SQLite, and transitions the task to `SelfHealingProposed`. |
 
 ### Human-in-the-Loop Execution Tool (Dual-Mode Elicitation)
 | Tool Name | Arguments | Purpose |

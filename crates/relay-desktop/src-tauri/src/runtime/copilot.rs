@@ -533,20 +533,11 @@ impl DesktopRuntime {
                         .await,
                 )
             }
-            "get_dag_snapshot" => {
-                let include_stale = parsed_args
-                    .get("include_stale")
-                    .and_then(Value::as_bool)
-                    .unwrap_or(true);
-                result_json(
-                    self
-                        .mcp
-                        .handle_get_dag_snapshot(GetDagSnapshotArgs {
-                            include_stale: Some(include_stale),
-                        })
-                        .await,
-                )
-            }
+            "get_dag_snapshot" => result_json(
+                self.mcp
+                    .handle_get_dag_snapshot(GetDagSnapshotArgs {})
+                    .await,
+            ),
             "read_evidence_log" => match serde_json::from_value::<ReadEvidenceLogArgs>(parsed_args) {
                 Ok(args) => result_json(self.mcp.handle_read_evidence_log(args).await),
                 Err(error) => err_outcome(format!("Invalid arguments: {error}")),

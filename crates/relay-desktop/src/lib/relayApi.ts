@@ -114,6 +114,9 @@ function createInitialMockState(): MockWorkspaceState {
       nodes: [],
       edges: [],
       stale_count: 0,
+      fresh_evidence_count: 0,
+      stale_evidence_count: 0,
+      metric_authority_note: null,
       captured_at: now,
     },
     tasks: [],
@@ -211,12 +214,14 @@ async function runMockCopilotTurn(
   const shortHead = (mockState.dag.head_commit_sha ?? "HEAD").slice(0, 7);
 
   if (lower.includes("outdated") || lower.includes("stale") || prompt.includes("过期")) {
-    await runTool("get_dag_snapshot", '{"include_stale":true}', () =>
+    await runTool("get_dag_snapshot", "{}", () =>
       JSON.stringify(
         {
           repo_id: mockState.dag.repo_id,
           head_commit_sha: mockState.dag.head_commit_sha,
           stale_count: mockState.dag.stale_count,
+          fresh_evidence_count: mockState.dag.fresh_evidence_count,
+          stale_evidence_count: mockState.dag.stale_evidence_count,
           node_count: mockState.dag.nodes.length,
         },
         null,
@@ -256,13 +261,15 @@ async function runMockCopilotTurn(
       ? `### 连接与环境概览\n\n- **连接状态**：${mockState.status.connected ? "已连接" : "未连接远程主机"}（\`${mockState.status.transport_path}\`）\n- **当前仓库**：${hasRepo ? mockState.workspace.name || mockState.workspace.repo_id : "未打开本地仓库"}\n- **当前预设**：${presetNames.length > 0 ? presetNames.map((n) => `\`${n}\``).join("、") : "暂无"}`
       : `### Sync & Environment Summary\n\n- **Link**: ${mockState.status.connected ? "Connected" : "Offline"} (\`${mockState.status.transport_path}\`)\n- **Repository**: ${hasRepo ? mockState.workspace.name || mockState.workspace.repo_id : "No repository selected"}\n- **Configured presets**: ${presetNames.length > 0 ? presetNames.map((n) => `\`${n}\``).join(", ") : "none"}`;
   } else {
-    await runTool("get_dag_snapshot", '{"include_stale":true}', () =>
+    await runTool("get_dag_snapshot", "{}", () =>
       JSON.stringify(
         {
           repo_id: mockState.dag.repo_id,
           head_commit_sha: mockState.dag.head_commit_sha,
           nodes: mockState.dag.nodes.length,
           stale_count: mockState.dag.stale_count,
+          fresh_evidence_count: mockState.dag.fresh_evidence_count,
+          stale_evidence_count: mockState.dag.stale_evidence_count,
           presets: presetNames,
         },
         null,
@@ -477,6 +484,12 @@ export const relayApi = {
       return commands.getDagSnapshot(includeStale);
     }
     const staleCount = mockState.dag.nodes.filter((n) => n.freshness.status === "stale").length;
+    const freshEvidenceCount = mockState.dag.nodes.filter(
+      (n) => n.payload.kind === "evidence" && n.freshness.status === "fresh",
+    ).length;
+    const staleEvidenceCount = mockState.dag.nodes.filter(
+      (n) => n.payload.kind === "evidence" && n.freshness.status === "stale",
+    ).length;
     const nodes = includeStale
       ? mockState.dag.nodes
       : mockState.dag.nodes.filter((n) => n.freshness.status !== "stale");
@@ -487,6 +500,12 @@ export const relayApi = {
       nodes,
       edges,
       stale_count: staleCount,
+      fresh_evidence_count: freshEvidenceCount,
+      stale_evidence_count: staleEvidenceCount,
+      metric_authority_note:
+        freshEvidenceCount === 0 && staleEvidenceCount > 0
+          ? "WARNING: Current HEAD has 0 fresh verified evidence nodes and all prior evidence is STALE/quarantined."
+          : null,
       captured_at: new Date().toISOString(),
     });
   },

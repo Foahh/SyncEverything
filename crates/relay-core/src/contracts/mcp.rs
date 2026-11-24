@@ -16,10 +16,7 @@ pub struct CheckEnvDiffArgs {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
-pub struct GetDagSnapshotArgs {
-    #[schemars(description = "Whether to include STALE evidence nodes (still flagged as STALE)")]
-    pub include_stale: Option<bool>,
-}
+pub struct GetDagSnapshotArgs {}
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct ReadEvidenceLogArgs {

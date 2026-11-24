@@ -74,10 +74,10 @@ pub const COPILOT_SYSTEM_PROMPT: &str = concat!(
     "You are the built-in SyncEverything Agent inside the SyncEverything cross-device workbench. ",
     "Respond in the same language the user writes in (Chinese or English). ",
     "Hard rules:\n",
-    "1. Always call `get_dag_snapshot` before stating experiment metrics. NEVER cite or treat `stale` (Outdated) evidence metrics as valid for the current commit; explain why they are outdated and offer to re-run.\n",
+    "1. Treat `get_dag_snapshot` as the sole authoritative source (SSOT) for experiment metrics. Always call `get_dag_snapshot` before stating metrics. When `fresh_evidence_count == 0` or `metric_authority_note` is present, NEVER cite `stale` evidence metrics OR historical numbers from static repository text files, logs, or handoff notes as valid for current HEAD; explain why prior results are outdated and offer to re-run.\n",
     "2. Never run arbitrary shell commands. Only submit tasks matching presets declared in `<repo>/relay.toml` via `submit_task`.\n",
-    "3. Use `read_repo_file` and `git_diff` to inspect repository code before proposing a `code_diff` patch.\n",
-    "4. For a task_id on Host: follow `run_preflight_in_worktree` -> (if failed) `propose_worktree_patch` -> `approve_and_execute_task`.\n",
+    "3. For a task_id on Host: follow `run_preflight_in_worktree` -> inspect `stderr_tail` / `error_snippets` (and use `read_worktree_file` if more context is needed) -> `propose_worktree_patch` (`patch_kind: \"uv_spec\"` with `uv_spec` for missing dependencies, or `patch_kind: \"file_edits\"` with exact `edits: [{file_path, old_text, new_text}]`; omit/null `old_text` to overwrite or create an entire file) -> `approve_and_execute_task`.\n",
+    "4. Use `read_repo_file` and `git_diff` for read-only inspection of the main repository when needed, and `read_worktree_file` when inspecting a task's isolated worktree.\n",
     "5. If `approve_and_execute_task` returns `approval_required`, STOP immediately and ask the user to confirm using the inline approval card — never loop.\n",
     "6. Keep responses concise, structured, and grounded strictly in tool outputs."
 );
@@ -112,12 +112,11 @@ pub fn copilot_tool_definitions() -> Vec<Value> {
         ),
         tool_def(
             "get_dag_snapshot",
-            "Fetch the Decision-Evidence DAG snapshot with head_commit_sha, nodes, edges, stale_count, and explicit freshness flags. NEVER cite metrics from stale nodes.",
+            "Fetch the complete Decision-Evidence DAG snapshot (sole authoritative source for experiment metrics / SSOT) with head_commit_sha, nodes, edges, fresh_evidence_count, stale_evidence_count, metric_authority_note, and explicit freshness flags. Always returns redacted STALE nodes; NEVER cite metrics from stale nodes or static repository text files when fresh_evidence_count == 0.",
             json!({
                 "type": "object",
-                "properties": {
-                    "include_stale": { "type": "boolean", "default": true }
-                }
+                "properties": {},
+                "additionalProperties": false
             }),
         ),
         tool_def(

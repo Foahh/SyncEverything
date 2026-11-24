@@ -314,6 +314,9 @@ async fn mcp_end_to_end_preflight_patch_approval_and_stale_block() {
         })
         .unwrap();
     assert_eq!(snapshot.stale_count, 0);
+    assert_eq!(snapshot.fresh_evidence_count, 1);
+    assert_eq!(snapshot.stale_evidence_count, 0);
+    assert!(snapshot.metric_authority_note.is_none());
     assert!(snapshot.edges.iter().any(|edge| {
         edge.kind == EdgeKind::ProducedFrom && edge.from == artifact.id && edge.to == node_id
     }));
@@ -358,9 +361,13 @@ async fn mcp_end_to_end_preflight_patch_approval_and_stale_block() {
     assert!(!error.contains("0.25"));
 
     let stale_snapshot = server
-        .handle_get_dag_snapshot(GetDagSnapshotArgs { include_stale: Some(true) })
-        .await.unwrap();
+        .handle_get_dag_snapshot(GetDagSnapshotArgs::default())
+        .await
+        .unwrap();
     assert_eq!(stale_snapshot.stale_count, 1);
+    assert_eq!(stale_snapshot.fresh_evidence_count, 0);
+    assert_eq!(stale_snapshot.stale_evidence_count, 1);
+    assert!(stale_snapshot.metric_authority_note.is_some());
     let stale_node = stale_snapshot.nodes.iter().find(|node| node.id == node_id).unwrap();
     assert!(matches!(stale_node.freshness, Freshness::Stale { .. }));
     let NodeKind::Evidence { metrics_json: redacted_metrics, .. } = &stale_node.payload else {
@@ -385,12 +392,6 @@ async fn mcp_end_to_end_preflight_patch_approval_and_stale_block() {
         panic!("expected evidence payload");
     };
     assert_eq!(*raw_metrics, serde_json::json!({"alpha": 0.25, "smoke": "smoke passed"}).into());
-
-    let filtered = server
-        .handle_get_dag_snapshot(GetDagSnapshotArgs { include_stale: Some(false) })
-        .await.unwrap();
-    assert_eq!(filtered.stale_count, 1);
-    assert!(filtered.nodes.iter().all(|node| node.id != node_id));
 }
 
 #[tokio::test]

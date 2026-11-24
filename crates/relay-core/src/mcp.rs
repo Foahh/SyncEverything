@@ -134,11 +134,8 @@ impl RelayMcpServer {
             .await
     }
 
-    pub async fn handle_get_dag_snapshot(&self, args: GetDagSnapshotArgs) -> RelayResult<DagSnapshot> {
-        let mut snapshot = self.context
-            .engine
-            .dag_snapshot(args.include_stale.unwrap_or(true))
-            .await?;
+    pub async fn handle_get_dag_snapshot(&self, _args: GetDagSnapshotArgs) -> RelayResult<DagSnapshot> {
+        let mut snapshot = self.context.engine.dag_snapshot(true).await?;
         redact_stale_evidence_metrics(&mut snapshot);
         Ok(snapshot)
     }
@@ -722,7 +719,7 @@ impl RelayMcpServer {
     }
 
     #[tool(
-        description = "Fetch the Decision-Evidence DAG snapshot with head_commit_sha, nodes, edges, stale_count, and explicit freshness flags. Always call this before answering questions about experiment metrics. Metrics on STALE evidence nodes are deterministically quarantined/redacted; NEVER cite STALE evidence as valid for the current commit."
+        description = "Fetch the complete Decision-Evidence DAG snapshot (sole authoritative source for experiment metrics / SSOT), including head_commit_sha, nodes, edges, fresh_evidence_count, stale_evidence_count, optional metric_authority_note, and explicit freshness flags. Always returns redacted STALE nodes; NEVER cite stale nodes or static repository text files as valid metrics when fresh_evidence_count == 0."
     )]
     async fn get_dag_snapshot(
         &self,
@@ -786,9 +783,9 @@ impl RelayMcpServer {
 const RELAY_MCP_INSTRUCTIONS: &str = concat!(
     "Relay coordinates local AI agents across devices using a Decision-Evidence DAG and isolated Git worktree sandboxes.\n",
     "Rules:\n",
-    "1. Call get_dag_snapshot before citing experiment metrics. NEVER cite or treat STALE evidence as valid for the current commit.\n",
+    "1. Treat get_dag_snapshot as the sole authoritative source (SSOT) for experiment metrics. Always call get_dag_snapshot before citing metrics. When fresh_evidence_count == 0 or metric_authority_note is set, NEVER cite stale nodes or historical numbers from static repository text files or handoff notes as valid for current HEAD.\n",
     "2. Never execute arbitrary shell commands; only run whitelisted presets through Relay task tools.\n",
-    "3. For a task_id, follow: run_preflight_in_worktree -> (if failed) propose_worktree_patch -> approve_and_execute_task.\n",
+    "3. For a task_id, follow: run_preflight_in_worktree -> inspect stderr_tail/error_snippets (and read_worktree_file if more context is needed) -> propose_worktree_patch (patch_kind='uv_spec' or 'file_edits') -> approve_and_execute_task.\n",
     "4. If approve_and_execute_task returns approval_required, pause and ask the user to approve the diff rather than retrying in a loop."
 );
 

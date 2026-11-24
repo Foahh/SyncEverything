@@ -70,6 +70,9 @@ fn agent_safe_dag_context_quarantines_stale_evidence() {
         ],
         edges: vec![],
         stale_count: 1,
+        fresh_evidence_count: 1,
+        stale_evidence_count: 1,
+        metric_authority_note: None,
         captured_at: now,
     };
     let context = build_safe_dag_context(&snapshot);
@@ -289,6 +292,9 @@ fn compose_context_ablation_strategies_are_deterministic_and_quarantine_stale_in
             kind: EdgeKind::Informs,
         }],
         stale_count: 1,
+        fresh_evidence_count: 1,
+        stale_evidence_count: 1,
+        metric_authority_note: None,
         captured_at: now,
     };
     let mut tasks = vec![TaskRecord {

@@ -20,6 +20,13 @@ pub struct DagEngine {
     edge_id_to_idx: HashMap<String, EdgeIndex>,
 }
 
+pub const NO_FRESH_EVIDENCE_AUTHORITY_NOTE: &str = concat!(
+    "WARNING: Current HEAD has 0 fresh verified evidence nodes and all prior evidence is STALE/quarantined. ",
+    "This DAG snapshot is the sole authoritative source of experiment metrics (SSOT). ",
+    "Do NOT cite redacted/stale evidence or historical numbers from static repository text files, logs, or handoff notes as valid for current HEAD; ",
+    "explicitly report that no fresh verified metrics exist for HEAD and recommend re-running the experiment."
+);
+
 impl DagEngine {
     pub fn new(repo_id: impl Into<String>) -> Self {
         Self {
@@ -68,21 +75,13 @@ impl DagEngine {
         Ok(())
     }
 
-    pub(crate) fn validate_edge_changes(&self, previous: &Self) -> RelayResult<()> {
+    pub(crate) fn validate_acyclic(&self) -> RelayResult<()> {
         // Check the final batch, since replacing two edges can temporarily form a cycle.
-        if toposort(&self.graph, None).is_ok() {
-            return Ok(());
-        }
-        // Older versions accepted cycles. Allow unrelated edits and exact replay while
-        // rejecting each new connection that participates in a cycle.
-        for edge in self.graph.edge_weights() {
-            let unchanged = previous.edge_id_to_idx.get(&edge.id).is_some_and(|&idx| {
-                let old = &previous.graph[idx];
-                old.from == edge.from && old.to == edge.to
-            });
-            if !unchanged {
-                self.check_connection(edge)?;
-            }
+        if let Err(cycle) = toposort(&self.graph, None) {
+            let node_id = &self.graph[cycle.node_id()].id;
+            return Err(RelayError::Internal(format!(
+                "DAG contains a cycle involving node {node_id}"
+            )));
         }
         Ok(())
     }
@@ -309,12 +308,21 @@ impl DagEngine {
 
     pub fn snapshot(&self, include_stale: bool) -> DagSnapshot {
         let mut stale_count: u32 = 0;
+        let mut fresh_evidence_count: u32 = 0;
+        let mut stale_evidence_count: u32 = 0;
         let mut nodes = Vec::new();
         for idx in self.graph.node_indices() {
             let node = &self.graph[idx];
             let is_stale = matches!(node.freshness, Freshness::Stale { .. });
             if is_stale {
                 stale_count += 1;
+            }
+            if matches!(node.payload, NodeKind::Evidence { .. }) {
+                match node.freshness {
+                    Freshness::Fresh => fresh_evidence_count += 1,
+                    Freshness::Stale { .. } => stale_evidence_count += 1,
+                    Freshness::PendingVerify => {}
+                }
             }
             if include_stale || !is_stale {
                 nodes.push(node.clone());
@@ -332,12 +340,18 @@ impl DagEngine {
             .collect();
         edges.sort_unstable_by(|a, b| a.id.cmp(&b.id));
 
+        let metric_authority_note = (fresh_evidence_count == 0 && stale_evidence_count > 0)
+            .then(|| NO_FRESH_EVIDENCE_AUTHORITY_NOTE.to_owned());
+
         DagSnapshot {
             repo_id: self.repo_id.clone(),
             head_commit_sha: self.head_commit_sha.clone(),
             nodes,
             edges,
             stale_count,
+            fresh_evidence_count,
+            stale_evidence_count,
+            metric_authority_note,
             captured_at: Utc::now(),
         }
     }
@@ -407,6 +421,10 @@ mod tests {
         .unwrap();
 
         assert!(dag.assert_evidence_fresh("ev-1").is_ok());
+        let initial_snap = dag.snapshot(true);
+        assert_eq!(initial_snap.fresh_evidence_count, 1);
+        assert_eq!(initial_snap.stale_evidence_count, 0);
+        assert!(initial_snap.metric_authority_note.is_none());
 
         let report = dag
             .supersede_artifact(
@@ -425,10 +443,33 @@ mod tests {
 
         let snap = dag.snapshot(true);
         assert_eq!(snap.stale_count, 1);
+        assert_eq!(snap.fresh_evidence_count, 0);
+        assert_eq!(snap.stale_evidence_count, 1);
+        assert_eq!(
+            snap.metric_authority_note.as_deref(),
+            Some(NO_FRESH_EVIDENCE_AUTHORITY_NOTE)
+        );
         assert_eq!(snap.head_commit_sha.as_deref(), Some("bbb222"));
 
         let fresh_only = dag.snapshot(false);
         assert_eq!(fresh_only.nodes.len(), 2);
         assert_eq!(fresh_only.stale_count, 1);
+        assert_eq!(fresh_only.fresh_evidence_count, 0);
+        assert_eq!(fresh_only.stale_evidence_count, 1);
+        assert!(fresh_only.metric_authority_note.is_some());
+
+        // Adding a fresh evidence node alongside stale evidence clears metric_authority_note.
+        dag.upsert_node(sample_evidence("ev-2", "task-2"));
+        dag.add_edge(GraphEdge {
+            id: "e2".into(),
+            from: "art-2".into(),
+            to: "ev-2".into(),
+            kind: EdgeKind::ProducedFrom,
+        })
+        .unwrap();
+        let mixed = dag.snapshot(true);
+        assert_eq!(mixed.fresh_evidence_count, 1);
+        assert_eq!(mixed.stale_evidence_count, 1);
+        assert!(mixed.metric_authority_note.is_none());
     }
 }
