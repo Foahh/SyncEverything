@@ -82,7 +82,7 @@ impl RelayMcpServer {
             transport_path: TransportPath::Offline,
             connected: false,
             rtt_ms: None,
-            last_synced_commit: engine.head_commit_sha().await,
+            last_synced_commit: engine.head_commit_sha().await?,
             pending_outbox_count: engine.pending_outbox_count().await?,
         })
     }
@@ -133,7 +133,7 @@ impl RelayMcpServer {
             .await
     }
 
-    pub async fn handle_get_dag_snapshot(&self, args: GetDagSnapshotArgs) -> DagSnapshot {
+    pub async fn handle_get_dag_snapshot(&self, args: GetDagSnapshotArgs) -> RelayResult<DagSnapshot> {
         self.context
             .engine
             .dag_snapshot(args.include_stale.unwrap_or(true))
@@ -144,11 +144,18 @@ impl RelayMcpServer {
         &self,
         args: ReadEvidenceLogArgs,
     ) -> RelayResult<EvidenceLog> {
-        let (node, log_tail) = self
-            .context
-            .engine
-            .read_evidence_log(&args.node_id, args.max_lines.unwrap_or(120))
-            .await?;
+        let engine = &self.context.engine;
+        let max_lines = args.max_lines.unwrap_or(120);
+        let result = engine.read_evidence_log(&args.node_id, max_lines).await;
+        let (node, log_tail) = match (result, self.context.node()) {
+            (Err(RelayError::MissingEvidenceLog { hash, .. }), Some(transport)) => {
+                let log = transport.fetch_evidence_log(&hash).await?;
+                engine.cache_log_blob(&hash, &log).await?;
+                // A peer can invalidate the result while the blob is in flight.
+                engine.read_evidence_log(&args.node_id, max_lines).await?
+            }
+            (result, _) => result?,
+        };
         Ok(EvidenceLog { node, log_tail })
     }
 
@@ -454,7 +461,7 @@ impl RelayMcpContext {
     ) -> RelayResult<ApprovalExecutionResponse> {
         let spec = &task.spec;
         let handle = self.worktree(task).await?;
-        sandbox.validate_worktree_base(spec.task_id, &handle, &spec.base_commit_sha).await?;
+        let sha = sandbox.validate_worktree_base(spec.task_id, &handle, &spec.base_commit_sha).await?;
         let diff = handle.diff().await?;
         if let Some(patch) = &task.active_proposal {
             if !patch.smoke_verified
@@ -485,15 +492,16 @@ impl RelayMcpContext {
             )));
         }
 
-        let sha = &spec.base_commit_sha;
         let (env_fingerprint, changed_files) = tokio::try_join!(
-            sandbox.env_fingerprint_at_commit(sha),
-            sandbox.changed_files_in_commit(sha),
+            sandbox.env_fingerprint_at_commit(&sha),
+            sandbox.changed_files_in_commit(&sha),
         )?;
         let now = Utc::now();
-        let device_origin = self
-            .node()
-            .map_or_else(|| "local".into(), |node| node.id().to_string());
+        let node = self.node();
+        if let Some(node) = &node {
+            node.publish_evidence_log(&output.raw_log).await?;
+        }
+        let device_origin = node.map_or_else(|| "local".into(), |node| node.id().to_string());
         let artifact = GraphNode {
             id: format!("artifact:{}", Uuid::now_v7()),
             label: sha.clone(),
@@ -623,7 +631,7 @@ impl RelayMcpServer {
         &self,
         Parameters(args): Parameters<GetDagSnapshotArgs>,
     ) -> Result<CallToolResult, McpError> {
-        tool_result(Ok(self.handle_get_dag_snapshot(args).await))
+        tool_result(self.handle_get_dag_snapshot(args).await)
     }
 
     #[tool(

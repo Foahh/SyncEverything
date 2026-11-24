@@ -89,7 +89,7 @@ impl RelayRpcHandler {
             }
             WireRequest::FetchDagSnapshot { repo_id } => {
                 engine.check_repo(&repo_id)?;
-                let snapshot = engine.dag_snapshot(true).await;
+                let snapshot = engine.dag_snapshot(true).await?;
                 self.node
                     .peer()
                     .record_commit(id, snapshot.head_commit_sha.as_deref());
@@ -98,9 +98,10 @@ impl RelayRpcHandler {
             WireRequest::PushSyncBundle { meta, dag_delta } => {
                 engine.check_repo(&meta.repo_id)?;
                 engine.check_repo(&dag_delta.repo_id)?;
-                if let Some(sandbox) = &self.sandbox && !meta.git_bundle_blob_hash.is_empty() {
-                    self.import_bundle(conn, sandbox, &meta).await?;
-                }
+                let sandbox = self.sandbox.as_ref().ok_or_else(|| {
+                    RelayError::Git("no repository is configured to import the sync bundle".into())
+                })?;
+                self.import_bundle(conn, sandbox, &meta).await?;
                 engine.apply_dag_delta(dag_delta).await?;
                 self.node.peer().record_commit(id, Some(&meta.base_commit_sha));
                 self.notify(RelayNodeEvent::DagChanged);
@@ -126,7 +127,7 @@ impl RelayRpcHandler {
                         .resolve_peer_approval(task_id, patch_id.as_deref(), decision)
                         .await?;
                     if changed {
-                        self.notify(RelayNodeEvent::ApprovalResolved(task_id, decision));
+                        self.notify(RelayNodeEvent::ApprovalResolved(task_id, patch_id, decision));
                     }
                     record
                 } else {
@@ -157,7 +158,11 @@ impl RelayRpcHandler {
         meta: &GitSyncBundleMeta,
     ) -> RelayResult<()> {
         let hash = parse_hash(&meta.git_bundle_blob_hash)?;
-        let addr = self.node.peer().addr(conn.remote_id());
+        // Only the initiating peer needs the pairing ticket. Use its live RPC paths
+        // for the separate blob connection, including when discovery is disabled.
+        let addr = self.node.peer().addr(conn.remote_id()).with_addrs(
+            conn.paths().iter().map(|path| path.remote_addr().to_owned()),
+        );
         self.node.pull_blob_from(addr.clone(), hash).await?;
         if let Some(diff_hash) = &meta.working_diff_blob_hash {
             self.node.pull_blob_from(addr, parse_hash(diff_hash)?).await?;

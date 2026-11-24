@@ -1,5 +1,5 @@
 import { useQueryClient } from "@tanstack/react-query";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type {
   AgentApprovalCard_Serialize,
   AgentChatMessage_Serialize,
@@ -91,6 +91,9 @@ export function useCopilotChat() {
   const queryClient = useQueryClient();
   const { data: persisted = [] } = useChatMessages();
   const clearMutation = useClearChatMessages();
+  const clearing = useRef(false);
+  const generation = useRef(0);
+  const lastFinishedMessage = useRef<string | null>(null);
   const [draft, setDraft] = useState<StreamingDraft | null>(null);
   const [sendError, setSendError] = useState<string | null>(null);
 
@@ -100,9 +103,10 @@ export function useCopilotChat() {
 
     void relayApi
       .subscribeAgentChatEvents((event) => {
-        if (!active) return;
+        if (!active || clearing.current) return;
         setDraft((prev) => applyStreamEvent(prev, event));
         if (event.kind === "turn_completed" || event.kind === "turn_error") {
+          lastFinishedMessage.current = event.message_id;
           void queryClient.invalidateQueries({ queryKey: relayKeys.all }).then(() => {
             if (active) {
               setDraft((current) =>
@@ -161,12 +165,14 @@ export function useCopilotChat() {
   const sendMessage = useCallback(
     async (prompt: string) => {
       const trimmed = prompt.trim();
-      if (!trimmed) return;
+      if (!trimmed || clearing.current) return;
+      const turn = ++generation.current;
       setSendError(null);
       try {
         const placeholder = await relayApi.sendChatMessage(trimmed);
+        if (turn !== generation.current) return;
         setDraft((prev) =>
-          prev && prev.messageId === placeholder.id
+          lastFinishedMessage.current === placeholder.id || prev?.messageId === placeholder.id
             ? prev
             : {
                 messageId: placeholder.id,
@@ -180,7 +186,9 @@ export function useCopilotChat() {
         );
         await queryClient.invalidateQueries({ queryKey: relayKeys.chat() });
       } catch (err) {
-        setSendError(err instanceof Error ? err.message : String(err));
+        if (turn === generation.current) {
+          setSendError(err instanceof Error ? err.message : String(err));
+        }
       }
     },
     [queryClient],
@@ -193,9 +201,17 @@ export function useCopilotChat() {
   }, [queryClient]);
 
   const clearChat = useCallback(async () => {
-    setDraft(null);
+    clearing.current = true;
+    generation.current++;
     setSendError(null);
-    await clearMutation.mutateAsync();
+    try {
+      await clearMutation.mutateAsync();
+      setDraft(null);
+    } catch (error) {
+      setSendError(String(error));
+    } finally {
+      clearing.current = false;
+    }
   }, [clearMutation]);
 
   return {

@@ -66,6 +66,13 @@ CREATE TABLE IF NOT EXISTS runtime_modes (
     mode TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS observed_git_heads (
+    repo_id TEXT NOT NULL,
+    checkout BLOB NOT NULL,
+    commit_sha TEXT NOT NULL,
+    PRIMARY KEY (repo_id, checkout)
+);
+
 CREATE TABLE IF NOT EXISTS sync_outbox (
     seq INTEGER PRIMARY KEY AUTOINCREMENT,
     repo_id TEXT NOT NULL,
@@ -91,6 +98,22 @@ CREATE INDEX IF NOT EXISTS tasks_repo_created ON tasks (repo_id, created_at DESC
 CREATE INDEX IF NOT EXISTS handoffs_repo_created ON handoffs (repo_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS sync_outbox_pending ON sync_outbox (repo_id, seq) WHERE delivered = 0;
 CREATE INDEX IF NOT EXISTS chat_messages_repo_created ON chat_messages (repo_id, created_at ASC);
+
+-- A persisted counter works across pooled connections, processes, and direct SQLite imports.
+CREATE TABLE IF NOT EXISTS dag_revision (id INTEGER PRIMARY KEY CHECK (id = 1), value INTEGER NOT NULL);
+INSERT OR IGNORE INTO dag_revision (id, value) VALUES (1, 0);
+CREATE TRIGGER IF NOT EXISTS dag_node_insert AFTER INSERT ON dag_nodes
+BEGIN UPDATE dag_revision SET value = value + 1; END;
+CREATE TRIGGER IF NOT EXISTS dag_node_update AFTER UPDATE ON dag_nodes
+BEGIN UPDATE dag_revision SET value = value + 1; END;
+CREATE TRIGGER IF NOT EXISTS dag_node_delete AFTER DELETE ON dag_nodes
+BEGIN UPDATE dag_revision SET value = value + 1; END;
+CREATE TRIGGER IF NOT EXISTS dag_edge_insert AFTER INSERT ON dag_edges
+BEGIN UPDATE dag_revision SET value = value + 1; END;
+CREATE TRIGGER IF NOT EXISTS dag_edge_update AFTER UPDATE ON dag_edges
+BEGIN UPDATE dag_revision SET value = value + 1; END;
+CREATE TRIGGER IF NOT EXISTS dag_edge_delete AFTER DELETE ON dag_edges
+BEGIN UPDATE dag_revision SET value = value + 1; END;
 "#;
 
 #[derive(Clone, Debug)]
@@ -127,13 +150,7 @@ impl RelayStore {
 
     async fn init_schema(pool: SqlitePool) -> RelayResult<Self> {
         let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
-        for stmt in SCHEMA_SQL
-            .split(';')
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-        {
-            sqlx::query(stmt).execute(&mut *tx).await?;
-        }
+        sqlx::raw_sql(SCHEMA_SQL).execute(&mut *tx).await?;
         tx.commit().await?;
         Ok(Self { pool })
     }
@@ -146,6 +163,40 @@ impl RelayStore {
         Ok(self.pool.begin_with("BEGIN IMMEDIATE").await?)
     }
 
+    pub(crate) async fn observed_git_head(&self, repo_id: &str, checkout: &Path) -> RelayResult<Option<String>> {
+        Self::fetch_observed_head(&mut *self.pool.acquire().await?, repo_id, checkout).await
+    }
+
+    pub(crate) async fn fetch_observed_head(
+        conn: &mut SqliteConnection,
+        repo_id: &str,
+        checkout: &Path,
+    ) -> RelayResult<Option<String>> {
+        Ok(sqlx::query_scalar(
+            "SELECT commit_sha FROM observed_git_heads WHERE repo_id = ? AND checkout = ?",
+        )
+            .bind(repo_id)
+            .bind(checkout.as_os_str().as_encoded_bytes())
+            .fetch_optional(conn)
+            .await?)
+    }
+
+    pub(crate) async fn write_observed_head(
+        conn: &mut SqliteConnection,
+        repo_id: &str,
+        checkout: &Path,
+        sha: &str,
+    ) -> RelayResult<()> {
+        sqlx::query("INSERT INTO observed_git_heads (repo_id, checkout, commit_sha) VALUES (?, ?, ?)
+                     ON CONFLICT (repo_id, checkout) DO UPDATE SET commit_sha = excluded.commit_sha")
+            .bind(repo_id)
+            .bind(checkout.as_os_str().as_encoded_bytes())
+            .bind(sha)
+            .execute(conn)
+            .await?;
+        Ok(())
+    }
+
     pub async fn upsert_dag_node(&self, repo_id: &str, node: &GraphNode) -> RelayResult<()> {
         write_node(&mut *self.pool.acquire().await?, repo_id, node).await
     }
@@ -155,6 +206,16 @@ impl RelayStore {
     }
 
     pub async fn load_dag(&self, repo_id: &str) -> RelayResult<(Vec<GraphNode>, Vec<GraphEdge>)> {
+        let mut tx = self.pool.begin().await?;
+        let rows = Self::fetch_dag(&mut tx, repo_id).await?;
+        tx.commit().await?;
+        Ok(rows)
+    }
+
+    pub(crate) async fn fetch_dag(
+        conn: &mut SqliteConnection,
+        repo_id: &str,
+    ) -> RelayResult<(Vec<GraphNode>, Vec<GraphEdge>)> {
         type NodeRow = (
             String,
             String,
@@ -166,21 +227,19 @@ impl RelayStore {
         );
         type EdgeRow = (String, String, String, Json<EdgeKind>);
 
-        let mut tx = self.pool.begin().await?;
         let nodes = sqlx::query_as::<_, NodeRow>(
             "SELECT id, label, payload_json, freshness_json, device_origin, created_at, updated_at
              FROM dag_nodes WHERE repo_id = ? ORDER BY id",
         )
         .bind(repo_id)
-        .fetch_all(&mut *tx)
+        .fetch_all(&mut *conn)
         .await?;
         let edges = sqlx::query_as::<_, EdgeRow>(
             "SELECT id, from_node, to_node, kind FROM dag_edges WHERE repo_id = ? ORDER BY id",
         )
         .bind(repo_id)
-        .fetch_all(&mut *tx)
+        .fetch_all(conn)
         .await?;
-        tx.commit().await?;
 
         let nodes = nodes
             .into_iter()
@@ -294,9 +353,13 @@ impl RelayStore {
     }
 
     pub async fn get_log_blob(&self, blob_hash: &str) -> RelayResult<Option<String>> {
+        Self::fetch_log_blob(&mut *self.pool.acquire().await?, blob_hash).await
+    }
+
+    pub(crate) async fn fetch_log_blob(conn: &mut SqliteConnection, blob_hash: &str) -> RelayResult<Option<String>> {
         Ok(sqlx::query_scalar("SELECT content FROM log_blobs WHERE log_blob_hash = ?")
             .bind(blob_hash)
-            .fetch_optional(&self.pool)
+            .fetch_optional(conn)
             .await?)
     }
 
@@ -434,7 +497,12 @@ impl RelayStore {
              ON CONFLICT (id) DO UPDATE SET
                  content = excluded.content,
                  traces_json = excluded.traces_json,
-                 approval_json = excluded.approval_json,
+                 approval_json = CASE
+                     WHEN json_extract(chat_messages.approval_json, '$.resolved') IS NOT NULL
+                       AND json_extract(chat_messages.approval_json, '$.task_id') = json_extract(excluded.approval_json, '$.task_id')
+                       AND json_extract(chat_messages.approval_json, '$.patch_id') IS json_extract(excluded.approval_json, '$.patch_id')
+                     THEN chat_messages.approval_json
+                     ELSE excluded.approval_json END,
                  error_message = excluded.error_message
              WHERE chat_messages.repo_id = excluded.repo_id",
         )
@@ -469,6 +537,7 @@ impl RelayStore {
         &self,
         repo_id: &str,
         task_id: &str,
+        patch_id: Option<&str>,
         decision: &str,
     ) -> RelayResult<u32> {
         let mut tx = self.begin_write().await?;
@@ -482,7 +551,7 @@ impl RelayStore {
 
         let mut updated = 0u32;
         for (id, Json(mut card)) in rows {
-            if card.task_id == task_id && card.resolved.as_deref() != Some(decision) {
+            if card.task_id == task_id && card.patch_id.as_deref() == patch_id && card.resolved.is_none() {
                 card.resolved = Some(decision.to_owned());
                 sqlx::query(
                     "UPDATE chat_messages SET approval_json = ? WHERE id = ? AND repo_id = ?",

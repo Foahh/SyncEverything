@@ -47,6 +47,10 @@ impl PeerState {
             .unwrap_or_else(|| EndpointAddr::new(peer))
     }
 
+    pub(super) fn selected_addr(&self) -> Option<EndpointAddr> {
+        self.selected.map(|id| self.addr(id))
+    }
+
     pub(super) fn select(&mut self, peer: EndpointId) {
         if self.selected != Some(peer) {
             self.selected = Some(peer);

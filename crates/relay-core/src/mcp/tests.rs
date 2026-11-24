@@ -74,12 +74,16 @@ struct Fixture {
 
 impl Fixture {
     async fn new() -> Self {
+        Self::with_script(PYTHON).await
+    }
+
+    async fn with_script(script: &str) -> Self {
         let temp = std::env::temp_dir().join(format!("relay-mcp-test-{}", Uuid::now_v7()));
         let repo = temp.join("main");
         fs::create_dir_all(repo.join("src")).unwrap();
         git(&repo, &["init", "--initial-branch=main"]).await;
         git(&repo, &["config", "core.autocrlf", "false"]).await;
-        fs::write(repo.join("src/app.py"), PYTHON).unwrap();
+        fs::write(repo.join("src/app.py"), script).unwrap();
         fs::write(repo.join("pyproject.toml"), PYPROJECT).unwrap();
         fs::write(repo.join("relay.toml"), MANIFEST).unwrap();
         fs::write(repo.join(".gitignore"), ".venv/\n__pycache__/\n").unwrap();
@@ -157,6 +161,27 @@ fn approval(id: TaskId, patch_id: Option<String>, approved_via_ui: bool) -> Appr
         task_id: id.to_string(),
         patch_id,
         approved_via_ui: Some(approved_via_ui),
+    }
+}
+
+#[tokio::test]
+async fn host_clean_preflight_obeys_task_approval() {
+    use crate::agent::{HostTaskOutcome, LlmEndpointConfig, run_host_task_pipeline};
+    let fixture = Fixture::with_script(&format!("SMOKE_MESSAGE = 'ok'\n{PYTHON}")).await;
+    let server = fixture.server();
+    for require_approval in [true, false] {
+        let id = fixture.submit("0.25", require_approval).await;
+        let outcome = run_host_task_pipeline(&fixture.engine, &server, LlmEndpointConfig::default(), id).await.unwrap();
+        if require_approval {
+            assert!(matches!(outcome, HostTaskOutcome::AwaitingApproval));
+            let task = fixture.task(id).await;
+            assert_eq!(task.state, TaskState::PreflightRunning);
+            assert!(task.evidence_node_id.is_none());
+            server.handle_approve_and_execute(approval(id, None, true), None).await.unwrap();
+        } else {
+            assert!(matches!(outcome, HostTaskOutcome::Completed));
+        }
+        assert_eq!(fixture.task(id).await.state, TaskState::Completed);
     }
 }
 
@@ -254,7 +279,7 @@ async fn mcp_end_to_end_preflight_patch_approval_and_stale_block() {
     assert_eq!(fixture.sandbox.head_commit_sha().await.unwrap(), fixture.sha);
     assert_eq!(fs::read_to_string(fixture.repo.join("src/app.py")).unwrap(), PYTHON);
 
-    let snapshot = server.handle_get_dag_snapshot(GetDagSnapshotArgs::default()).await;
+    let snapshot = server.handle_get_dag_snapshot(GetDagSnapshotArgs::default()).await.unwrap();
     let artifact = snapshot
         .nodes
         .iter()
@@ -307,7 +332,7 @@ async fn mcp_end_to_end_preflight_patch_approval_and_stale_block() {
     assert!(!error.contains("0.25"));
     let filtered = server
         .handle_get_dag_snapshot(GetDagSnapshotArgs { include_stale: Some(false) })
-        .await;
+        .await.unwrap();
     assert_eq!(filtered.stale_count, 1);
     assert!(filtered.nodes.iter().all(|node| node.id != node_id));
 }

@@ -301,21 +301,22 @@ impl LlmClient {
 
         let mut content = String::new();
         let mut partials: BTreeMap<usize, PartialToolCall> = BTreeMap::new();
-        let mut buffer = String::new();
+        let mut buffer = Vec::new();
 
         while let Some(bytes) = response.chunk().await.map_err(super::llm_error)? {
             if cancel.load(Ordering::Relaxed) {
                 return Err(RelayError::Llm("cancelled".into()));
             }
-            buffer.push_str(&String::from_utf8_lossy(&bytes));
-            while let Some(newline_pos) = buffer.find('\n') {
-                let line = buffer[..newline_pos].trim_end_matches('\r').to_owned();
-                buffer.drain(..=newline_pos);
-                process_sse_line(&line, &mut content, &mut partials, &mut on_delta);
+            for part in bytes.split_inclusive(|&byte| byte == b'\n') {
+                buffer.extend_from_slice(part);
+                if part.ends_with(b"\n") {
+                    process_sse_line(&String::from_utf8_lossy(&buffer), &mut content, &mut partials, &mut on_delta);
+                    buffer.clear();
+                }
             }
         }
-        if !buffer.trim().is_empty() {
-            process_sse_line(buffer.trim(), &mut content, &mut partials, &mut on_delta);
+        if !buffer.is_empty() {
+            process_sse_line(&String::from_utf8_lossy(&buffer), &mut content, &mut partials, &mut on_delta);
         }
 
         let tool_calls = partials

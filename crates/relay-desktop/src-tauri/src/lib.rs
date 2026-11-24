@@ -248,7 +248,7 @@ async fn get_dag_snapshot(
     include_stale: bool,
 ) -> Result<DagSnapshot, String> {
     let runtime = state.get_or_init(&app).await?;
-    Ok(runtime.engine.dag_snapshot(include_stale).await)
+    runtime.engine.dag_snapshot(include_stale).await.map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -302,12 +302,13 @@ async fn resolve_patch_approval(
     app: AppHandle,
     state: State<'_, RuntimeManager>,
     task_id: Uuid,
+    patch_id: Option<String>,
     decision: ApprovalDecision,
 ) -> Result<TaskRecord, String> {
     state
         .get_or_init(&app)
         .await?
-        .resolve_approval(task_id, decision)
+        .resolve_approval(task_id, patch_id, decision)
         .await
         .map_err(|error| error.to_string())
 }

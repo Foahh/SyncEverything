@@ -1,3 +1,4 @@
+import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -18,6 +19,7 @@ import { useTranslation } from "react-i18next";
 import type { PresetInfo } from "../../bindings";
 
 export interface DispatchTaskFormValues {
+  taskId: string;
   preset: string;
   params: Record<string, string>;
   userNote: string;
@@ -29,7 +31,7 @@ interface DispatchTaskModalProps {
   onOpenChange: (open: boolean) => void;
   headCommitSha: string;
   presets: PresetInfo[];
-  onDispatch: (values: DispatchTaskFormValues) => void;
+  onDispatch: (values: DispatchTaskFormValues) => Promise<void>;
   isSubmitting: boolean;
 }
 
@@ -38,23 +40,6 @@ const DEFAULT_PARAM_VALUES: Record<string, string> = {
   alpha: "0.35",
   window: "7",
 };
-
-const FALLBACK_PRESETS: PresetInfo[] = [
-  {
-    name: "train_grid",
-    description: "Run rolling windows (7, 14, 28) and record MAE",
-    program: "uv",
-    args: [],
-    allowed_params: ["windows", "alpha"],
-  },
-  {
-    name: "smoke",
-    description: "Fast 1-second environment & script check",
-    program: "uv",
-    args: [],
-    allowed_params: [],
-  },
-];
 
 function initialParamsFor(preset: PresetInfo): Record<string, string> {
   const result: Record<string, string> = {};
@@ -71,13 +56,14 @@ function DispatchTaskForm({
   isSubmitting,
 }: {
   presets: PresetInfo[];
-  onDispatch: (values: DispatchTaskFormValues) => void;
+  onDispatch: (values: DispatchTaskFormValues) => Promise<void>;
   onCancel: () => void;
   isSubmitting: boolean;
 }) {
   const { t } = useTranslation();
-  const preferred =
-    presets.find((item) => item.name === "train_grid") ?? presets[0] ?? FALLBACK_PRESETS[0];
+  const preferred = presets.find((item) => item.name === "train_grid") ?? presets[0];
+  const [taskId] = useState(() => crypto.randomUUID());
+  const [submitError, setSubmitError] = useState<string | null>(null);
   const [selectedName, setSelectedName] = useState(preferred.name);
   const [params, setParams] = useState<Record<string, string>>(() => initialParamsFor(preferred));
   const [userNote, setUserNote] = useState("");
@@ -90,8 +76,9 @@ function DispatchTaskForm({
     setParams(initialParamsFor(preset));
   };
 
-  const handleSubmit = (event: FormEvent<HTMLFormElement>) => {
+  const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
+    setSubmitError(null);
     const cleaned: Record<string, string> = {};
     for (const key of selectedPreset.allowed_params) {
       const value = (params[key] ?? "").trim();
@@ -99,13 +86,18 @@ function DispatchTaskForm({
         cleaned[key] = value;
       }
     }
-    onDispatch({
-      preset: selectedPreset.name,
-      params: cleaned,
-      userNote,
-      requireApproval,
-    });
-    onCancel();
+    try {
+      await onDispatch({
+        taskId,
+        preset: selectedPreset.name,
+        params: cleaned,
+        userNote,
+        requireApproval,
+      });
+      onCancel();
+    } catch (error) {
+      setSubmitError(String(error));
+    }
   };
 
   return (
@@ -196,7 +188,7 @@ function DispatchTaskForm({
           className="justify-between rounded-lg border border-border bg-muted/40 px-3 py-2.5"
         >
           <FieldLabel htmlFor="task-ask-before-fix" className="cursor-pointer font-normal">
-            {t("modals.task.askBeforeFix")}
+            {t("modals.task.askBeforeRun")}
           </FieldLabel>
           <Switch
             id="task-ask-before-fix"
@@ -207,8 +199,19 @@ function DispatchTaskForm({
         </Field>
       </FieldGroup>
 
+      {submitError && (
+        <Alert variant="destructive">
+          <AlertDescription>{submitError}</AlertDescription>
+        </Alert>
+      )}
       <DialogFooter>
-        <Button type="button" variant="outline" size="lg" onClick={onCancel}>
+        <Button
+          type="button"
+          variant="outline"
+          size="lg"
+          disabled={isSubmitting}
+          onClick={onCancel}
+        >
           <span className="relay-text-trim leading-none">{t("modals.task.cancel")}</span>
         </Button>
         <Button type="submit" size="lg" disabled={isSubmitting}>
@@ -229,11 +232,15 @@ export function DispatchTaskModal({
   isSubmitting,
 }: DispatchTaskModalProps) {
   const { t } = useTranslation();
-  const effectivePresets = presets.length > 0 ? presets : FALLBACK_PRESETS;
-  const presetsKey = effectivePresets.map((item) => item.name).join(",");
+  const presetsKey = presets.map((item) => item.name).join(",");
 
   return (
-    <Dialog open={isOpen} onOpenChange={onOpenChange}>
+    <Dialog
+      open={isOpen}
+      onOpenChange={(open) => {
+        if (!isSubmitting) onOpenChange(open);
+      }}
+    >
       <DialogContent className="sm:max-w-lg">
         <DialogHeader>
           <div className="flex items-center gap-2.5">
@@ -250,13 +257,17 @@ export function DispatchTaskModal({
           </div>
         </DialogHeader>
 
-        <DispatchTaskForm
-          key={presetsKey}
-          presets={effectivePresets}
-          onDispatch={onDispatch}
-          onCancel={() => onOpenChange(false)}
-          isSubmitting={isSubmitting}
-        />
+        {presets.length === 0 ? (
+          <p>{t("modals.workspace.noPresets")}</p>
+        ) : (
+          <DispatchTaskForm
+            key={presetsKey}
+            presets={presets}
+            onDispatch={onDispatch}
+            onCancel={() => onOpenChange(false)}
+            isSubmitting={isSubmitting}
+          />
+        )}
       </DialogContent>
     </Dialog>
   );

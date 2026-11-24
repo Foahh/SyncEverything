@@ -44,6 +44,13 @@ pub struct PreflightReport {
 }
 
 impl WorktreeSandbox {
+    fn authorized_smoke_preset<'a>(&self, manifest: &'a RelayManifest) -> RelayResult<&'a str> {
+        if load_manifest(self.repo_root())?.project.smoke_preset != manifest.project.smoke_preset {
+            return Err(RelayError::Internal("smoke preset differs from the host relay.toml".into()));
+        }
+        Ok(&manifest.project.smoke_preset)
+    }
+
     pub async fn run_preset(
         &self,
         worktree_path: &Path,
@@ -155,7 +162,7 @@ impl WorktreeSandbox {
             .run_preset(
                 worktree_path,
                 manifest,
-                &manifest.project.smoke_preset,
+                self.authorized_smoke_preset(manifest)?,
                 &BTreeMap::new(),
             )
             .await?;
@@ -186,6 +193,7 @@ impl WorktreeSandbox {
         self.validate_task_worktree(task_id, worktree_path, worktree_branch)
             .await?;
         let worktree_path = std::path::absolute(worktree_path)?;
+        let smoke_preset = self.authorized_smoke_preset(manifest)?;
         let diff_before = working_diff(&worktree_path).await?;
         match kind {
             PatchKind::UvSpec => add_uv_dependency(&worktree_path, content).await?,
@@ -199,7 +207,7 @@ impl WorktreeSandbox {
             .run_preset(
                 &worktree_path,
                 manifest,
-                &manifest.project.smoke_preset,
+                smoke_preset,
                 &BTreeMap::new(),
             )
             .await?;

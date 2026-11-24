@@ -26,7 +26,6 @@ use serde::{Deserialize, Serialize};
 use std::env;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tauri::AppHandle;
 use tauri_specta::Event;
@@ -55,7 +54,7 @@ pub(crate) struct DesktopRuntime {
     mcp: Arc<RelayMcpServer>,
     network: Mutex<Option<Network>>,
     llm_config: RwLock<LlmEndpointConfig>,
-    active_chat_cancel: Mutex<Option<Arc<AtomicBool>>>,
+    active_chat_turn: Mutex<Option<copilot::ChatTurn>>,
     shutdown: watch::Sender<bool>,
 }
 
@@ -165,7 +164,7 @@ impl DesktopRuntime {
                 }
             }
         } else if let (Some(repo), Some(head)) = (&repo, head)
-            && engine.dag_snapshot(true).await.nodes.is_empty()
+            && engine.dag_snapshot(true).await?.nodes.is_empty()
         {
             let seed = async {
                 let node = build_git_artifact_node(repo, head, origin).await?;
@@ -196,7 +195,7 @@ impl DesktopRuntime {
             mcp,
             network: Mutex::new(Some(network)),
             llm_config: RwLock::new(llm_config),
-            active_chat_cancel: Mutex::new(None),
+            active_chat_turn: Mutex::new(None),
             shutdown,
         });
         runtime.listen(events, mode);
@@ -207,9 +206,7 @@ impl DesktopRuntime {
 
     pub(crate) async fn shutdown(&self) {
         let _ = self.shutdown.send(true);
-        if let Some(cancel) = self.active_chat_cancel.lock().await.take() {
-            cancel.store(true, Ordering::Relaxed);
-        }
+        self.cancel_chat_turn().await;
         if let Some(network) = self.network.lock().await.take() {
             network.shutdown().await;
         }
@@ -375,21 +372,15 @@ impl DesktopRuntime {
             return Err(error);
         }
         if network.remote.as_ref().map(|peer| peer.id) != Some(address.id) {
-            network.last_remote_dag = None;
+            network.last_pushed_commit = None;
         }
         network.remote = Some(address.clone());
         emit_state(&self.app, "peer_paired", format!("Paired with {}", address.id));
 
-        let delivered = network.local.flush_outbox(address).await?;
-        if delivered > 0 {
-            emit_state(
-                &self.app,
-                "outbox_flushed",
-                format!("Delivered {delivered} queued requests"),
-            );
-        }
         if network.mode == RuntimeMode::Client {
             self.refresh_from_host(network).await?;
+        } else {
+            network.local.flush_outbox(address).await?;
         }
         Ok(network.local.peer_status())
     }
@@ -401,11 +392,16 @@ impl DesktopRuntime {
         if spec.repo_id.trim().is_empty() {
             spec.repo_id = self.engine.repo_id().to_owned();
         }
-        let guard = self.network.lock().await;
+        let mut guard = self.network.lock().await;
         let network = guard
-            .as_ref()
+            .as_mut()
             .ok_or_else(|| RelayError::Transport("Runtime is shutting down".into()))?;
         let id = spec.task_id;
+        if network.mode != RuntimeMode::Client && self.sandbox.is_none() {
+            return Err(RelayError::Git(
+                "Open a Git repository with a commit and relay.toml before running a task.".into(),
+            ));
+        }
         let result = match network.mode {
             RuntimeMode::LocalDualSandbox => {
                 let host = network.loopback_host.as_ref().expect("loopback host");
@@ -419,9 +415,13 @@ impl DesktopRuntime {
                 return Ok(record);
             }
             RuntimeMode::Client => {
-                if let Some(address) = &network.remote {
+                if let Some(address) = network.remote.clone() {
                     let request = WireRequest::SubmitTask { spec: spec.clone() };
-                    match network.local.send_rpc(address.clone(), request).await {
+                    let send = async {
+                        self.sync_client_before_dispatch(network, &address).await?;
+                        network.local.send_rpc(address, request).await
+                    };
+                    match send.await {
                         Ok(response) => {
                             let record = task_response(response)?;
                             self.engine.mirror_peer_task(&record).await?;
@@ -445,21 +445,13 @@ impl DesktopRuntime {
     pub(crate) async fn resolve_approval(
         self: &Arc<Self>,
         task_id: TaskId,
+        patch_id: Option<String>,
         decision: ApprovalDecision,
     ) -> RelayResult<TaskRecord> {
         let guard = self.network.lock().await;
         let network = guard
             .as_ref()
             .ok_or_else(|| RelayError::Transport("Runtime is shutting down".into()))?;
-        let task = self
-            .engine
-            .get_task(task_id)
-            .await?
-            .ok_or_else(|| RelayError::TaskNotFound(task_id.to_string()))?;
-        let patch_id = task
-            .active_proposal
-            .as_ref()
-            .map(|patch| patch.patch_id.as_str());
         let remote = if let Some(host) = &network.loopback_host {
             Some(host.addr())
         } else if network.mode == RuntimeMode::Client {
@@ -475,16 +467,15 @@ impl DesktopRuntime {
                     .resolve_remote_approval(
                         address,
                         task_id,
-                        patch_id.map(str::to_owned),
+                        patch_id,
                         decision,
                     )
                     .await?;
-                self.sync_chat_approval_card(task_id, decision).await;
                 return Ok(record);
             }
             let request = WireRequest::ResolveApproval {
                 task_id,
-                patch_id: patch_id.map(str::to_owned),
+                patch_id: patch_id.clone(),
                 decision,
                 comment: None,
             };
@@ -492,8 +483,7 @@ impl DesktopRuntime {
                 Ok(response) => {
                     let record = task_response(response)?;
                     self.engine.mirror_peer_task(&record).await?;
-                    self.sync_chat_approval_card(task_id, decision).await;
-                    self.approval_resolved(task_id, decision, false);
+                    self.approval_resolved(task_id, patch_id, decision, false);
                     return Ok(record);
                 }
                 Err(RelayError::Transport(error)) => {
@@ -504,26 +494,30 @@ impl DesktopRuntime {
         }
         let record = if network.mode == RuntimeMode::Client {
             self.engine
-                .queue_peer_approval(task_id, patch_id, decision)
+                .queue_peer_approval(task_id, patch_id.as_deref(), decision)
                 .await?
         } else {
             self.engine
-                .resolve_ui_approval(task_id, patch_id, decision)
+                .resolve_ui_approval(task_id, patch_id.as_deref(), decision)
                 .await?
         };
-        self.sync_chat_approval_card(task_id, decision).await;
-        self.approval_resolved(task_id, decision, network.mode == RuntimeMode::Host);
+        self.approval_resolved(task_id, patch_id, decision, network.mode == RuntimeMode::Host);
         Ok(record)
     }
 
-    async fn sync_chat_approval_card(&self, task_id: TaskId, decision: ApprovalDecision) {
+    async fn sync_chat_approval_card(
+        &self,
+        task_id: TaskId,
+        patch_id: Option<&str>,
+        decision: ApprovalDecision,
+    ) {
         let label = match decision {
             ApprovalDecision::Approved => "approved",
             ApprovalDecision::Rejected => "rejected",
         };
         if let Ok(updated) = self
             .engine
-            .mark_chat_approval_resolved(&task_id.to_string(), label)
+            .mark_chat_approval_resolved(&task_id.to_string(), patch_id, label)
             .await
             && updated > 0
         {
@@ -578,6 +572,10 @@ impl DesktopRuntime {
             .as_ref()
             .map_or_else(|| "local".into(), |net| net.local.id().to_string());
 
+        self.observe_git_head(sandbox, origin).await
+    }
+
+    async fn observe_git_head(&self, sandbox: &WorktreeSandbox, origin: String) -> RelayResult<bool> {
         match sync_git_head_into_engine(&self.engine, sandbox, origin).await? {
             HeadSyncOutcome::Unchanged => Ok(false),
             HeadSyncOutcome::Seeded { commit_sha } => {
@@ -603,40 +601,41 @@ impl DesktopRuntime {
                     "dag_changed",
                     format!("Detected new Git commit {short_sha}"),
                 );
-                self.push_local_commit_if_client(sandbox).await;
                 Ok(true)
             }
         }
     }
 
-    async fn push_local_commit_if_client(&self, sandbox: &WorktreeSandbox) {
-        let Ok(guard) = self.network.try_lock() else {
-            return;
-        };
-        let Some(network) = guard.as_ref() else {
-            return;
-        };
-        if network.mode != RuntimeMode::Client {
-            return;
+    async fn sync_client_before_dispatch(
+        &self,
+        network: &mut Network,
+        host: &iroh::EndpointAddr,
+    ) -> RelayResult<()> {
+        if let Some(sandbox) = &self.sandbox {
+            let head = sandbox.head_commit_sha().await?;
+            if network.last_pushed_commit.as_deref() != Some(head.as_str()) {
+                self.observe_git_head(sandbox, network.local.id().to_string()).await?;
+                let snapshot = self.engine.dag_snapshot(true).await?;
+                let delta = DagDelta {
+                    repo_id: snapshot.repo_id,
+                    upsert_nodes: snapshot.nodes,
+                    upsert_edges: snapshot.edges,
+                };
+                let meta = network.local
+                    .push_sync_bundle(host.clone(), self.engine.repo_id(), sandbox, delta)
+                    .await?;
+                network.last_pushed_commit = Some(meta.base_commit_sha);
+            }
         }
-        let Some(remote) = network.remote.clone() else {
-            return;
-        };
-        let local = network.local.clone();
-        drop(guard);
-
-        let snapshot = self.engine.dag_snapshot(true).await;
-        let delta = DagDelta {
-            repo_id: snapshot.repo_id.clone(),
-            upsert_nodes: snapshot.nodes,
-            upsert_edges: snapshot.edges,
-        };
-        if let Err(error) = local
-            .push_sync_bundle(remote, self.engine.repo_id(), sandbox, delta)
-            .await
-        {
-            tracing::debug!(%error, "Unable to push new Git commit bundle to paired host");
+        if self.engine.pending_outbox_count().await? > 0 {
+            let delivered = network.local.flush_outbox(host.clone()).await?;
+            if delivered > 0 {
+                emit_state(
+                    &self.app, "outbox_flushed", format!("Delivered {delivered} queued requests"),
+                );
+            }
         }
+        Ok(())
     }
 
     fn listen(self: &Arc<Self>, listeners: Vec<NodeEvents>, mode: RuntimeMode) {
@@ -661,8 +660,8 @@ impl DesktopRuntime {
                             let execute = mode != RuntimeMode::Client;
                             match event {
                                 RelayNodeEvent::TaskSubmitted(id) => runtime.task_submitted(id, execute),
-                                RelayNodeEvent::ApprovalResolved(id, decision) => {
-                                    runtime.approval_resolved(id, decision, execute);
+                                RelayNodeEvent::ApprovalResolved(id, patch_id, decision) => {
+                                    runtime.approval_resolved(id, patch_id, decision, execute);
                                 }
                                 RelayNodeEvent::DagChanged => {
                                     emit_state(&runtime.app, "dag_changed", "DAG updated by peer");
@@ -701,6 +700,11 @@ impl DesktopRuntime {
                             format!("Verified fix ready for task {id}"),
                         );
                     }
+                    Ok(HostTaskOutcome::AwaitingApproval) => {
+                        emit_state(
+                            &runtime.app, "task_updated", format!("Task {id} is ready for approval"),
+                        );
+                    }
                     Ok(HostTaskOutcome::Skipped) => {
                         emit_state(&runtime.app, "task_updated", format!("Task {id} skipped"));
                     }
@@ -717,7 +721,13 @@ impl DesktopRuntime {
         }
     }
 
-    fn approval_resolved(self: &Arc<Self>, id: TaskId, decision: ApprovalDecision, execute: bool) {
+    fn approval_resolved(
+        self: &Arc<Self>,
+        id: TaskId,
+        patch_id: Option<String>,
+        decision: ApprovalDecision,
+        execute: bool,
+    ) {
         emit_state(
             &self.app,
             "approval_resolved",
@@ -725,7 +735,7 @@ impl DesktopRuntime {
         );
         let sync_runtime = self.clone();
         tauri::async_runtime::spawn(async move {
-            sync_runtime.sync_chat_approval_card(id, decision).await;
+            sync_runtime.sync_chat_approval_card(id, patch_id.as_deref(), decision).await;
         });
         if execute && self.sandbox.is_some() {
             let runtime = self.clone();
@@ -824,28 +834,34 @@ impl DesktopRuntime {
     }
 
     async fn refresh_from_host(&self, network: &mut Network) -> RelayResult<()> {
-        let Some(address) = &network.remote else {
+        let Some(address) = network.remote.clone() else {
             return Ok(());
         };
-        if network.local.peer_status().pending_outbox_count != 0 {
-            network.local.flush_outbox(address.clone()).await?;
-        }
+        self.sync_client_before_dispatch(network, &address).await?;
         let snapshot = fetch_dag(&network.local, address.clone(), self.engine.repo_id()).await?;
-        if network.last_remote_dag.as_ref().is_none_or(|previous| {
-            previous.nodes != snapshot.nodes || previous.edges != snapshot.edges
-        }) {
-            let current = self.engine.dag_snapshot(true).await;
-            if current.nodes != snapshot.nodes || current.edges != snapshot.edges {
-                self.engine
-                    .apply_dag_delta(DagDelta {
-                        repo_id: snapshot.repo_id.clone(),
-                        upsert_nodes: snapshot.nodes.clone(),
-                        upsert_edges: snapshot.edges.clone(),
-                    })
-                    .await?;
+        let current = self.engine.dag_snapshot(true).await?;
+        if current.nodes != snapshot.nodes || current.edges != snapshot.edges {
+            let merged = self.engine.apply_dag_delta(DagDelta {
+                repo_id: snapshot.repo_id.clone(),
+                upsert_nodes: snapshot.nodes.clone(),
+                upsert_edges: snapshot.edges.clone(),
+            }).await?;
+            if merged.nodes != current.nodes || merged.edges != current.edges {
                 emit_state(&self.app, "dag_changed", "DAG refreshed from host");
             }
-            network.last_remote_dag = Some(snapshot);
+            if merged.nodes != snapshot.nodes || merged.edges != snapshot.edges {
+                let request = WireRequest::SyncDagDelta {
+                    delta: DagDelta {
+                        repo_id: merged.repo_id,
+                        upsert_nodes: merged.nodes,
+                        upsert_edges: merged.edges,
+                    },
+                };
+                match network.local.send_rpc(address.clone(), request).await? {
+                    WireResponse::DagSnapshot(_) => {}
+                    response => return Err(rpc_error(response, "DAG snapshot")),
+                }
+            }
         }
         let mut changed = false;
         for task in self.engine.list_tasks().await? {
@@ -975,7 +991,7 @@ async fn fallback_artifact(
     new_commit_sha: String,
     device_origin: String,
 ) -> RelayResult<GraphNode> {
-    let snapshot = engine.dag_snapshot(true).await;
+    let snapshot = engine.dag_snapshot(true).await?;
     let fingerprint = snapshot.nodes.into_iter().find_map(|node| match node.payload {
         NodeKind::Artifact {
             env_fingerprint, ..

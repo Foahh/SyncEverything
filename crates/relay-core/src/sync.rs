@@ -46,7 +46,7 @@ pub struct RelayNodeConfig {
 #[derive(Debug)]
 pub enum RelayNodeEvent {
     TaskSubmitted(TaskId),
-    ApprovalResolved(TaskId, ApprovalDecision),
+    ApprovalResolved(TaskId, Option<String>, ApprovalDecision),
     DagChanged,
     PeerPaired,
 }
@@ -275,6 +275,23 @@ impl RelayNode {
     /// Fetch and pin a blob by its BLAKE3 hash.
     pub async fn pull_blob_from(&self, peer_addr: EndpointAddr, hash: Hash) -> RelayResult<()> {
         self.shared.pull_blob_from(peer_addr, hash).await
+    }
+
+    pub(crate) async fn publish_evidence_log(&self, text: &str) -> RelayResult<()> {
+        self.store().blobs().add_slice(text.as_bytes()).with_tag().await.map_err(transport_error)?;
+        Ok(())
+    }
+
+    pub(crate) async fn fetch_evidence_log(&self, hash_text: &str) -> RelayResult<String> {
+        let hash: Hash = hash_text.parse().map_err(transport_error)?;
+        let addr = self.shared.peer().selected_addr().ok_or_else(|| {
+            RelayError::Transport("no paired peer is available for the evidence log".into())
+        })?;
+        tokio::time::timeout(RPC_TIMEOUT, self.pull_blob_from(addr, hash))
+            .await
+            .map_err(|_| RelayError::Transport("evidence log transfer timed out".into()))??;
+        let bytes = self.store().blobs().get_bytes(hash).await.map_err(transport_error)?;
+        String::from_utf8(bytes.into()).map_err(transport_error)
     }
 
     /// Publish the Git bundle and optional working diff before announcing their hashes.

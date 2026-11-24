@@ -23,7 +23,7 @@ import type {
   TaskRecord_Serialize,
   TaskState,
 } from "../bindings";
-import { isTauriRuntime } from "../lib/relayApi";
+import { isTauriRuntime, needsTaskApproval } from "../lib/relayApi";
 
 interface LeftRailProps {
   status: PeerStatus_Serialize | undefined;
@@ -150,8 +150,7 @@ export function LeftRail({
           ) : (
             <div className="flex flex-col gap-2">
               {tasks.map((task) => {
-                const needsFixReview =
-                  task.state === "self_healing_proposed" && task.active_proposal != null;
+                const needsFixReview = needsTaskApproval(task);
                 const badge = stateBadgeProps(task.state);
 
                 return (
@@ -170,7 +169,9 @@ export function LeftRail({
                       </span>
                       <Badge variant={badge.variant} className={badge.className}>
                         <span className="relay-text-trim leading-none">
-                          {t(`taskState.${task.state}`)}
+                          {needsFixReview && !task.active_proposal
+                            ? t("sidebar.awaitingApproval")
+                            : t(`taskState.${task.state}`)}
                         </span>
                       </Badge>
                     </div>
@@ -189,7 +190,7 @@ export function LeftRail({
                       >
                         <Sparkles data-icon="inline-start" />
                         <span className="relay-text-trim leading-none">
-                          {t("sidebar.reviewFix")}
+                          {t(task.active_proposal ? "sidebar.reviewFix" : "sidebar.reviewRun")}
                         </span>
                         <ArrowRight data-icon="inline-end" />
                       </Button>

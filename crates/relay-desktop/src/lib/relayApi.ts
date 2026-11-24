@@ -23,6 +23,40 @@ import {
   type WorkspaceInfo_Serialize,
 } from "../bindings";
 
+export interface ApprovalInput {
+  taskId: string;
+  patchId: string | null;
+  decision: ApprovalDecision;
+}
+
+export function needsTaskApproval(task: TaskRecord_Serialize): boolean {
+  return (
+    (task.state === "self_healing_proposed" && task.active_proposal !== null) ||
+    (task.state === "preflight_running" &&
+      task.spec.require_approval &&
+      task.preflight_summary === "Smoke preflight passed" &&
+      task.active_proposal === null)
+  );
+}
+
+export function findCommitArtifact(dag: DagSnapshot_Serialize, commit: string | null) {
+  const candidates = dag.nodes.filter(
+    (node) => node.payload.kind === "artifact" && node.payload.git_commit_sha === commit,
+  );
+  const superseded = new Set(
+    dag.edges.filter((edge) => edge.kind === "supersedes").map((edge) => edge.to),
+  );
+  return (
+    candidates.sort(
+      (a, b) =>
+        Number(superseded.has(a.id)) - Number(superseded.has(b.id)) ||
+        Date.parse(b.updated_at) - Date.parse(a.updated_at) ||
+        Date.parse(b.created_at) - Date.parse(a.created_at) ||
+        b.id.localeCompare(a.id),
+    )[0] ?? null
+  );
+}
+
 export function isTauriRuntime(): boolean {
   return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 }
@@ -270,7 +304,7 @@ function emitMockChatEvent(event: AgentChatStreamEvent_Serialize): void {
 
 function sleepMs(ms: number): Promise<void> {
   return new Promise((resolve) => {
-    window.setTimeout(resolve, ms);
+    setTimeout(resolve, ms);
   });
 }
 
@@ -302,6 +336,7 @@ async function runMockCopilotTurn(
     argsPreview: string,
     computeOutput: () => { output: string; approval?: AgentApprovalCard_Serialize },
   ): Promise<AgentApprovalCard_Serialize | null> => {
+    if (abort.cancelled) return null;
     const trace: AgentToolTrace_Serialize = {
       id: `${toolName}-${assistantMsg.traces.length}`,
       tool_name: toolName,
@@ -548,9 +583,8 @@ async function runMockCopilotTurn(
     });
   }
 
-  if (activeMockChatAbort === abort) {
-    activeMockChatAbort = null;
-  }
+  if (activeMockChatAbort !== abort) return;
+  activeMockChatAbort = null;
 
   emitMockChatEvent({
     turn_id: turnId,
@@ -735,15 +769,19 @@ export const relayApi = {
     return structuredClone(record);
   },
 
-  async resolvePatchApproval(
-    taskId: string,
-    decision: ApprovalDecision,
-  ): Promise<TaskRecord_Serialize> {
+  async resolvePatchApproval({
+    taskId,
+    patchId,
+    decision,
+  }: ApprovalInput): Promise<TaskRecord_Serialize> {
     if (isTauriRuntime()) {
-      return commands.resolvePatchApproval(taskId, decision);
+      return commands.resolvePatchApproval(taskId, patchId, decision);
     }
     const task = mockState.tasks.find((t) => t.spec.task_id === taskId);
     if (!task) throw new Error(`Task not found: ${taskId}`);
+    if ((task.active_proposal?.patch_id ?? null) !== patchId) {
+      throw new Error("The suggested fix has changed. Review the current fix before continuing.");
+    }
     const now = new Date().toISOString();
     if (decision === "approved") {
       task.state = "completed";
@@ -751,9 +789,7 @@ export const relayApi = {
       task.preflight_summary = "Fix applied and run finished cleanly.";
       const evidenceId = `ev-${taskId.slice(0, 8)}`;
       task.evidence_node_id = evidenceId;
-      const latestArtifact = [...mockState.dag.nodes]
-        .reverse()
-        .find((n) => n.payload.kind === "artifact");
+      const baseArtifact = findCommitArtifact(mockState.dag, task.spec.base_commit_sha);
       if (!mockState.dag.nodes.some((n) => n.id === evidenceId)) {
         mockState.dag.nodes.push({
           id: evidenceId,
@@ -776,10 +812,10 @@ export const relayApi = {
           created_at: now,
           updated_at: now,
         });
-        if (latestArtifact) {
+        if (baseArtifact) {
           mockState.dag.edges.push({
-            id: `edge-${latestArtifact.id}-${evidenceId}`,
-            from: latestArtifact.id,
+            id: `edge-${baseArtifact.id}-${evidenceId}`,
+            from: baseArtifact.id,
             to: evidenceId,
             kind: "produced_from",
           });
@@ -791,7 +827,7 @@ export const relayApi = {
       task.preflight_summary = "Suggested fix dismissed.";
     }
     for (const msg of mockState.chatMessages) {
-      if (msg.approval && msg.approval.task_id === taskId) {
+      if (msg.approval && msg.approval.task_id === taskId && msg.approval.patch_id === patchId) {
         msg.approval.resolved = decision;
       }
     }

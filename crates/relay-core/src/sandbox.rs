@@ -100,7 +100,8 @@ impl WorktreeSandbox {
         Ok(sha.to_owned())
     }
 
-    async fn resolve_commit(&self, rev: &str) -> RelayResult<String> {
+    /// Resolve a revision once so a queued task can be pinned to its immutable Git object.
+    pub async fn resolve_commit(&self, rev: &str) -> RelayResult<String> {
         let output = git_output(git_command(&self.repo_root).args([
             "rev-parse",
             "--verify",
@@ -203,47 +204,18 @@ impl WorktreeSandbox {
                 "read_repo_file requires a repository-relative path".into(),
             ));
         }
-        let mut has_normal = false;
-        for component in rel.components() {
-            match component {
-                Component::Normal(part) => {
-                    has_normal = true;
-                    let name = part.to_string_lossy().to_ascii_lowercase();
-                    if matches!(name.as_str(), ".git" | ".relay" | ".relay-desktop")
-                        || name.starts_with(".env")
-                        || name.ends_with(".db")
-                        || name.ends_with(".db-wal")
-                        || name.ends_with(".db-shm")
-                        || name.ends_with(".pem")
-                        || name.ends_with(".key")
-                    {
-                        return Err(RelayError::Internal(format!(
-                            "access to protected path '{trimmed}' is blocked"
-                        )));
-                    }
-                }
-                Component::CurDir => {}
-                Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
-                    return Err(RelayError::Internal(format!(
-                        "path traversal outside repository is blocked: '{trimmed}'"
-                    )));
-                }
-            }
-        }
-        if !has_normal {
-            return Err(RelayError::Internal("invalid repository file path".into()));
-        }
-
+        validate_repo_read_path(rel, trimmed)?;
         let canonical_root = std::fs::canonicalize(&self.repo_root)?;
         let candidate = self.repo_root.join(rel);
         let canonical_file = std::fs::canonicalize(&candidate).map_err(|err| {
             RelayError::Internal(format!("could not open '{trimmed}': {err}"))
         })?;
-        if !canonical_file.starts_with(&canonical_root) {
-            return Err(RelayError::Internal(format!(
+        let resolved = canonical_file.strip_prefix(&canonical_root).map_err(|_| {
+            RelayError::Internal(format!(
                 "path '{trimmed}' resolves outside the active repository"
-            )));
-        }
+            ))
+        })?;
+        validate_repo_read_path(resolved, trimmed)?;
         let metadata = tokio::fs::metadata(&canonical_file).await?;
         if !metadata.is_file() {
             return Err(RelayError::Internal(format!(
@@ -251,19 +223,25 @@ impl WorktreeSandbox {
             )));
         }
 
-        let bytes = tokio::fs::read(&canonical_file).await?;
+        let cap = max_bytes.max(256);
+        let limit = cap.saturating_add(1).max(4096);
+        let file = tokio::fs::File::open(&canonical_file).await?;
+        let mut bytes = Vec::new();
+        file.take(limit as u64).read_to_end(&mut bytes).await?;
         if bytes.iter().take(4096).any(|b| *b == 0) {
             return Err(RelayError::Internal(format!(
                 "'{trimmed}' appears to be a binary file"
             )));
         }
-        let text = String::from_utf8(bytes).map_err(|_| {
-            RelayError::Internal(format!("'{trimmed}' is not valid UTF-8 text"))
-        })?;
-
-        let cap = max_bytes.max(256);
+        let mut truncated = (bytes.len() as u64) < metadata.len();
+        let text = match std::str::from_utf8(&bytes) {
+            Ok(text) => text,
+            Err(error) if truncated && error.error_len().is_none() => {
+                std::str::from_utf8(&bytes[..error.valid_up_to()]).expect("validated UTF-8 prefix")
+            }
+            Err(_) => return Err(RelayError::Internal(format!("'{trimmed}' is not valid UTF-8 text"))),
+        };
         let mut formatted = String::new();
-        let mut truncated = false;
         for (idx, line) in text.lines().enumerate() {
             let entry = format!("{:>4}: {}\n", idx + 1, line);
             if formatted.len() + entry.len() > cap {
@@ -372,17 +350,18 @@ impl WorktreeSandbox {
         task_id: TaskId,
         handle: &WorktreeHandle,
         base_commit_sha: &str,
-    ) -> RelayResult<()> {
+    ) -> RelayResult<String> {
         let path = handle.worktree_path();
         self.validate_task_worktree(task_id, path, handle.branch_name()).await?;
         let actual =
             git_output(git_command(path).args(["rev-parse", "--verify", "HEAD"])).await?;
-        if output_text(&actual.stdout) != self.resolve_commit(base_commit_sha).await? {
+        let sha = output_text(&actual.stdout);
+        if sha != self.resolve_commit(base_commit_sha).await? {
             return Err(RelayError::Git(
                 "task worktree no longer points to its base commit".into(),
             ));
         }
-        Ok(())
+        Ok(sha)
     }
 
     pub(crate) fn task_worktree(&self, task_id: TaskId) -> RelayResult<(PathBuf, String)> {
@@ -476,6 +455,40 @@ impl WorktreeHandle {
             .await;
         Ok(())
     }
+}
+
+fn validate_repo_read_path(path: &Path, trimmed: &str) -> RelayResult<()> {
+    let mut has_normal = false;
+    for component in path.components() {
+        match component {
+            Component::Normal(part) => {
+                has_normal = true;
+                let name = part.to_string_lossy().to_ascii_lowercase();
+                if matches!(name.as_str(), ".git" | ".relay" | ".relay-desktop")
+                    || name.starts_with(".env")
+                    || name.ends_with(".db")
+                    || name.ends_with(".db-wal")
+                    || name.ends_with(".db-shm")
+                    || name.ends_with(".pem")
+                    || name.ends_with(".key")
+                {
+                    return Err(RelayError::Internal(format!(
+                        "access to protected path '{trimmed}' is blocked"
+                    )));
+                }
+            }
+            Component::CurDir => {}
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
+                return Err(RelayError::Internal(format!(
+                    "path traversal outside repository is blocked: '{trimmed}'"
+                )));
+            }
+        }
+    }
+    if !has_normal {
+        return Err(RelayError::Internal("invalid repository file path".into()));
+    }
+    Ok(())
 }
 
 fn is_within_checkout(path: &Path, root: &Path) -> RelayResult<bool> {
@@ -602,50 +615,33 @@ pub async fn sync_git_head_into_engine(
     sandbox: &WorktreeSandbox,
     device_origin: impl Into<String>,
 ) -> RelayResult<HeadSyncOutcome> {
+    sync_checkout(engine, sandbox, device_origin.into(), false).await
+}
+
+/// An explicit sync-head command selects the physical checkout even if a peer updated the DAG.
+pub async fn sync_git_head_explicitly(
+    engine: &RelayEngine,
+    sandbox: &WorktreeSandbox,
+    device_origin: impl Into<String>,
+) -> RelayResult<HeadSyncOutcome> {
+    sync_checkout(engine, sandbox, device_origin.into(), true).await
+}
+
+async fn sync_checkout(
+    engine: &RelayEngine,
+    sandbox: &WorktreeSandbox,
+    device_origin: String,
+    explicit: bool,
+) -> RelayResult<HeadSyncOutcome> {
+    let checkout = tokio::fs::canonicalize(sandbox.repo_root()).await?;
+    let prior = engine.observed_git_head(&checkout).await?;
     let head_sha = sandbox.head_commit_sha().await?;
-    let snapshot = engine.dag_snapshot(true).await;
-    if snapshot.head_commit_sha.as_deref() == Some(head_sha.as_str()) {
+    if !explicit && prior.as_deref() == Some(head_sha.as_str()) {
         return Ok(HeadSyncOutcome::Unchanged);
     }
 
-    // Find the current active artifact (prefer the node matching head_commit_sha, else newest artifact).
-    let previous_artifact_id = snapshot
-        .head_commit_sha
-        .as_deref()
-        .and_then(|sha| {
-            snapshot.nodes.iter().find_map(|node| match &node.payload {
-                NodeKind::Artifact { git_commit_sha, .. } if git_commit_sha == sha => {
-                    Some(node.id.clone())
-                }
-                _ => None,
-            })
-        })
-        .or_else(|| {
-            snapshot
-                .nodes
-                .iter()
-                .filter(|node| matches!(node.payload, NodeKind::Artifact { .. }))
-                .max_by_key(|node| node.updated_at)
-                .map(|node| node.id.clone())
-        });
-
-    let artifact = build_git_artifact_node(sandbox, head_sha.clone(), device_origin.into()).await?;
-    let short_sha: String = head_sha.chars().take(7).collect();
-    if let Some(old_id) = previous_artifact_id
-        && old_id != artifact.id
-    {
-        let reason = format!("Git commit {short_sha}: {}", artifact.label);
-        let report = engine.supersede_artifact(&old_id, artifact, reason).await?;
-        Ok(HeadSyncOutcome::Superseded {
-            commit_sha: head_sha,
-            report,
-        })
-    } else {
-        engine.upsert_node_and_edges(artifact, Vec::new()).await?;
-        Ok(HeadSyncOutcome::Seeded {
-            commit_sha: head_sha,
-        })
-    }
+    let artifact = build_git_artifact_node(sandbox, head_sha, device_origin).await?;
+    engine.observe_git_artifact(&checkout, artifact, prior.as_deref(), explicit).await
 }
 
 #[cfg(test)]
