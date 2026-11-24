@@ -33,6 +33,7 @@ const RPC_TIMEOUT: Duration = Duration::from_secs(120);
 pub enum NetworkProfile {
     #[default]
     StandardN0,
+    LanOnly,
     LocalOnly,
 }
 
@@ -112,6 +113,15 @@ impl RelayNode {
         tokio::fs::create_dir_all(&blob_dir).await?;
         let endpoint = match config.profile {
             NetworkProfile::StandardN0 => Endpoint::bind(presets::N0).await,
+            NetworkProfile::LanOnly => {
+                Endpoint::builder(presets::Minimal)
+                    .clear_ip_transports()
+                    .bind_addr((Ipv4Addr::UNSPECIFIED, 0))
+                    .map_err(transport_error)?
+                    .relay_mode(RelayMode::Disabled)
+                    .bind()
+                    .await
+            }
             NetworkProfile::LocalOnly => {
                 Endpoint::builder(presets::Minimal)
                     .clear_ip_transports()
@@ -398,20 +408,34 @@ impl NodeState {
     }
 
     async fn connect(&self, addr: EndpointAddr, alpn: &[u8]) -> RelayResult<Connection> {
-        let addr = if self.profile == NetworkProfile::LocalOnly {
-            let mut local = EndpointAddr::new(addr.id);
-            for ip in addr.ip_addrs().filter(|ip| ip.ip().is_loopback()) {
-                local = local.with_ip_addr(*ip);
+        let addr = match self.profile {
+            NetworkProfile::LocalOnly => {
+                let mut local = EndpointAddr::new(addr.id);
+                for ip in addr.ip_addrs().filter(|ip| ip.ip().is_loopback()) {
+                    local = local.with_ip_addr(*ip);
+                }
+                if local.is_empty() {
+                    return Err(RelayError::Transport(format!(
+                        "no registered loopback address for {}",
+                        addr.id
+                    )));
+                }
+                local
             }
-            if local.is_empty() {
-                return Err(RelayError::Transport(format!(
-                    "no registered loopback address for {}",
-                    addr.id
-                )));
+            NetworkProfile::LanOnly => {
+                let mut direct = EndpointAddr::new(addr.id);
+                for ip in addr.ip_addrs() {
+                    direct = direct.with_ip_addr(*ip);
+                }
+                if direct.is_empty() {
+                    return Err(RelayError::Transport(format!(
+                        "no direct LAN IP address for {}",
+                        addr.id
+                    )));
+                }
+                direct
             }
-            local
-        } else {
-            addr
+            NetworkProfile::StandardN0 => addr,
         };
         tokio::time::timeout(CONNECT_TIMEOUT, self.endpoint.connect(addr, alpn))
             .await

@@ -60,8 +60,8 @@ impl Network {
         }
 
         let (online_dir, offline_dir, sandbox) = match mode {
-            RuntimeMode::Host => ("host", "host-offline", sandbox),
-            _ => ("client", "client-offline", None),
+            RuntimeMode::Host => ("host", "host-lan", sandbox),
+            _ => ("client", "client-lan", None),
         };
         let standard = start_node(
             data_dir,
@@ -96,7 +96,7 @@ impl Network {
                     offline_dir,
                     engine,
                     sandbox,
-                    NetworkProfile::LocalOnly,
+                    NetworkProfile::LanOnly,
                 )
                 .await?
             }
