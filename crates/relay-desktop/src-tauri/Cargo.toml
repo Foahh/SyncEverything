@@ -29,6 +29,7 @@ specta.workspace = true
 specta-typescript.workspace = true
 tauri.workspace = true
 tauri-specta.workspace = true
+tempfile = "3"
 tokio.workspace = true
 tracing.workspace = true
 uuid.workspace = true

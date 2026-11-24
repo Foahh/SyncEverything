@@ -776,3 +776,31 @@ async fn l3_generic_cargo_js_adapters_and_mcp_reject_legacy_patch_kinds() {
         );
     }
 }
+
+#[test]
+fn write_manifest_for_repo_with_options_respects_force_flag() {
+    let dir = TempDir::new("force-write");
+    fs::write(
+        dir.join("pyproject.toml"),
+        "[project]\nname = \"demo\"\nversion = \"0.1.0\"\n",
+    )
+    .unwrap();
+
+    let first = write_manifest_for_repo_with_options(dir.path(), None, false).unwrap();
+    assert_eq!(first.package_manager, "uv");
+
+    let err = write_manifest_for_repo_with_options(dir.path(), Some("cargo"), false).unwrap_err();
+    assert!(
+        err.to_string().contains("relay.toml already exists"),
+        "expected already-exists error, got: {err}"
+    );
+    let kept = load_manifest(dir.path()).unwrap();
+    assert_eq!(kept.project.package_manager.as_deref(), Some("uv"));
+
+    let overwritten =
+        write_manifest_for_repo_with_options(dir.path(), Some("cargo"), true).unwrap();
+    assert_eq!(overwritten.package_manager, "cargo");
+    assert_eq!(overwritten.ecosystem, "rust");
+    let reloaded = load_manifest(dir.path()).unwrap();
+    assert_eq!(reloaded.project.package_manager.as_deref(), Some("cargo"));
+}

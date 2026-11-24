@@ -22,6 +22,26 @@
       "offline": "Offline"
     }
   },
+  "workspaceSwitcher": {
+    "triggerLabel": "Switch workspace",
+    "panelTitle": "Recent workspaces",
+    "recentCount": "{{count}} / {{max}}",
+    "emptyTitle": "No recent workspaces yet",
+    "emptyDesc": "Open a local Git repository to track commits and run tasks with SyncEverything.",
+    "activeBadge": "Active",
+    "missingBadge": "Missing",
+    "missingHint": "Folder not found on disk",
+    "noManifestBadge": "No relay.toml",
+    "removeAria": "Remove {{name}} from recent workspaces",
+    "removeBtn": "Remove",
+    "openFolder": "Open Folder…",
+    "initManifest": "Initialize relay.toml",
+    "initializingManifest": "Initializing…",
+    "repoSettings": "Workspace settings",
+    "switching": "Switching…",
+    "switchFailed": "Could not switch workspace.",
+    "initFailed": "Could not initialize relay.toml."
+  },
   "sidebar": {
     "runOnHost": "Run on Host",
     "deviceSection": "Connection",

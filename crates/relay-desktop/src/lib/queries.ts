@@ -13,6 +13,7 @@ export const relayKeys = {
   all: ["relay"] as const,
   status: () => [...relayKeys.all, "status"] as const,
   workspace: () => [...relayKeys.all, "workspace"] as const,
+  recentWorkspaces: () => [...relayKeys.all, "recentWorkspaces"] as const,
   llm: () => [...relayKeys.all, "llm"] as const,
   dag: (includeStale: boolean) => [...relayKeys.all, "dag", includeStale] as const,
   tasks: () => [...relayKeys.all, "tasks"] as const,
@@ -67,6 +68,13 @@ export function useWorkspaceInfo() {
   });
 }
 
+export function useRecentWorkspaces() {
+  return useQuery({
+    queryKey: relayKeys.recentWorkspaces(),
+    queryFn: () => relayApi.listRecentWorkspaces(),
+  });
+}
+
 export function useLlmSettings() {
   return useQuery({
     queryKey: relayKeys.llm(),
@@ -84,10 +92,37 @@ export function useOpenWorkspaceRepo() {
   });
 }
 
+export function useSwitchWorkspace() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (repoPath: string) => relayApi.switchWorkspace(repoPath),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: relayKeys.all });
+    },
+  });
+}
+
+export function useRemoveRecentWorkspace() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (repoPath: string) => relayApi.removeRecentWorkspace(repoPath),
+    onSuccess: (updated) => {
+      queryClient.setQueryData(relayKeys.recentWorkspaces(), updated);
+      void queryClient.invalidateQueries({ queryKey: relayKeys.recentWorkspaces() });
+    },
+  });
+}
+
+export interface InitWorkspaceManifestInput {
+  repoPath?: string | null;
+  packageManager?: string | null;
+}
+
 export function useInitWorkspaceManifest() {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: (repoPath?: string | null) => relayApi.initWorkspaceManifest(repoPath),
+    mutationFn: (input?: InitWorkspaceManifestInput) =>
+      relayApi.initWorkspaceManifest(input?.repoPath ?? null, input?.packageManager ?? null),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: relayKeys.all });
     },

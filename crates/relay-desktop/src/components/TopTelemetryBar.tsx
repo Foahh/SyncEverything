@@ -4,7 +4,6 @@ import { Separator } from "@/components/ui/separator";
 import { cn } from "@/lib/utils";
 import {
   AlertCircle,
-  GitBranch,
   Globe,
   Link2,
   Moon,
@@ -14,37 +13,54 @@ import {
   Sun,
 } from "lucide-react";
 import { useTranslation } from "react-i18next";
-import type { PeerStatus_Serialize } from "../bindings";
+import type {
+  PeerStatus_Serialize,
+  RecentWorkspaceEntry_Serialize,
+  WorkspaceInfo_Serialize,
+} from "../bindings";
 import { setRelayLocale, type RelayLocale } from "../i18n";
+import { WorkspaceSwitcher } from "./WorkspaceSwitcher";
 
 interface TopTelemetryBarProps {
   status: PeerStatus_Serialize | undefined;
-  repoName: string | null;
+  workspace: WorkspaceInfo_Serialize | undefined;
+  recentWorkspaces: RecentWorkspaceEntry_Serialize[];
   headCommitSha: string | null;
   staleCount: number;
   theme: "light" | "dark";
   isCopilotOpen: boolean;
+  isSwitchingWorkspace: boolean;
+  isInitializingManifest: boolean;
   onToggleTheme: () => void;
   onToggleCopilot: () => void;
   onOpenPairModal: () => void;
   onOpenRunTask: () => void;
   onOpenRepoSettings: () => void;
   onOpenLlmSettings: () => void;
+  onSwitchWorkspace: (repoPath: string) => Promise<void>;
+  onRemoveRecentWorkspace: (repoPath: string) => Promise<void>;
+  onInitManifest: () => Promise<void>;
 }
 
 export function TopTelemetryBar({
   status,
-  repoName,
+  workspace,
+  recentWorkspaces,
   headCommitSha,
   staleCount,
   theme,
   isCopilotOpen,
+  isSwitchingWorkspace,
+  isInitializingManifest,
   onToggleTheme,
   onToggleCopilot,
   onOpenPairModal,
   onOpenRunTask,
   onOpenRepoSettings,
   onOpenLlmSettings,
+  onSwitchWorkspace,
+  onRemoveRecentWorkspace,
+  onInitManifest,
 }: TopTelemetryBarProps) {
   const { t, i18n } = useTranslation();
   const currentLang: RelayLocale = i18n.language === "zh-CN" ? "zh-CN" : "en";
@@ -81,30 +97,17 @@ export function TopTelemetryBar({
           /
         </span>
 
-        <Button
-          variant="ghost"
-          size="default"
-          onClick={onOpenRepoSettings}
-          title={t("topbar.switchRepo")}
-          aria-label={t("topbar.switchRepo")}
-          className="min-w-0 gap-2 px-2"
-        >
-          <GitBranch data-icon="inline-start" className="text-muted-foreground" />
-          <span
-            lang={repoName ? "en" : undefined}
-            className="truncate text-xs leading-snug font-medium text-foreground"
-          >
-            {repoName ?? t("topbar.noRepo")}
-          </span>
-          {headCommitSha && (
-            <span
-              lang="en"
-              className="font-mono-tech relay-text-trim hidden rounded-sm bg-muted px-1.5 py-1 text-[11px] leading-none text-muted-foreground sm:inline-flex sm:items-center"
-            >
-              {headCommitSha.slice(0, 7)}
-            </span>
-          )}
-        </Button>
+        <WorkspaceSwitcher
+          workspace={workspace}
+          recentWorkspaces={recentWorkspaces}
+          headCommitSha={headCommitSha}
+          isSwitching={isSwitchingWorkspace}
+          isInitializingManifest={isInitializingManifest}
+          onSwitchWorkspace={onSwitchWorkspace}
+          onRemoveRecentWorkspace={onRemoveRecentWorkspace}
+          onInitManifest={onInitManifest}
+          onOpenRepoSettings={onOpenRepoSettings}
+        />
       </div>
 
       <div className="flex items-center gap-2">

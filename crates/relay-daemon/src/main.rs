@@ -4,11 +4,12 @@ use relay_core::agent::{
     ContextStrategy, InferenceTier, LlmClient, LlmEndpointConfig, compose_context, load_llm_config,
     run_host_task_pipeline,
 };
-use relay_core::contracts::{RuntimeMode, TaskSpec};
+use relay_core::contracts::{RelayManifest, RuntimeMode, TaskSpec};
 use relay_core::engine::RelayEngine;
 use relay_core::mcp::RelayMcpServer;
 use relay_core::sandbox::{
-    HeadSyncOutcome, WorktreeSandbox, load_manifest, sync_git_head_explicitly, sync_git_head_into_engine,
+    HeadSyncOutcome, WorktreeSandbox, generate_manifest_for_repo, load_manifest,
+    sync_git_head_explicitly, sync_git_head_into_engine, write_manifest_for_repo_with_options,
 };
 use relay_core::sync::{NetworkProfile, RelayNode, RelayNodeConfig, RelayNodeEvent};
 use rmcp::ServiceExt;
@@ -102,6 +103,18 @@ enum Commands {
     },
     /// Start isolated Host and Client nodes and check the loopback route.
     SandboxDual,
+    /// Detect project ecosystem and generate a starter `relay.toml` manifest.
+    Init {
+        /// Explicit package manager override (uv, cargo, bun, pnpm, yarn, npm, generic).
+        #[arg(long)]
+        package_manager: Option<String>,
+        /// Overwrite an existing `relay.toml` atomically.
+        #[arg(long)]
+        force: bool,
+        /// Print the detection summary and generated `relay.toml` without writing to disk.
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// Probe the configured Ollama or OpenAI-compatible Cloud LLM endpoint.
     LlmCheck,
     /// Check required external runtimes (git, uv), repository relay.toml, data dir, and optional LLM endpoint.
@@ -241,6 +254,20 @@ async fn main() -> Result<()> {
         )
         .with_writer(std::io::stderr)
         .init();
+
+    if let Commands::Init {
+        package_manager,
+        force,
+        dry_run,
+    } = &cli.command
+    {
+        return run_init(
+            cli.repo_root.as_deref(),
+            package_manager.as_deref(),
+            *force,
+            *dry_run,
+        );
+    }
 
     if matches!(cli.command, Commands::LlmCheck) {
         let cfg = resolve_llm_config(&cli)?;
@@ -382,7 +409,7 @@ async fn main() -> Result<()> {
             }
         }
         Commands::SandboxDual => sandbox_dual(&repo, &cli.data_dir).await?,
-        Commands::LlmCheck | Commands::Doctor { .. } => unreachable!(),
+        Commands::Init { .. } | Commands::LlmCheck | Commands::Doctor { .. } => unreachable!(),
         Commands::SyncHead => {
             let (engine, sandbox) = repo.open(&cli.data_dir).await?;
             let sb = sandbox.context("repository must contain both .git and relay.toml")?;
@@ -791,4 +818,154 @@ async fn sandbox_dual(repo: &Repository, data_dir: &Path) -> Result<()> {
     host_result?;
     client_result?;
     Ok(())
+}
+
+fn run_init(
+    repo_root: Option<&Path>,
+    package_manager: Option<&str>,
+    force: bool,
+    dry_run: bool,
+) -> Result<()> {
+    let raw_root = match repo_root {
+        Some(path) => path.to_path_buf(),
+        None => std::env::current_dir().context("resolve current working directory")?,
+    };
+    let target_root = std::path::absolute(&raw_root)
+        .with_context(|| format!("resolve repository root {}", raw_root.display()))?;
+    anyhow::ensure!(
+        target_root.is_dir(),
+        "repository path is not a directory: {}",
+        target_root.display()
+    );
+
+    let manifest_path = target_root.join("relay.toml");
+    let existed_before = manifest_path.exists();
+
+    let generated = if dry_run {
+        generate_manifest_for_repo(&target_root, package_manager)?
+    } else {
+        write_manifest_for_repo_with_options(&target_root, package_manager, force).map_err(
+            |error| {
+                let message = error.to_string();
+                if !force && message.contains("relay.toml already exists") {
+                    anyhow::anyhow!(
+                        "{message} at {} (pass --force to overwrite)",
+                        manifest_path.display()
+                    )
+                } else {
+                    anyhow::Error::from(error)
+                }
+            },
+        )?
+    };
+
+    let manifest: RelayManifest = toml::from_str(&generated.toml_content)
+        .context("parse generated starter relay.toml")?;
+    let mut preset_names = Vec::with_capacity(manifest.presets.len());
+    if manifest.presets.contains_key(&generated.smoke_preset) {
+        preset_names.push(generated.smoke_preset.as_str());
+    }
+    for name in manifest.presets.keys() {
+        if name != &generated.smoke_preset {
+            preset_names.push(name.as_str());
+        }
+    }
+
+    let source_label = if package_manager.is_some() {
+        "selected"
+    } else {
+        "detected"
+    };
+    let action = if dry_run {
+        if existed_before {
+            format!(
+                "dry-run preview (not written; {} already exists — pass --force to overwrite)",
+                manifest_path.display()
+            )
+        } else {
+            format!(
+                "dry-run preview (not written; target: {})",
+                manifest_path.display()
+            )
+        }
+    } else if existed_before {
+        format!("overwrote {}", manifest_path.display())
+    } else {
+        format!("wrote {}", manifest_path.display())
+    };
+
+    println!("SyncEverything Init — Manifest Summary");
+    println!("  Repository:      {}", target_root.display());
+    println!("  Repo ID:         {}", manifest.project.repo_id);
+    println!("  Project Name:    {}", manifest.project.name);
+    println!(
+        "  Package Manager: {} ({source_label}, ecosystem: {})",
+        generated.package_manager, generated.ecosystem
+    );
+    println!("  Smoke Preset:    {}", generated.smoke_preset);
+    println!("  Presets:         {}", preset_names.join(", "));
+    println!("  Status:          {action}");
+
+    if dry_run {
+        println!();
+        println!("--- relay.toml (dry-run preview) ---");
+        print!("{}", generated.toml_content);
+    }
+
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cli_parses_repo_root_both_before_and_after_init_subcommand() {
+        let before = Cli::try_parse_from([
+            "relay-daemon",
+            "--repo-root",
+            "/tmp/sample-repo",
+            "init",
+            "--package-manager",
+            "cargo",
+            "--force",
+            "--dry-run",
+        ])
+        .expect("parse global --repo-root before init");
+        assert_eq!(before.repo_root, Some(PathBuf::from("/tmp/sample-repo")));
+        match before.command {
+            Commands::Init {
+                package_manager,
+                force,
+                dry_run,
+            } => {
+                assert_eq!(package_manager.as_deref(), Some("cargo"));
+                assert!(force);
+                assert!(dry_run);
+            }
+            other => panic!("expected Init command, got {other:?}"),
+        }
+
+        let after = Cli::try_parse_from([
+            "relay-daemon",
+            "init",
+            "--repo-root",
+            "/tmp/sample-repo",
+            "--dry-run",
+        ])
+        .expect("parse global --repo-root after init");
+        assert_eq!(after.repo_root, Some(PathBuf::from("/tmp/sample-repo")));
+        match after.command {
+            Commands::Init {
+                package_manager,
+                force,
+                dry_run,
+            } => {
+                assert!(package_manager.is_none());
+                assert!(!force);
+                assert!(dry_run);
+            }
+            other => panic!("expected Init command, got {other:?}"),
+        }
+    }
 }

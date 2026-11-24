@@ -90,6 +90,11 @@ impl DesktopRuntime {
         };
 
         let workspace_info = inspect_workspace(repo_root.as_deref());
+        if let Some(root) = repo_root.as_deref()
+            && let Err(error) = crate::recent_workspaces::record_recent_workspace(&base_data_dir, root)
+        {
+            tracing::warn!(%error, "Unable to record recent workspace");
+        }
         let repo_id = workspace_info.repo_id.clone();
         let repo_data_dir = base_data_dir
             .join("repos")
@@ -196,6 +201,26 @@ impl DesktopRuntime {
         let path = self.base_data_dir.join("workspace.json");
         std::fs::write(path, serde_json::to_string_pretty(&prefs)?)?;
         Ok(())
+    }
+
+    pub(crate) fn list_recent_workspaces(
+        &self,
+    ) -> RelayResult<Vec<crate::recent_workspaces::RecentWorkspaceEntry>> {
+        crate::recent_workspaces::list_recent_workspaces(&self.base_data_dir)
+    }
+
+    pub(crate) fn record_recent_workspace(
+        &self,
+        repo_root: &Path,
+    ) -> RelayResult<Vec<crate::recent_workspaces::RecentWorkspaceEntry>> {
+        crate::recent_workspaces::record_recent_workspace(&self.base_data_dir, repo_root)
+    }
+
+    pub(crate) fn remove_recent_workspace(
+        &self,
+        repo_path: &Path,
+    ) -> RelayResult<Vec<crate::recent_workspaces::RecentWorkspaceEntry>> {
+        crate::recent_workspaces::remove_recent_workspace(&self.base_data_dir, repo_path)
     }
 
     pub(crate) async fn llm_settings_view(&self) -> LlmSettingsView {
@@ -990,11 +1015,13 @@ fn inspect_workspace(repo_root: Option<&Path>) -> WorkspaceInfo {
             mcp_data_dir: None,
             is_git_repo: false,
             has_manifest: false,
+            package_manager: None,
             smoke_preset: String::new(),
             presets: Vec::new(),
         };
     };
     let is_git_repo = root.join(".git").exists();
+    let detected_pm = crate::recent_workspaces::detect_repo_package_manager(root);
     match load_manifest(root) {
         Ok(manifest) => {
             let presets = manifest
@@ -1015,6 +1042,7 @@ fn inspect_workspace(repo_root: Option<&Path>) -> WorkspaceInfo {
                 mcp_data_dir: None,
                 is_git_repo,
                 has_manifest: true,
+                package_manager: manifest.project.package_manager.or(detected_pm),
                 smoke_preset: manifest.project.smoke_preset,
                 presets,
             }
@@ -1031,6 +1059,7 @@ fn inspect_workspace(repo_root: Option<&Path>) -> WorkspaceInfo {
                 mcp_data_dir: None,
                 is_git_repo,
                 has_manifest: root.join("relay.toml").exists(),
+                package_manager: detected_pm,
                 smoke_preset: String::new(),
                 presets: Vec::new(),
             }

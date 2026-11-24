@@ -10,7 +10,10 @@ export const commands = {
 	getWorkspaceInfo: (options?: InvokeOptions) => __TAURI_INVOKE<WorkspaceInfo_Serialize>("get_workspace_info", undefined, options),
 	pickRepositoryFolder: (options?: InvokeOptions) => __TAURI_INVOKE<string | null>("pick_repository_folder", undefined, options),
 	openWorkspaceRepo: (repoPath: string, options?: InvokeOptions) => __TAURI_INVOKE<WorkspaceInfo_Serialize>("open_workspace_repo", { repoPath }, options),
-	initWorkspaceManifest: (repoPath: string | null, options?: InvokeOptions) => __TAURI_INVOKE<WorkspaceInfo_Serialize>("init_workspace_manifest", { repoPath }, options),
+	listRecentWorkspaces: (options?: InvokeOptions) => __TAURI_INVOKE<RecentWorkspaceEntry_Serialize[]>("list_recent_workspaces", undefined, options),
+	switchWorkspace: (repoPath: string, options?: InvokeOptions) => __TAURI_INVOKE<WorkspaceInfo_Serialize>("switch_workspace", { repoPath }, options),
+	removeRecentWorkspace: (repoPath: string, options?: InvokeOptions) => __TAURI_INVOKE<RecentWorkspaceEntry_Serialize[]>("remove_recent_workspace", { repoPath }, options),
+	initWorkspaceManifest: (repoPath: string | null, packageManager: string | null, options?: InvokeOptions) => __TAURI_INVOKE<WorkspaceInfo_Serialize>("init_workspace_manifest", { repoPath, packageManager }, options),
 	refreshGitHead: (options?: InvokeOptions) => __TAURI_INVOKE<boolean>("refresh_git_head", undefined, options),
 	getLlmSettings: (options?: InvokeOptions) => __TAURI_INVOKE<LlmSettingsView_Serialize>("get_llm_settings", undefined, options),
 	saveLlmSettings: (update: LlmSettingsUpdate_Deserialize, options?: InvokeOptions) => __TAURI_INVOKE<LlmSettingsView_Serialize>("save_llm_settings", { update }, options),
@@ -302,6 +305,31 @@ export type PresetInfo = {
 	allowed_params: string[],
 };
 
+/**  Specta-safe recent workspace descriptor returned to the desktop UI. */
+export type RecentWorkspaceEntry = RecentWorkspaceEntry_Serialize | RecentWorkspaceEntry_Deserialize;
+
+/**  Specta-safe recent workspace descriptor returned to the desktop UI. */
+export type RecentWorkspaceEntry_Deserialize = {
+	path: string,
+	repo_id: string,
+	name: string,
+	package_manager?: string | null,
+	last_opened_at: string,
+	exists: boolean,
+	has_manifest: boolean,
+};
+
+/**  Specta-safe recent workspace descriptor returned to the desktop UI. */
+export type RecentWorkspaceEntry_Serialize = {
+	path: string,
+	repo_id: string,
+	name: string,
+	package_manager: string | null,
+	last_opened_at: string,
+	exists: boolean,
+	has_manifest: boolean,
+};
+
 export type RelayStateChangedEvent = {
 	kind: string,
 	message: string,
@@ -396,6 +424,7 @@ export type WorkspaceInfo_Deserialize = {
 	mcp_data_dir?: string | null,
 	is_git_repo: boolean,
 	has_manifest: boolean,
+	package_manager?: string | null,
 	smoke_preset: string,
 	presets: PresetInfo[],
 };
@@ -407,6 +436,7 @@ export type WorkspaceInfo_Serialize = {
 	mcp_data_dir: string | null,
 	is_git_repo: boolean,
 	has_manifest: boolean,
+	package_manager: string | null,
 	smoke_preset: string,
 	presets: PresetInfo[],
 };

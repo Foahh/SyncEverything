@@ -1,6 +1,8 @@
+pub mod recent_workspaces;
 mod runtime;
 
 use chrono::{DateTime, Utc};
+use recent_workspaces::RecentWorkspaceEntry;
 use relay_core::agent::{
     AgentApprovalCard, AgentChatMessage, AgentToolTrace, InferenceTier, LlmProbeResult,
     LlmSettingsView,
@@ -77,6 +79,7 @@ pub struct WorkspaceInfo {
     pub mcp_data_dir: Option<String>,
     pub is_git_repo: bool,
     pub has_manifest: bool,
+    pub package_manager: Option<String>,
     pub smoke_preset: String,
     pub presets: Vec<PresetInfo>,
 }
@@ -125,6 +128,9 @@ impl RuntimeManager {
         let _guard = self.lifecycle.lock().await;
         let mut current = self.current.write().await;
         if let Some(active) = current.as_ref() && active.matches_workspace(&validated) {
+            if let Err(error) = active.record_recent_workspace(&validated) {
+                tracing::warn!(%error, "Unable to refresh recent workspace entry");
+            }
             return Ok(active.workspace_info());
         }
         let shares_storage = current.as_ref().is_some_and(|runtime| runtime.shares_storage(&validated));
@@ -204,10 +210,50 @@ async fn open_workspace_repo(
 
 #[tauri::command]
 #[specta::specta]
+async fn list_recent_workspaces(
+    app: AppHandle,
+    state: State<'_, RuntimeManager>,
+) -> Result<Vec<RecentWorkspaceEntry>, String> {
+    state
+        .get_or_init(&app)
+        .await?
+        .list_recent_workspaces()
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+#[specta::specta]
+async fn switch_workspace(
+    app: AppHandle,
+    state: State<'_, RuntimeManager>,
+    repo_path: String,
+) -> Result<WorkspaceInfo, String> {
+    state.switch_repo(&app, repo_path).await
+}
+
+#[tauri::command]
+#[specta::specta]
+async fn remove_recent_workspace(
+    app: AppHandle,
+    state: State<'_, RuntimeManager>,
+    repo_path: String,
+) -> Result<Vec<RecentWorkspaceEntry>, String> {
+    let updated = state
+        .get_or_init(&app)
+        .await?
+        .remove_recent_workspace(Path::new(repo_path.trim()))
+        .map_err(|error| error.to_string())?;
+    emit_state(&app, "recent_workspaces_changed", "Updated recent workspaces");
+    Ok(updated)
+}
+
+#[tauri::command]
+#[specta::specta]
 async fn init_workspace_manifest(
     app: AppHandle,
     state: State<'_, RuntimeManager>,
     repo_path: Option<String>,
+    package_manager: Option<String>,
 ) -> Result<WorkspaceInfo, String> {
     let target = match repo_path
         .map(|raw| raw.trim().to_owned())
@@ -224,10 +270,17 @@ async fn init_workspace_manifest(
         }
     };
     let validated = validate_user_repo(&target).map_err(|error| error.to_string())?;
-    relay_core::sandbox::write_default_manifest(&validated).map_err(|error| error.to_string())?;
-    state
+    relay_core::sandbox::write_manifest_for_repo(&validated, package_manager.as_deref())
+        .map_err(|error| error.to_string())?;
+    let info = state
         .switch_repo(&app, validated.to_string_lossy().into_owned())
-        .await
+        .await?;
+    emit_state(
+        &app,
+        "workspace_changed",
+        format!("Initialized relay.toml for {}", info.repo_id),
+    );
+    Ok(info)
 }
 
 #[tauri::command]
@@ -531,6 +584,9 @@ pub fn specta_builder() -> Builder<tauri::Wry> {
             get_workspace_info,
             pick_repository_folder,
             open_workspace_repo,
+            list_recent_workspaces,
+            switch_workspace,
+            remove_recent_workspace,
             init_workspace_manifest,
             refresh_git_head,
             get_llm_settings,

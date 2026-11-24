@@ -26,13 +26,16 @@ import {
   useDagSnapshot,
   useInitWorkspaceManifest,
   useLlmSettings,
+  useRecentWorkspaces,
   useRelayEventSync,
+  useRemoveRecentWorkspace,
   useResetPreviewDemo,
   useResolvePatchApproval,
   useRuntimeStatus,
   useSimulateArtifactUpdate,
   useSubmitTask,
   useSwitchRuntimeMode,
+  useSwitchWorkspace,
   useTaskLog,
   useTasks,
   useUpsertDagNode,
@@ -61,6 +64,7 @@ export default function App() {
 
   const { data: status } = useRuntimeStatus();
   const { data: workspace } = useWorkspaceInfo();
+  const { data: recentWorkspaces = [] } = useRecentWorkspaces();
   const { data: llmSettings } = useLlmSettings();
   const { data: dag } = useDagSnapshot(includeStale);
   const { data: tasks = [] } = useTasks();
@@ -68,6 +72,8 @@ export default function App() {
   const { logsByTask, clearTaskLogs } = useTaskLogStream();
 
   const switchMode = useSwitchRuntimeMode();
+  const switchWorkspace = useSwitchWorkspace();
+  const removeRecentWorkspace = useRemoveRecentWorkspace();
   const submitTask = useSubmitTask();
   const cancelTask = useCancelTask();
   const resolveApproval = useResolvePatchApproval();
@@ -240,21 +246,44 @@ export default function App() {
     });
   };
 
+  const handleSwitchWorkspace = async (repoPath: string) => {
+    await switchWorkspace.mutateAsync(repoPath);
+    setSelectedNodeId(null);
+    setSelectedTaskId(null);
+    clearTaskLogs();
+    setActiveApprovalTaskId(null);
+    setInspectorMode("node");
+  };
+
+  const handleRemoveRecentWorkspace = async (repoPath: string) => {
+    await removeRecentWorkspace.mutateAsync(repoPath);
+  };
+
+  const handleInitWorkspaceManifest = async () => {
+    await initManifest.mutateAsync({ repoPath: workspace?.repo_root ?? null });
+  };
+
   return (
     <div className="flex h-screen w-screen flex-col overflow-hidden bg-background text-foreground">
       <TopTelemetryBar
         status={status}
-        repoName={workspace?.repo_root ? workspace.name || workspace.repo_id : null}
+        workspace={workspace}
+        recentWorkspaces={recentWorkspaces}
         headCommitSha={dag?.head_commit_sha ?? null}
         staleCount={dag?.stale_count ?? 0}
         theme={theme}
         isCopilotOpen={rightRailOpen && rightRailTab === "agent"}
+        isSwitchingWorkspace={switchWorkspace.isPending}
+        isInitializingManifest={initManifest.isPending}
         onToggleTheme={toggleTheme}
         onToggleCopilot={handleToggleCopilot}
         onOpenPairModal={openPairing}
         onOpenRunTask={() => setTaskModalOpen(true)}
         onOpenRepoSettings={() => handleOpenSettings("repo")}
         onOpenLlmSettings={() => handleOpenSettings("llm")}
+        onSwitchWorkspace={handleSwitchWorkspace}
+        onRemoveRecentWorkspace={handleRemoveRecentWorkspace}
+        onInitManifest={handleInitWorkspaceManifest}
       />
 
       <main className="flex min-h-0 flex-1 overflow-hidden">
@@ -297,7 +326,7 @@ export default function App() {
           onOpenRepoSettings={() => handleOpenSettings("repo")}
           manifestError={initManifest.error ? formatErrorMessage(initManifest.error, t) : null}
           onDismissManifestError={() => initManifest.reset()}
-          onGenerateManifest={() => initManifest.mutate(workspace?.repo_root)}
+          onGenerateManifest={() => initManifest.mutate({ repoPath: workspace?.repo_root ?? null })}
         />
 
         <RightWorkbenchRail

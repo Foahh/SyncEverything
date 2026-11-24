@@ -22,6 +22,26 @@
       "offline": "离线"
     }
   },
+  "workspaceSwitcher": {
+    "triggerLabel": "切换工作区",
+    "panelTitle": "最近打开的工作区",
+    "recentCount": "{{count}} / {{max}}",
+    "emptyTitle": "暂无最近工作区",
+    "emptyDesc": "打开一个本地 Git 仓库，即可用 SyncEverything 追踪提交并运行任务。",
+    "activeBadge": "当前",
+    "missingBadge": "路径不存在",
+    "missingHint": "磁盘上未找到该目录",
+    "noManifestBadge": "缺少 relay.toml",
+    "removeAria": "从最近工作区移除 {{name}}",
+    "removeBtn": "移除",
+    "openFolder": "打开文件夹…",
+    "initManifest": "初始化 relay.toml",
+    "initializingManifest": "正在初始化…",
+    "repoSettings": "工作区设置",
+    "switching": "正在切换…",
+    "switchFailed": "无法切换工作区。",
+    "initFailed": "无法初始化 relay.toml。"
+  },
   "sidebar": {
     "runOnHost": "交给主机运行",
     "deviceSection": "设备连接",

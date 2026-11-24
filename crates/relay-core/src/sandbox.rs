@@ -13,6 +13,7 @@ pub use pm::{
     adapter_by_name, detect_adapter, diff_dependencies, generate_manifest_for_repo,
     list_supported_package_managers, resolve_adapter, resolve_adapter_for_repo,
     supported_package_manager_names, validate_package_manager_name, write_manifest_for_repo,
+    write_manifest_for_repo_with_options,
 };
 
 use crate::contracts::{

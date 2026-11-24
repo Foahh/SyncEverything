@@ -468,18 +468,31 @@ pub fn write_manifest_for_repo(
     repo_root: &Path,
     package_manager_override: Option<&str>,
 ) -> RelayResult<GeneratedManifest> {
+    write_manifest_for_repo_with_options(repo_root, package_manager_override, false)
+}
+
+/// Atomically write a starter `relay.toml` into `repo_root`, optionally overwriting an existing file when `force` is `true`.
+pub fn write_manifest_for_repo_with_options(
+    repo_root: &Path,
+    package_manager_override: Option<&str>,
+    force: bool,
+) -> RelayResult<GeneratedManifest> {
     let target = repo_root.join("relay.toml");
     let generated = generate_manifest_for_repo(repo_root, package_manager_override)?;
     let mut candidate = tempfile::NamedTempFile::new_in(repo_root)?;
     candidate.write_all(generated.toml_content.as_bytes())?;
     candidate.as_file().sync_all()?;
-    candidate.persist_noclobber(target).map_err(|error| {
-        if error.error.kind() == ErrorKind::AlreadyExists {
-            RelayError::Internal("relay.toml already exists in this repository".into())
-        } else {
-            error.error.into()
-        }
-    })?;
+    if force {
+        candidate.persist(target).map_err(|error| error.error)?;
+    } else {
+        candidate.persist_noclobber(target).map_err(|error| {
+            if error.error.kind() == ErrorKind::AlreadyExists {
+                RelayError::Internal("relay.toml already exists in this repository".into())
+            } else {
+                error.error.into()
+            }
+        })?;
+    }
     Ok(generated)
 }
 

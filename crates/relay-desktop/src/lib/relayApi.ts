@@ -14,6 +14,7 @@ import {
   type LlmSettingsUpdate_Deserialize,
   type LlmSettingsView_Serialize,
   type PeerStatus_Serialize,
+  type RecentWorkspaceEntry_Serialize,
   type RelayStateChangedEvent,
   type RuntimeMode,
   type StalePropagationReport,
@@ -24,6 +25,12 @@ import {
   type WorkspaceInfo_Serialize,
 } from "../bindings";
 import { isTaskCancellable } from "./taskLogStream";
+import {
+  MAX_RECENT_WORKSPACES,
+  detectPreviewPackageManager,
+  normalizeWorkspacePathKey,
+  sortAndCapRecentWorkspaces,
+} from "./workspaceSwitcher";
 
 export interface ApprovalInput {
   taskId: string;
@@ -101,6 +108,7 @@ function createInitialMockState(): MockWorkspaceState {
       mcp_data_dir: null,
       is_git_repo: false,
       has_manifest: false,
+      package_manager: null,
       smoke_preset: "",
       presets: [],
     },
@@ -133,9 +141,33 @@ function createInitialMockState(): MockWorkspaceState {
 
 let mockState: MockWorkspaceState = createInitialMockState();
 const previewWorkspaces = new Map<string, MockWorkspaceState>();
+let previewRecentWorkspaces: RecentWorkspaceEntry_Serialize[] = [];
+let lastPreviewOpenedMs = 0;
 const mockChatListeners = new Set<(event: AgentChatStreamEvent_Serialize) => void>();
 const mockTaskLogListeners = new Set<(event: TaskLogStreamEvent) => void>();
 let activeMockChatAbort: { cancelled: boolean } | null = null;
+
+function nextPreviewTimestamp(): string {
+  lastPreviewOpenedMs = Math.max(Date.now(), lastPreviewOpenedMs + 1);
+  return new Date(lastPreviewOpenedMs).toISOString();
+}
+
+function recordPreviewRecentWorkspace(workspace: WorkspaceInfo_Serialize): void {
+  if (!workspace.repo_root) return;
+  const entry: RecentWorkspaceEntry_Serialize = {
+    path: workspace.repo_root,
+    repo_id: workspace.repo_id,
+    name: workspace.name || workspace.repo_id,
+    package_manager: workspace.package_manager,
+    last_opened_at: nextPreviewTimestamp(),
+    exists: true,
+    has_manifest: workspace.has_manifest,
+  };
+  previewRecentWorkspaces = sortAndCapRecentWorkspaces(
+    [entry, ...previewRecentWorkspaces],
+    MAX_RECENT_WORKSPACES,
+  );
+}
 
 function emitMockChatEvent(event: AgentChatStreamEvent_Serialize): void {
   for (const listener of mockChatListeners) {
@@ -344,6 +376,8 @@ export function resetBrowserPreviewState(): void {
   }
   mockState = createInitialMockState();
   previewWorkspaces.clear();
+  previewRecentWorkspaces = [];
+  lastPreviewOpenedMs = 0;
 }
 
 export const relayApi = {
@@ -372,22 +406,55 @@ export const relayApi = {
     if (isTauriRuntime()) {
       return commands.openWorkspaceRepo(repoPath);
     }
+    return this.switchWorkspace(repoPath);
+  },
+
+  async listRecentWorkspaces(): Promise<RecentWorkspaceEntry_Serialize[]> {
+    if (isTauriRuntime()) {
+      return commands.listRecentWorkspaces();
+    }
+    return structuredClone(
+      sortAndCapRecentWorkspaces(previewRecentWorkspaces, MAX_RECENT_WORKSPACES),
+    );
+  },
+
+  async switchWorkspace(repoPath: string): Promise<WorkspaceInfo_Serialize> {
+    if (isTauriRuntime()) {
+      return commands.switchWorkspace(repoPath);
+    }
     const trimmed = repoPath.trim();
     if (!trimmed) {
       throw new Error("Repository path cannot be empty.");
     }
-    if (mockState.workspace.repo_root === trimmed) return structuredClone(mockState.workspace);
+    const key = normalizeWorkspacePathKey(trimmed);
+    const existingRecent = previewRecentWorkspaces.find(
+      (entry) => normalizeWorkspacePathKey(entry.path) === key,
+    );
+    if (existingRecent && !existingRecent.exists) {
+      throw new Error(`Folder does not exist: ${trimmed}`);
+    }
+    if (
+      mockState.workspace.repo_root &&
+      normalizeWorkspacePathKey(mockState.workspace.repo_root) === key
+    ) {
+      recordPreviewRecentWorkspace(mockState.workspace);
+      return structuredClone(mockState.workspace);
+    }
     if (activeMockChatAbort) {
       activeMockChatAbort.cancelled = true;
       activeMockChatAbort = null;
     }
-    if (mockState.workspace.repo_root)
-      previewWorkspaces.set(mockState.workspace.repo_root, mockState);
-    const saved = previewWorkspaces.get(trimmed);
+    if (mockState.workspace.repo_root) {
+      previewWorkspaces.set(normalizeWorkspacePathKey(mockState.workspace.repo_root), mockState);
+    }
+    const saved = previewWorkspaces.get(key);
     const llm = mockState.llm;
     mockState = saved ?? createInitialMockState();
     mockState.llm = llm;
-    if (saved) return structuredClone(mockState.workspace);
+    if (saved) {
+      recordPreviewRecentWorkspace(mockState.workspace);
+      return structuredClone(mockState.workspace);
+    }
     const slug = trimmed.split(/[\\/]/).filter(Boolean).pop() ?? "workspace";
     mockState.workspace = {
       repo_id: slug,
@@ -396,24 +463,44 @@ export const relayApi = {
       mcp_data_dir: null,
       is_git_repo: true,
       has_manifest: false,
+      package_manager: detectPreviewPackageManager(trimmed),
       smoke_preset: "",
       presets: [],
     };
     mockState.dag.repo_id = slug;
+    recordPreviewRecentWorkspace(mockState.workspace);
     return structuredClone(mockState.workspace);
   },
 
-  async initWorkspaceManifest(repoPath?: string | null): Promise<WorkspaceInfo_Serialize> {
+  async removeRecentWorkspace(repoPath: string): Promise<RecentWorkspaceEntry_Serialize[]> {
     if (isTauriRuntime()) {
-      return commands.initWorkspaceManifest(repoPath ?? null);
+      return commands.removeRecentWorkspace(repoPath);
+    }
+    const key = normalizeWorkspacePathKey(repoPath);
+    previewRecentWorkspaces = previewRecentWorkspaces.filter(
+      (entry) => normalizeWorkspacePathKey(entry.path) !== key,
+    );
+    return structuredClone(previewRecentWorkspaces);
+  },
+
+  async initWorkspaceManifest(
+    repoPath?: string | null,
+    packageManager?: string | null,
+  ): Promise<WorkspaceInfo_Serialize> {
+    if (isTauriRuntime()) {
+      return commands.initWorkspaceManifest(repoPath ?? null, packageManager ?? null);
     }
     const effectivePath = (repoPath ?? mockState.workspace.repo_root ?? "").trim();
     if (!effectivePath) {
       throw new Error("Open a local Git repository first.");
     }
-    await relayApi.openWorkspaceRepo(effectivePath);
+    await relayApi.switchWorkspace(effectivePath);
     if (mockState.workspace.has_manifest) throw new Error("relay.toml already exists.");
     const slug = effectivePath.split(/[\\/]/).filter(Boolean).pop() ?? "workspace";
+    const resolvedPm =
+      packageManager?.trim() ||
+      mockState.workspace.package_manager ||
+      detectPreviewPackageManager(effectivePath);
     mockState.workspace = {
       repo_id: slug,
       name: slug,
@@ -421,6 +508,7 @@ export const relayApi = {
       mcp_data_dir: null,
       is_git_repo: true,
       has_manifest: true,
+      package_manager: resolvedPm,
       smoke_preset: "check",
       presets: [
         {
@@ -432,6 +520,7 @@ export const relayApi = {
         },
       ],
     };
+    recordPreviewRecentWorkspace(mockState.workspace);
     return structuredClone(mockState.workspace);
   },
 
