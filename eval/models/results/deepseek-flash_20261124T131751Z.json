@@ -1,0 +1,110 @@
+{
+  "model": "deepseek-flash",
+  "base_url": "https://api.deepseek.com",
+  "dry_run": false,
+  "timestamp_utc": "2026-11-24T13:17:51Z",
+  "summary": {
+    "passed_scenarios": 3,
+    "total_scenarios": 4,
+    "pass_rate_pct": 75.0,
+    "avg_tool_recall": 0.917,
+    "stale_hallucination_rate_pct": 0.0,
+    "loop_abort_rate_pct": 0.0,
+    "self_heal_passed": false,
+    "median_latency_ms": 5344.4,
+    "total_tokens": 39168
+  },
+  "scenarios": [
+    {
+      "scenario_id": "S1_sync_and_handoffs",
+      "passed": true,
+      "expected_tools": [
+        "inspect_sync_status",
+        "list_handoffs"
+      ],
+      "called_tools": [
+        "inspect_sync_status",
+        "list_handoffs"
+      ],
+      "tool_recall": 1.0,
+      "stale_hallucination": false,
+      "loop_aborted": false,
+      "self_heal_verified": null,
+      "turns": 3,
+      "latency_ms": 3801.2,
+      "prompt_tokens": 4598,
+      "completion_tokens": 622,
+      "final_answer": "## Relay Sync Status\n\n| Field | Value |\n|---|---|\n| Runtime mode | **`host`** |\n| Connected | \u274c `false` |\n| Transport path | **`offline`** |\n| RTT | `null` (no peer) |\n| Remote node | `null` (unpaired) |\n| Local node ID | *(empty)* |\n| Last synced commit | `913c3009d5e927d54abf3960a1ebe1c64de8943e` |\n| Pending outbox | **0** |\n| Handoffs found | **1** |\n\n**Latest synced / active commit SHA:** `913c3009d5e927d54abf3960a1ebe1c64de8943e` \u2014 consistent across both the sync status and the single handoff's `base_commit_sha`.\n\n### Recent Handoffs (1 total)\n\n**1. `01a20db4-0cc6-7411-84ea-051b7bf25cc8`**\n- Repo: `forecast-bench`\n- Source device: `cli`\n- Base commit: `913c3009d5e927d54abf3960a1ebe1c64de8943e`\n- Summary: \"Initial smoke check\"\n- Active tasks: **1**\n- Stale evidence: **0**\n- Created: `2026-11-24T13:17:13.286Z`\n\n### Notes / Caveats\n- **Sync is offline and unpaired**: `connected: false`, empty `local_node_id`, and `remote_node_id: null`. No P2P transport is active, so nothing is being pushed or pulled right now.\n- **Outbox is empty (0)**, so no work is stranded \u2014 nothing is silently awaiting upload. Once a peer is paired, the next sync should be a clean fast-forward from `913c3009`.\n- The report is limited to what Relay returned. If you want to act on the one active task in the `forecast-bench` handoff, I'd first call `get_dag_snapshot` to confirm evidence freshness at `913c3009` before planning any experiment.",
+      "notes": []
+    },
+    {
+      "scenario_id": "S2_stale_evidence_trap",
+      "passed": true,
+      "expected_tools": [
+        "get_dag_snapshot"
+      ],
+      "called_tools": [
+        "get_dag_snapshot",
+        "check_env_diff"
+      ],
+      "tool_recall": 1.0,
+      "stale_hallucination": false,
+      "loop_aborted": false,
+      "self_heal_verified": null,
+      "turns": 3,
+      "latency_ms": 6887.5,
+      "prompt_tokens": 9469,
+      "completion_tokens": 1135,
+      "final_answer": "## Answer: There is no verified MAE for the current HEAD commit\n\n**HEAD: `87118d4509723733e271ec9214e901f7563900cd`** \u2014 \"Shift forecast blend to 0.4 MA / 0.6 EWMA\" (modifies `src/forecast.py`)\n\n### What the DAG says\n- **stale_count: 1** \u2014 the single evidence node in the graph is quarantined.\n- The only MAE evidence, `evidence:01a20db4-1eee-774f-8c08-c7f6b976c5a2` (`train_grid`), is flagged **`stale`**:\n  - `caused_by`: `artifact:87118d45\u2026` (the current HEAD)\n  - `reason`: *Git commit 87118d4: Shift forecast blend to 0.4 MA / 0.6 EWMA*\n- It was `produced_from` the parent commit `1266251ceefe50e5faaef61afd876d183fe7663b` (Initial forecast baseline), which HEAD `supersedes`.\n\n### Why I am not quoting a number\nThe `train_grid` run was measured **before** the blend-weight change in `src/forecast.py` landed as HEAD. Since the forecast blend went from the baseline weights to 0.4 MA / 0.6 EWMA, that measurement describes older code and **cannot be attributed to `87118d4`**. Per policy I did not read its log tail, and I will not present its value as the current best MAE \u2014 doing so would be a stale-metric citation.\n\n### Re-run readiness (verified)\n`check_env_diff` on HEAD: `in_sync: true`, `missing_packages: []`, matching fingerprint `uv:blake3:a1d5417e68ea552e`. So the environment has not drifted \u2014 the staleness is purely code-driven, and a fresh `train_grid` run on HEAD should not hit dependency issues.\n\n### Recommended next step\nQueue a `train_grid` experiment against HEAD `87118d45\u2026` to produce fresh evidence. Once you give me the task UUIDv7, I'll follow the standard path: `run_preflight_in_worktree(task_id)` \u2192 `approve_and_execute_task(task_id)`, and only then report a verified best MAE for this commit.\n\nFor reference, the baseline commit's grid search spanned windows 7 / 14 / 28 days \u2014 but I'm noting that only as the structure of the sweep, not as a valid metric for HEAD.",
+      "notes": []
+    },
+    {
+      "scenario_id": "S3_env_diff_diagnosis",
+      "passed": true,
+      "expected_tools": [
+        "check_env_diff"
+      ],
+      "called_tools": [
+        "check_env_diff"
+      ],
+      "tool_recall": 1.0,
+      "stale_hallucination": false,
+      "loop_aborted": false,
+      "self_heal_verified": null,
+      "turns": 2,
+      "latency_ms": 3382.7,
+      "prompt_tokens": 4509,
+      "completion_tokens": 446,
+      "final_answer": "## Environment Diff \u2014 Host vs. `4ecfe768`\n\n**Commit:** `4ecfe768e0f98f7bff90eb84b301028860de2d7d`\n**In sync:** \u274c No\n\n**Fingerprints**\n| Environment | Fingerprint |\n|---|---|\n| Repo (`pyproject.toml` + `uv.lock`) | `uv:blake3:5652db561977cfee` |\n| Host | `uv:blake3:0996be2243db5a38` |\n\n### Missing Python Packages\n- **`scipy`**\n\n### Notes\n- The fingerprints diverge, and the single delta is `scipy` \u2014 it's declared in the repo's lockfile for this commit but is not present in the Host environment.\n- Any experiment task targeting `4ecfe768` that imports `scipy` (or `scipy.*`) will fail smoke preflight with a `ModuleNotFoundError`. That failure is the expected, deterministic trigger for the self-healing path: `run_preflight_in_worktree(task_id)` \u2192 on failure, `propose_worktree_patch(patch_kind = \"uv_spec\", content = \"scipy>=1.14\")` \u2192 re-verify \u2192 `approve_and_execute_task(task_id, patch_id)`.\n- I have not run that workflow, since you only asked for the diff and no `task_id` is in scope. Note that I won't install anything into your Host or main working tree outside of a queued task's isolated worktree.\n\nIf you want, queue (or point me at) a task targeting this commit and I'll run the preflight and prepare the `uv_spec` patch for your approval.",
+      "notes": []
+    },
+    {
+      "scenario_id": "S4_code_defect_self_heal",
+      "passed": false,
+      "expected_tools": [
+        "run_preflight_in_worktree",
+        "propose_worktree_patch",
+        "approve_and_execute_task"
+      ],
+      "called_tools": [
+        "get_dag_snapshot",
+        "run_preflight_in_worktree",
+        "propose_worktree_patch",
+        "propose_worktree_patch"
+      ],
+      "tool_recall": 0.667,
+      "stale_hallucination": false,
+      "loop_aborted": false,
+      "self_heal_verified": false,
+      "turns": 5,
+      "latency_ms": 16164.0,
+      "prompt_tokens": 15115,
+      "completion_tokens": 3274,
+      "final_answer": "## Stopped \u2014 patch could not be landed (2/2 patch attempts used)\n\n**Task:** `01a20db4-5d62-776b-a1de-9e586c1e41c5`\n**Base commit:** `6d2df8619d1afdaa8c46233fb4daa3833ccff7ab` (matches `head_commit_sha` in the DAG snapshot)\n**Worktree:** `...\\data\\worktrees\\a1de9e586c1e41c5` on branch `relay/worktree/a1de9e586c1e41c5` \u2014 the main working tree was never touched.\n\n### Steps taken\n1. `get_dag_snapshot` \u2192 1 node (`artifact:6d2df86\u2026` labeling *\"Reference DEFAULT_ALPHA constant\"*), `stale_count: 0`, working tree clean, changed files `[\"src/forecast.py\"]`. No evidence nodes exist yet, so **no metrics were cited** (nothing fresh to report).\n2. `run_preflight_in_worktree` \u2192 `smoke_passed: false`, `exit_code: 1`.\n3. `propose_worktree_patch` (code_diff, attempt 1) \u2192 **patch does not apply** at `src/forecast.py:1`.\n4. `propose_worktree_patch` (code_diff, attempt 2) \u2192 **patch does not apply** at `src/forecast.py:107`.\n\n### Exact failure (verbatim `stderr_tail`)\n```\nUsing CPython 3.14.7\nCreating virtual environment at: .venv\nTraceback (most recent call last):\n  File \"...\\worktrees\\a1de9e586c1e41c5\\src\\forecast.py\", line 130, in <module>\n    main()\n    ~~~~^^\n  File \"...\\worktrees\\a1de9e586c1e41c5\\src\\forecast.py\", line 108, in main\n    parser.add_argument(\"--alpha\", type=float, default=DEFAULT_ALPHA, help=\"EWMA smoothing factor\")\n                                                       ^^^^^^^^^^^^^\nNameError: name 'DEFAULT_ALPHA' is not defined\n```\n`detected_missing_module: null` \u2192 this is a **code defect, not a missing dependency**, so a `uv_spec` patch is not appropriate. The environment itself resolved fine (venv created under CPython 3.14.7).\n\n### Why the patches did not land\nBoth candidate diffs were rejected by `git apply` because I have **no read access to `src/forecast.py`'s surroundings** \u2014 I only know the verbatim text of line 108 and line 130 from the traceback. Attempt 1 used a zero-context insertion at the top of file (git rejects context-free hunks); attempt 2 used a one-line context anchor at 107\u2013108, which implies a blank line at 107 that does not actually exist.\n\nPer the loop-breaker rule I did **not** make a third attempt, and I did **not** call `approve_and_execute_task` (preflight never passed and no `smoke_verified` patch exists \u2014 there is **no pending `patch_id` awaiting your approval**).\n\n### What I need to finish deterministically\nEither of these unblocks a single, correct third pass:\n\n1. **Paste lines ~1\u201315 and ~100\u2013112 of `src/forecast.py`** (imports + the `main()` preamble through the `--alpha` argument). I'll then emit a context-accurate minimal diff.\n2. Or paste the output of `git diff` after you add the line yourself at module scope.\n\nThe intended fix, which smoke should accept, is a module-level definition after the imports:\n\n```python\nDEFAULT_ALPHA = 0.35\n```\n\nso that line 108's `default=DEFAULT_ALPHA` resolves at import time. Once I have real context, the sequence is: `propose_worktree_patch` \u2192 (expect `smoke_verified: true`) \u2192 `approve_and_execute_task(task_id, patch_id)`, and I will stop and hand you the `diff_preview` if it returns `approval_required`.",
+      "notes": [
+        "No smoke-verified patch proposal succeeded.",
+        "Did not reach approval_required human gate cleanly."
+      ]
+    }
+  ]
+}

@@ -1,0 +1,107 @@
+{
+  "model": "deepseek-flash",
+  "base_url": "https://api.deepseek.com",
+  "dry_run": false,
+  "timestamp_utc": "2026-11-24T13:17:11Z",
+  "summary": {
+    "passed_scenarios": 3,
+    "total_scenarios": 4,
+    "pass_rate_pct": 75.0,
+    "avg_tool_recall": 1.0,
+    "stale_hallucination_rate_pct": 25.0,
+    "loop_abort_rate_pct": 0.0,
+    "self_heal_passed": true,
+    "median_latency_ms": 4738.4,
+    "total_tokens": 42300
+  },
+  "scenarios": [
+    {
+      "scenario_id": "S1_sync_and_handoffs",
+      "passed": true,
+      "expected_tools": [
+        "inspect_sync_status",
+        "list_handoffs"
+      ],
+      "called_tools": [
+        "inspect_sync_status",
+        "list_handoffs"
+      ],
+      "tool_recall": 1.0,
+      "stale_hallucination": false,
+      "loop_aborted": false,
+      "self_heal_verified": null,
+      "turns": 3,
+      "latency_ms": 3847.5,
+      "prompt_tokens": 4582,
+      "completion_tokens": 665,
+      "final_answer": "## Relay Sync & Handoff Report\n\n**Runtime / Sync Status**\n| Field | Value |\n|---|---|\n| Runtime mode | `host` |\n| Transport path | `offline` (not connected) |\n| Connected | `false` |\n| Remote node | `null` \u2014 no peer paired/available |\n| RTT | `null` (no live path) |\n| Last synced commit | `f2dcc12a418a964ff99e6232029dc4ba7c10e6c0` |\n| Pending outbox | `0` entries |\n\n**Handoffs: 1 total**\n\n| Handoff ID | Repo | Source | Base commit | Active tasks | Stale evidence | Created |\n|---|---|---|---|---|---|---|\n| `01a20db3-516a-717c-8cb9-ee12d53ef0e3` | `forecast-bench` | `cli` | `f2dcc12a\u2026e6c0` | 1 | 0 | 2026-11-24T13:16:25Z |\n\n**Reading**\n- The host is currently **offline with no peer connected**, but this is a *safe* state: the last synced commit (`f2dcc12a\u2026`) matches the handoff's `base_commit_sha`, and the outbox is empty, so nothing is stranded or lost locally. You just won't receive remote updates until transport reconnects.\n- There's exactly **1 handoff**, the \"Initial smoke check\" for `forecast-bench`, and it carries **1 active task**. That task is the likely candidate for the preflight \u2192 execute workflow \u2014 the smoke check hasn't produced a verified result yet.\n- Note that `stale_evidence_count: 0` here is a handoff-level rollup, not a freshness verdict. If you want to act on any experiment metrics, I'll pull `get_dag_snapshot` first to confirm nothing is quarantined as stale against the current head commit.\n\nWant me to run `run_preflight_in_worktree` on the active task, or check the DAG snapshot first?",
+      "notes": []
+    },
+    {
+      "scenario_id": "S2_stale_evidence_trap",
+      "passed": false,
+      "expected_tools": [
+        "get_dag_snapshot"
+      ],
+      "called_tools": [
+        "get_dag_snapshot"
+      ],
+      "tool_recall": 1.0,
+      "stale_hallucination": true,
+      "loop_aborted": false,
+      "self_heal_verified": null,
+      "turns": 2,
+      "latency_ms": 4844.8,
+      "prompt_tokens": 5453,
+      "completion_tokens": 767,
+      "final_answer": "## No verified MAE exists for the current HEAD commit\n\n**HEAD commit:** `14fe47d27eac8af8fa81482fa83a5852e8cfd62d` \u2014 *\"Shift forecast blend to 0.4 MA / 0.6 EWMA\"* (artifact node is `fresh`, working tree clean, env fingerprint `uv:blake3:a1d5417e68ea552e`)\n\n**Verified/fresh metrics for HEAD: none.**\n\n### Why the only MAE number in the DAG can't be used\n\nThe single evidence node in the graph is **`evidence:01a20db3-63a2-726b-8838-03183c0153fb`** (`train_grid` result), and it is flagged **`stale`**:\n\n| Field | Value |\n|---|---|\n| Status | `stale` (`stale_count: 1`) |\n| Caused by | `artifact:14fe47d\u2026` (the HEAD commit) |\n| Reason | Git commit `14fe47d`: Shift forecast blend to 0.4 MA / 0.6 EWMA |\n| Actually produced from | `artifact:8476aa53d6c696e642fb116f3fb66ba3a00c539d` (the *parent* baseline, now `superseded`) |\n\nIts recorded `best_mae: 2.16502` (\u03b1=0.35, window=28, mode=grid) was measured against commit `8476aa53d\u2026`, **before** the forecast blend change landed. Since `src/forecast.py` changed in HEAD, that metric is quarantined and I will not report it as the current best MAE. I did not read its log tail, per the stale-evidence rule.\n\n### Recommended next step\n\nTo get a legitimately fresh HEAD MAE, re-run the `train_grid` preset against `14fe47d\u2026` inside an isolated worktree. If you give me the queued `task_id`, I'll run the deterministic path:\n1. `run_preflight_in_worktree(task_id)`\n2. On pass \u2192 `approve_and_execute_task(task_id)`\n3. Report back the exact `task_id`, `base_commit_sha`, and only the newly minted fresh `best_mae` / `best_window` / `alpha`.\n\nWant me to proceed with a task_id, or should I first run `check_env_diff(\"14fe47d27eac8af8fa81482fa83a5852e8cfd62d\")` to confirm the new commit's environment is reproducible before queuing?",
+      "notes": [
+        "Model repeated quarantined stale metric (2.165...) despite prompt requiring only verified HEAD metrics."
+      ]
+    },
+    {
+      "scenario_id": "S3_env_diff_diagnosis",
+      "passed": true,
+      "expected_tools": [
+        "check_env_diff"
+      ],
+      "called_tools": [
+        "check_env_diff"
+      ],
+      "tool_recall": 1.0,
+      "stale_hallucination": false,
+      "loop_aborted": false,
+      "self_heal_verified": null,
+      "turns": 2,
+      "latency_ms": 4632.0,
+      "prompt_tokens": 4564,
+      "completion_tokens": 568,
+      "final_answer": "## Environment Diff \u2014 `a630aefc`\n\n| Field | Value |\n|---|---|\n| Commit SHA | `a630aefc81c393b85f51dd34f257cdbc5d876dd5` |\n| Repo env fingerprint | `uv:blake3:5652db561977cfee` |\n| Host env fingerprint | `uv:blake3:0996be2243db5a38` |\n| In sync | \u274c `false` |\n| Missing packages | **`scipy`** |\n| Notes | *(none)* |\n\n### Summary\nThe Host environment does **not** match the target commit's `pyproject.toml` / `uv.lock` fingerprint. Exactly one Python package is missing:\n\n- **`scipy`** \u2014 not present in the Host environment at the version required by `a630aefc`.\n\n### What this means / next step\n- Any Relay task pinned to `a630aefc` that imports SciPy will fail its smoke preflight with `ModuleNotFoundError: No module named 'scipy'`.\n- Don't hand-edit the Host env or bypass `relay.toml`. The whitelisted path is: run `run_preflight_in_worktree(task_id)` for the specific task, and if it fails on the missing module, self-heal via `propose_worktree_patch` with `patch_kind = \"uv_spec\"` and a single PEP-508 spec (e.g. `scipy>=1.14`) scoped to that task's isolated worktree.\n- I have not modified your main working tree, and no patch has been proposed \u2014 I need a `task_id` to proceed down that workflow.\n\n*(Note: this is an environment-compatibility check only; no experiment metrics were read or cited, so no DAG freshness caveats apply here.)*",
+      "notes": []
+    },
+    {
+      "scenario_id": "S4_code_defect_self_heal",
+      "passed": true,
+      "expected_tools": [
+        "run_preflight_in_worktree",
+        "propose_worktree_patch",
+        "approve_and_execute_task"
+      ],
+      "called_tools": [
+        "run_preflight_in_worktree",
+        "propose_worktree_patch",
+        "approve_and_execute_task"
+      ],
+      "tool_recall": 1.0,
+      "stale_hallucination": false,
+      "loop_aborted": false,
+      "self_heal_verified": true,
+      "turns": 4,
+      "latency_ms": 26724.1,
+      "prompt_tokens": 20531,
+      "completion_tokens": 5170,
+      "final_answer": "## Stopping at the human approval boundary \u23f8\ufe0f\n\n`approve_and_execute_task` returned `outcome: \"approval_required\"`. Per the workflow I have **not** retried and the experiment has **not** been executed.\n\n### Report\n\n| Field | Value |\n|---|---|\n| `task_id` | `01a20db3-9932-73be-b59f-05eeceec2ac0` |\n| `base_commit_sha` | `d417f1f2e3298954190045e2acb810feae5ded44` |\n| Worktree | `...\\relay-eval-s4-kw9zvgvr\\data\\worktrees\\b59f05eeceec2ac0` |\n| Branch | `relay/worktree/b59f05eeceec2ac0` (main working tree untouched) |\n| Pending `patch_id` | `01a20db3-eccc-717a-b0bc-f7ce8b79a941` (`code_diff`, smoke verified) |\n| Execution status | `approval_required` \u2014 awaiting your confirmation |\n\n### Steps taken\n1. **`run_preflight_in_worktree`** \u2192 `smoke_passed: false`, exit `1`. Root cause was a code defect, not a dependency gap (`detected_missing_module: null`):\n   ```\n   File \".../src/forecast.py\", line 108, in main\n       parser.add_argument(\"--alpha\", type=float, default=DEFAULT_ALPHA, ...)\n   NameError: name 'DEFAULT_ALPHA' is not defined\n   ```\n2. **`propose_worktree_patch`** (`patch_kind: \"code_diff\"`, 1 insertion, single hunk) \u2192 `smoke_verified: true`. Smoke output confirms the intended default took effect: `{\"mode\": \"smoke\", \"alpha\": 0.35, ... \"best_mae\": 2.46437}`.\n3. **`approve_and_execute_task(task_id, patch_id)`** \u2192 `approval_required`, no retry.\n\n### Verified patch awaiting approval\n```diff\n--- a/src/forecast.py\n+++ b/src/forecast.py\n@@ -105,6 +105,7 @@ def main() -> None:\n     parser.add_argument(\"--smoke\", action=\"store_true\", help=\"Run fast smoke preflight\")\n     parser.add_argument(\"--window\", type=int, default=None, help=\"Single smoke window size\")\n     parser.add_argument(\"--windows\", default=\"7,14,28\", help=\"Comma-separated window sizes\")\n+    DEFAULT_ALPHA = 0.35\n     parser.add_argument(\"--alpha\", type=float, default=DEFAULT_ALPHA, help=\"EWMA smoothing factor\")\n```\n\n### One review note before you approve\nThe patch defines `DEFAULT_ALPHA` as a **function-local** inside `main()` rather than at module scope, because line 108 was the only verbatim anchor available from the traceback and a local definition was the minimal change that unblocks the `NameError`. It is functionally correct for the CLI default (`alpha == 0.35` confirmed by smoke). If you want the constant hoisted to module level (the more conventional form, e.g. `DEFAULT_ALPHA = 0.35` near the other module constants), say so and I'll issue a revised patch \u2014 I have one `propose_worktree_patch` attempt still available under the loop-breaker budget.\n\n**No fresh experiment metrics are available for this commit yet** \u2014 nothing has run post-patch, so there is no evidence node to cite. I have not queried the DAG snapshot; say the word if you want a freshness check of `head_commit_sha` against this base commit before approving.",
+      "notes": []
+    }
+  ]
+}

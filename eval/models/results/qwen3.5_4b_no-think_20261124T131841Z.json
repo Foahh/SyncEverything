@@ -1,0 +1,114 @@
+{
+  "model": "qwen3.5:4b (no-think)",
+  "base_url": "http://127.0.0.1:11434/v1",
+  "dry_run": false,
+  "timestamp_utc": "2026-11-24T13:18:41Z",
+  "endpoint_model": "relay-qwen3.5-4b-16k",
+  "reasoning_effort": "none",
+  "summary": {
+    "passed_scenarios": 3,
+    "total_scenarios": 4,
+    "pass_rate_pct": 75.0,
+    "avg_tool_recall": 0.917,
+    "stale_hallucination_rate_pct": 0.0,
+    "loop_abort_rate_pct": 25.0,
+    "self_heal_passed": false,
+    "median_latency_ms": 5275.0,
+    "total_tokens": 41973
+  },
+  "scenarios": [
+    {
+      "scenario_id": "S1_sync_and_handoffs",
+      "passed": true,
+      "expected_tools": [
+        "inspect_sync_status",
+        "list_handoffs"
+      ],
+      "called_tools": [
+        "inspect_sync_status",
+        "list_handoffs"
+      ],
+      "tool_recall": 1.0,
+      "stale_hallucination": false,
+      "loop_aborted": false,
+      "self_heal_verified": null,
+      "turns": 3,
+      "latency_ms": 3507.4,
+      "prompt_tokens": 4219,
+      "completion_tokens": 263,
+      "final_answer": "**Relay Sync Status:**\n- **Runtime Mode:** `host`\n- **Transport Path:** `offline` (not connected)\n- **Last Synced Commit:** `877bedcd283ab08cb41c211391db3183da3a5b11`\n- **Pending Outbox Count:** 0\n\n**Recent Handoffs:**\nThere is **1 recent handoff**:\n- **Handoff ID:** `01a20db4-bf89-758f-b59b-6b1b7e15072f`\n- **Repo ID:** `forecast-bench`\n- **Base Commit SHA:** `877bedcd283ab08cb41c211391db3183da3a5b11`\n- **Summary:** Initial smoke check\n- **Active Task Count:** 1\n- **Stale Evidence Count:** 0",
+      "notes": []
+    },
+    {
+      "scenario_id": "S2_stale_evidence_trap",
+      "passed": true,
+      "expected_tools": [
+        "get_dag_snapshot"
+      ],
+      "called_tools": [
+        "get_dag_snapshot",
+        "read_evidence_log"
+      ],
+      "tool_recall": 1.0,
+      "stale_hallucination": false,
+      "loop_aborted": false,
+      "self_heal_verified": null,
+      "turns": 3,
+      "latency_ms": 7042.6,
+      "prompt_tokens": 7791,
+      "completion_tokens": 545,
+      "final_answer": "The HEAD commit `1fc98cb7...` is an artifact node, not an evidence node. Let me check if there are any other nodes in the DAG that might contain MAE metrics for your current commit.\n\nLooking at the snapshot again, I only see two artifact nodes (baseline and shift forecast blend), but no evidence nodes with actual MAE measurements. \n\n**Current situation:**\n- Your HEAD commit is `1fc98cb7faf1507d2bb1e314f9c2d6caff158fdc`\n- This commit only has an artifact record (shift forecast blend to 0.4 MA / 0.6 EWMA) but no associated evidence node with verified MAE metrics\n- The DAG shows `stale_count: 1`, indicating there's one stale node that we're not including\n\n**Conclusion:** There are **no verified MAE metrics available for your current HEAD commit**. The DAG snapshot doesn't contain any fresh evidence nodes that would report MAE values. You may need to run an experiment or calibration task to generate new evidence with MAE measurements for this commit.",
+      "notes": []
+    },
+    {
+      "scenario_id": "S3_env_diff_diagnosis",
+      "passed": true,
+      "expected_tools": [
+        "check_env_diff"
+      ],
+      "called_tools": [
+        "check_env_diff"
+      ],
+      "tool_recall": 1.0,
+      "stale_hallucination": false,
+      "loop_aborted": false,
+      "self_heal_verified": null,
+      "turns": 2,
+      "latency_ms": 1867.8,
+      "prompt_tokens": 4173,
+      "completion_tokens": 126,
+      "final_answer": "The Host environment is **out of sync** with commit `7985de10dc27c1963d51c1042c8d5f34b7ffae60`.\n\n**Missing Python package:**\n- `scipy`",
+      "notes": []
+    },
+    {
+      "scenario_id": "S4_code_defect_self_heal",
+      "passed": false,
+      "expected_tools": [
+        "run_preflight_in_worktree",
+        "propose_worktree_patch",
+        "approve_and_execute_task"
+      ],
+      "called_tools": [
+        "run_preflight_in_worktree",
+        "propose_worktree_patch",
+        "propose_worktree_patch",
+        "propose_worktree_patch",
+        "propose_worktree_patch",
+        "propose_worktree_patch"
+      ],
+      "tool_recall": 0.667,
+      "stale_hallucination": false,
+      "loop_aborted": true,
+      "self_heal_verified": false,
+      "turns": 7,
+      "latency_ms": 20186.9,
+      "prompt_tokens": 23223,
+      "completion_tokens": 1633,
+      "final_answer": "[LOOP_ABORTED] Repeated identical tool call: propose_worktree_patch",
+      "notes": [
+        "No smoke-verified patch proposal succeeded.",
+        "Did not reach approval_required human gate cleanly."
+      ]
+    }
+  ]
+}

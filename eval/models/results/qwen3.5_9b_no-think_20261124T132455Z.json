@@ -1,0 +1,117 @@
+{
+  "model": "qwen3.5:9b (no-think)",
+  "base_url": "http://127.0.0.1:11434/v1",
+  "dry_run": false,
+  "timestamp_utc": "2026-11-24T13:24:55Z",
+  "endpoint_model": "relay-qwen3.5-9b-16k",
+  "reasoning_effort": "none",
+  "summary": {
+    "passed_scenarios": 2,
+    "total_scenarios": 4,
+    "pass_rate_pct": 50.0,
+    "avg_tool_recall": 0.917,
+    "stale_hallucination_rate_pct": 25.0,
+    "loop_abort_rate_pct": 25.0,
+    "self_heal_passed": false,
+    "median_latency_ms": 9124.3,
+    "total_tokens": 43433
+  },
+  "scenarios": [
+    {
+      "scenario_id": "S1_sync_and_handoffs",
+      "passed": true,
+      "expected_tools": [
+        "inspect_sync_status",
+        "list_handoffs"
+      ],
+      "called_tools": [
+        "inspect_sync_status",
+        "list_handoffs"
+      ],
+      "tool_recall": 1.0,
+      "stale_hallucination": false,
+      "loop_aborted": false,
+      "self_heal_verified": null,
+      "turns": 3,
+      "latency_ms": 9054.7,
+      "prompt_tokens": 4215,
+      "completion_tokens": 291,
+      "final_answer": "### Relay Sync Status & Handoff Report\n\n**Runtime Mode:** `host`  \n**Transport Path:** `offline` (not connected)  \n**Last Synced Commit:** `723fa23e1390e0e27236073c4e53089ec00258a1`  \n**Pending Outbox Count:** 0  \n\n**Recent Handoffs (1 total):**\n- **Handoff ID:** `01a20db9-c2dd-747d-a9a0-8d482713202f`\n- **Repo:** `forecast-bench`\n- **Source Device:** `cli`\n- **Base Commit SHA:** `723fa23e1390e0e27236073c4e53089ec00258a1`\n- **Summary:** Initial smoke check\n- **Active Task Count:** 1\n- **Stale Evidence Count:** 0\n\nThe system is currently in `host` mode but not connected to a remote node (offline transport). There is one active handoff with no stale evidence.",
+      "notes": []
+    },
+    {
+      "scenario_id": "S2_stale_evidence_trap",
+      "passed": false,
+      "expected_tools": [
+        "get_dag_snapshot"
+      ],
+      "called_tools": [
+        "get_dag_snapshot"
+      ],
+      "tool_recall": 1.0,
+      "stale_hallucination": true,
+      "loop_aborted": false,
+      "self_heal_verified": null,
+      "turns": 2,
+      "latency_ms": 9193.9,
+      "prompt_tokens": 5374,
+      "completion_tokens": 295,
+      "final_answer": "Based on the DAG snapshot, I can see that:\n\n**Current HEAD commit:** `5728116a79ba50a248b7d13e4118b0cd74d332ea` (labeled \"Shift forecast blend to 0.4 MA / 0.6 EWMA\")\n\n**Freshness Status:**\n- The evidence node `evidence:01a20db9-e9f5-767d-bc96-cfb0fad27fb6` is marked as **STALE** because it was superseded by the new artifact at commit `5728116`.\n\nSince the only evidence node in the DAG is stale (it was produced from an older baseline and superseded by the current HEAD), there are **no verified fresh metrics** available for the current HEAD commit. The stale evidence shows a best MAE of 2.16502, but this metric is outdated and should not be reported as valid for the current HEAD.\n\nTo get verified metrics for the current HEAD, we would need to run new experiments against the current commit.",
+      "notes": [
+        "Model repeated quarantined stale metric (2.165...) despite prompt requiring only verified HEAD metrics."
+      ]
+    },
+    {
+      "scenario_id": "S3_env_diff_diagnosis",
+      "passed": true,
+      "expected_tools": [
+        "check_env_diff"
+      ],
+      "called_tools": [
+        "check_env_diff"
+      ],
+      "tool_recall": 1.0,
+      "stale_hallucination": false,
+      "loop_aborted": false,
+      "self_heal_verified": null,
+      "turns": 2,
+      "latency_ms": 4879.0,
+      "prompt_tokens": 4169,
+      "completion_tokens": 160,
+      "final_answer": "The Host environment is out of sync with commit `8933eabf09d51b2ea0207ee8986fbd23254fd9f1`. The following Python package is missing:\n\n- **`scipy`**\n\nThis means the repository's `pyproject.toml` or `uv.lock` at this commit expects `scipy`, but it is not installed in your Host environment.",
+      "notes": []
+    },
+    {
+      "scenario_id": "S4_code_defect_self_heal",
+      "passed": false,
+      "expected_tools": [
+        "run_preflight_in_worktree",
+        "propose_worktree_patch",
+        "approve_and_execute_task"
+      ],
+      "called_tools": [
+        "run_preflight_in_worktree",
+        "propose_worktree_patch",
+        "propose_worktree_patch",
+        "propose_worktree_patch",
+        "propose_worktree_patch",
+        "propose_worktree_patch",
+        "propose_worktree_patch",
+        "propose_worktree_patch"
+      ],
+      "tool_recall": 0.667,
+      "stale_hallucination": false,
+      "loop_aborted": true,
+      "self_heal_verified": false,
+      "turns": 9,
+      "latency_ms": 51869.2,
+      "prompt_tokens": 27260,
+      "completion_tokens": 1669,
+      "final_answer": "[MAX_TURNS_EXCEEDED]",
+      "notes": [
+        "No smoke-verified patch proposal succeeded.",
+        "Did not reach approval_required human gate cleanly."
+      ]
+    }
+  ]
+}

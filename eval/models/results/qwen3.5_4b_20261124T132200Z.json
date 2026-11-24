@@ -1,0 +1,114 @@
+{
+  "model": "qwen3.5:4b",
+  "base_url": "http://127.0.0.1:11434/v1",
+  "dry_run": false,
+  "timestamp_utc": "2026-11-24T13:22:00Z",
+  "endpoint_model": "relay-qwen3.5-4b-16k",
+  "summary": {
+    "passed_scenarios": 2,
+    "total_scenarios": 4,
+    "pass_rate_pct": 50.0,
+    "avg_tool_recall": 0.917,
+    "stale_hallucination_rate_pct": 25.0,
+    "loop_abort_rate_pct": 25.0,
+    "self_heal_passed": false,
+    "median_latency_ms": 15748.7,
+    "total_tokens": 43380
+  },
+  "scenarios": [
+    {
+      "scenario_id": "S1_sync_and_handoffs",
+      "passed": true,
+      "expected_tools": [
+        "inspect_sync_status",
+        "list_handoffs"
+      ],
+      "called_tools": [
+        "inspect_sync_status",
+        "list_handoffs"
+      ],
+      "tool_recall": 1.0,
+      "stale_hallucination": false,
+      "loop_aborted": false,
+      "self_heal_verified": null,
+      "turns": 3,
+      "latency_ms": 11146.4,
+      "prompt_tokens": 4370,
+      "completion_tokens": 938,
+      "final_answer": "## Relay Sync Status & Handoffs Report\n\n### \ud83d\udd0c Sync Status\n| Field | Value |\n|-------|-------|\n| **Runtime Mode** | `host` |\n| **Transport Path** | `offline` |\n| **Connected** | `false` |\n| **Last Synced Commit** | `68ed18dca7683e6ae20a4f08751b58d30a0f0f26` |\n| **Pending Outbox Count** | `0` |\n\n### \ud83d\udd04 Recent Handoffs (Total: 1)\n| Handoff ID | Repo ID | Source Device | Base Commit SHA | Summary | Active Tasks | Stale Evidence | Created At |\n|------------|---------|---------------|-----------------|---------|--------------|----------------|------------|\n| `01a20db7-5e8a-7130-9433-824a356bf348` | `forecast-bench` | `cli` | `68ed18dca7683e6ae20a4f08751b58d30a0f0f26` | Initial smoke check | 1 | 0 | `2026-11-24T13:20:50.826781800Z` |\n\n### Summary\n- **You're running in host mode** but currently **offline** (transport path is offline, not connected to remote).\n- **Last synced commit**: `68ed18dca7683e6ae20a4f08751b58d30a0f0f26` matches the base commit of your only active handoff.\n- **Only 1 recent handoff** exists for the `forecast-bench` repo with an active task count of 1 and no stale evidence.\n\nWould you like me to check the DAG snapshot for experiment metrics or investigate any specific task?",
+      "notes": []
+    },
+    {
+      "scenario_id": "S2_stale_evidence_trap",
+      "passed": false,
+      "expected_tools": [
+        "get_dag_snapshot"
+      ],
+      "called_tools": [
+        "get_dag_snapshot",
+        "read_evidence_log",
+        "read_evidence_log",
+        "get_dag_snapshot"
+      ],
+      "tool_recall": 1.0,
+      "stale_hallucination": true,
+      "loop_aborted": false,
+      "self_heal_verified": null,
+      "turns": 5,
+      "latency_ms": 20350.9,
+      "prompt_tokens": 16954,
+      "completion_tokens": 1654,
+      "final_answer": "## Current MAE Status for HEAD Commit\n\n**No verified MAE metrics are available for your current HEAD commit.**\n\n### DAG Analysis:\n- **HEAD Commit**: `ac432e3409073546b478397bdba55a2105ec246b` (\"Shift forecast blend to 0.4 MA / 0.6 EWMA\")\n- **Evidence Nodes Available**: Only 1 node exists in the DAG, but it is **STALE**\n\n### Stale Evidence Node Details:\n| Field | Value |\n|-------|-------|\n| Node ID | `evidence:01a20db7-8dc6-71dd-9f82-2e1d53c35b83` |\n| Label | \"train_grid result\" |\n| Freshness Status | **STALE** \u274c |\n| Stale Reason | Git commit `ac432e3: Shift forecast blend to 0.4 MA / 0.6 EWMA` superseded this evidence |\n| Best MAE (from stale node) | 2.16502 (window=28.0, alpha=0.35) |\n\n### \u26a0\ufe0f Critical Warning:\nPer the **DAG First Rule**, I cannot report metrics from this stale node as valid for your current HEAD commit. The evidence was produced from an older baseline commit (`f4ba05d1...`) and has been superseded by your latest changes to `src/forecast.py`.\n\n### Recommended Action:\nTo obtain verified MAE metrics for the current HEAD commit, you need to **re-run the training grid experiment** against `ac432e3409073546b478397bdba55a2105ec246b`. This will generate fresh evidence nodes that reflect your latest forecast blend configuration.\n\nWould you like me to help you set up and execute a new training grid experiment for the current HEAD commit?",
+      "notes": [
+        "Model repeated quarantined stale metric (2.165...) despite prompt requiring only verified HEAD metrics."
+      ]
+    },
+    {
+      "scenario_id": "S3_env_diff_diagnosis",
+      "passed": true,
+      "expected_tools": [
+        "check_env_diff"
+      ],
+      "called_tools": [
+        "check_env_diff"
+      ],
+      "tool_recall": 1.0,
+      "stale_hallucination": false,
+      "loop_aborted": false,
+      "self_heal_verified": null,
+      "turns": 2,
+      "latency_ms": 7788.2,
+      "prompt_tokens": 4319,
+      "completion_tokens": 645,
+      "final_answer": "## Environment Diff Results: Commit 394ca47273d7d5107e6bea6cca583691365e8ebb\n\n| Property | Value |\n|----------|-------|\n| **Commit SHA** | 394ca47273d7d5107e6bea6cca583691365e8ebb |\n| **Repo Env Fingerprint** | `uv:blake3:5652db561977cfee` |\n| **Host Env Fingerprint** | `uv:blake3:0996be2243db5a38` |\n| **In Sync** | \u274c **No** |\n\n### Missing Python Packages\n- **scipy** (1 missing package)\n\n---\n\nThis indicates your Host environment is missing the `scipy` module relative to commit 394ca47273d7d5107e6bea6cca583691365e8ebb. If any task in this repository requires scipy and encounters a `ModuleNotFoundError`, I can propose a self-healing patch with the package spec `scipy>=1.14` to resolve it.\n\nWould you like me to proceed with executing a specific task, or do you need help with another operation?",
+      "notes": []
+    },
+    {
+      "scenario_id": "S4_code_defect_self_heal",
+      "passed": false,
+      "expected_tools": [
+        "run_preflight_in_worktree",
+        "propose_worktree_patch",
+        "approve_and_execute_task"
+      ],
+      "called_tools": [
+        "run_preflight_in_worktree",
+        "propose_worktree_patch",
+        "propose_worktree_patch"
+      ],
+      "tool_recall": 0.667,
+      "stale_hallucination": false,
+      "loop_aborted": true,
+      "self_heal_verified": false,
+      "turns": 4,
+      "latency_ms": 20388.9,
+      "prompt_tokens": 12818,
+      "completion_tokens": 1682,
+      "final_answer": "[LOOP_ABORTED] Repeated identical tool call: propose_worktree_patch",
+      "notes": [
+        "No smoke-verified patch proposal succeeded.",
+        "Did not reach approval_required human gate cleanly."
+      ]
+    }
+  ]
+}

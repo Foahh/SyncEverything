@@ -1,0 +1,118 @@
+{
+  "model": "qwen3.5:9b",
+  "base_url": "http://127.0.0.1:11434/v1",
+  "dry_run": false,
+  "timestamp_utc": "2026-11-24T13:31:22Z",
+  "endpoint_model": "relay-qwen3.5-9b-16k",
+  "summary": {
+    "passed_scenarios": 2,
+    "total_scenarios": 4,
+    "pass_rate_pct": 50.0,
+    "avg_tool_recall": 0.917,
+    "stale_hallucination_rate_pct": 25.0,
+    "loop_abort_rate_pct": 25.0,
+    "self_heal_passed": false,
+    "median_latency_ms": 35465.6,
+    "total_tokens": 56808
+  },
+  "scenarios": [
+    {
+      "scenario_id": "S1_sync_and_handoffs",
+      "passed": true,
+      "expected_tools": [
+        "inspect_sync_status",
+        "list_handoffs"
+      ],
+      "called_tools": [
+        "inspect_sync_status",
+        "list_handoffs"
+      ],
+      "tool_recall": 1.0,
+      "stale_hallucination": false,
+      "loop_aborted": false,
+      "self_heal_verified": null,
+      "turns": 3,
+      "latency_ms": 27170.4,
+      "prompt_tokens": 4348,
+      "completion_tokens": 827,
+      "final_answer": "Here's the current Relay sync status and handoff summary:\n\n## Sync Status\n- **Runtime Mode**: `host`\n- **Transport Path**: `offline`\n- **Connected**: `false`\n- **Last Synced Commit**: `194ae87660e18d0436266e1ea925af58db153a38`\n- **Pending Outbox Count**: `0`\n\n## Recent Handoffs\n- **Total Handoffs**: `1` (within the last 10)\n- **Handoff ID**: `01a20dbe-2a7b-76c1-bfd2-5d4cbaa8e3a8`\n- **Repository**: `forecast-bench`\n- **Source Device**: `cli`\n- **Base Commit SHA**: `194ae87660e18d0436266e1ea925af58db153a38` (matches last synced commit)\n- **Summary**: `Initial smoke check`\n- **Active Task Count**: `1`\n- **Stale Evidence Count**: `0`\n- **Created At**: `2026-11-24T13:28:16.251991700Z`\n\nThe system is currently in **host mode** with an **offline transport path**. The last synced commit matches the base commit of the most recent handoff, indicating consistency between sync state and handoff history.",
+      "notes": []
+    },
+    {
+      "scenario_id": "S2_stale_evidence_trap",
+      "passed": false,
+      "expected_tools": [
+        "get_dag_snapshot"
+      ],
+      "called_tools": [
+        "get_dag_snapshot",
+        "read_evidence_log",
+        "get_dag_snapshot"
+      ],
+      "tool_recall": 1.0,
+      "stale_hallucination": true,
+      "loop_aborted": false,
+      "self_heal_verified": null,
+      "turns": 4,
+      "latency_ms": 43760.8,
+      "prompt_tokens": 13159,
+      "completion_tokens": 1456,
+      "final_answer": "Based on the current DAG snapshot for HEAD commit `177a19ae54993ce6f406a9d1ac5a9b88d032a801`, there are **no verified (fresh) evidence nodes** available.\n\nThe only evidence node in the system (`evidence:01a20dbe-9862-7075-a552-16733f06fd0c`) is marked as **stale**. It contains a `best_mae` of `2.16502`, but this metric was generated against an older baseline commit (`artifact:29b891aaa...`) and has been invalidated by the newer artifact (`artifact:177a19ae...`).\n\n**Summary:**\n- **HEAD commit**: `177a19ae54993ce6f406a9d1ac5a9b88d032a801`\n- **Fresh evidence nodes**: 0\n- **Stale evidence nodes**: 1 (MAE: 2.16502, but not valid for current HEAD)\n\nTo obtain verified metrics for the current HEAD commit, experiments would need to be re-run against the new baseline. The stale evidence cannot be used as it was produced under a different code configuration.",
+      "notes": [
+        "Model repeated quarantined stale metric (2.165...) despite prompt requiring only verified HEAD metrics."
+      ]
+    },
+    {
+      "scenario_id": "S3_env_diff_diagnosis",
+      "passed": true,
+      "expected_tools": [
+        "check_env_diff"
+      ],
+      "called_tools": [
+        "check_env_diff"
+      ],
+      "tool_recall": 1.0,
+      "stale_hallucination": false,
+      "loop_aborted": false,
+      "self_heal_verified": null,
+      "turns": 2,
+      "latency_ms": 15643.6,
+      "prompt_tokens": 4260,
+      "completion_tokens": 504,
+      "final_answer": "The environment comparison between your Host and Git commit `79087a9401b36b858963e5d30eb6d108ef7269ef` reveals:\n\n**Status:** \u274c Not in sync\n\n**Missing Python packages:**\n- `scipy`\n\n**Environment fingerprints:**\n- Repository (target commit): `uv:blake3:5652db561977cfee`\n- Host environment: `uv:blake3:0996be2243db5a38`\n\nThe Host environment is missing the `scipy` package. This would need to be addressed via a patch proposal (using `propose_worktree_patch` with `patch_kind=\"uv_spec\"` and content `\"scipy>=1.14\"`) before executing tasks that depend on this dependency.",
+      "notes": []
+    },
+    {
+      "scenario_id": "S4_code_defect_self_heal",
+      "passed": false,
+      "expected_tools": [
+        "run_preflight_in_worktree",
+        "propose_worktree_patch",
+        "approve_and_execute_task"
+      ],
+      "called_tools": [
+        "run_preflight_in_worktree",
+        "propose_worktree_patch",
+        "propose_worktree_patch",
+        "propose_worktree_patch",
+        "propose_worktree_patch",
+        "propose_worktree_patch",
+        "propose_worktree_patch",
+        "propose_worktree_patch"
+      ],
+      "tool_recall": 0.667,
+      "stale_hallucination": false,
+      "loop_aborted": true,
+      "self_heal_verified": false,
+      "turns": 9,
+      "latency_ms": 82926.6,
+      "prompt_tokens": 29853,
+      "completion_tokens": 2401,
+      "final_answer": "[MAX_TURNS_EXCEEDED]",
+      "notes": [
+        "No smoke-verified patch proposal succeeded.",
+        "Did not reach approval_required human gate cleanly."
+      ]
+    }
+  ]
+}
