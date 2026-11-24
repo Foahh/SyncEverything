@@ -51,6 +51,10 @@ impl WorktreeSandbox {
         Ok(&manifest.project.smoke_preset)
     }
 
+    fn shared_cargo_target_dir(&self) -> RelayResult<PathBuf> {
+        Ok(std::path::absolute(&self.worktrees_base)?.join("cargo-target"))
+    }
+
     pub async fn run_preset(
         &self,
         worktree_path: &Path,
@@ -73,10 +77,14 @@ impl WorktreeSandbox {
         let worktree_path = std::path::absolute(worktree_path)?;
         let program = Path::new(&preset.program);
         #[cfg(windows)]
-        let launcher = std::env::var_os("PATH").and_then(|path| windows_package_launcher(preset, &path));
+        let launcher = match std::env::var_os("PATH") {
+            Some(path) => resolve_windows_package_launcher(&preset.program, &args, &path)?,
+            None => None,
+        };
         #[cfg(windows)]
         let program = launcher.as_deref().unwrap_or(program);
-        let mut command = worktree_command(program, &worktree_path);
+        let cargo_target_dir = self.shared_cargo_target_dir()?;
+        let mut command = worktree_command(program, &worktree_path, Some(&cargo_target_dir));
         let is_uv = Path::new(&preset.program)
             .file_stem()
             .and_then(|stem| stem.to_str())
@@ -238,43 +246,128 @@ impl WorktreeSandbox {
 }
 
 #[cfg(windows)]
-fn windows_package_launcher(preset: &CommandPreset, search_path: &std::ffi::OsStr) -> Option<std::path::PathBuf> {
-    // Standard Windows package-manager installs can provide only a .cmd shim. Restrict
-    // shim execution to literal starter commands with no caller-controlled arguments.
-    let program = preset.program.as_str();
-    if !matches!(program, "npm" | "pnpm" | "yarn") || !preset.allowed_params.is_empty() {
-        return None;
+fn is_safe_cmd_arg(arg: &str) -> bool {
+    !arg.is_empty()
+        && arg.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric()
+                || matches!(byte, b'-' | b'_' | b'.' | b':' | b'/' | b'@' | b'+' | b'=')
+        })
+}
+
+#[cfg(windows)]
+fn resolve_windows_package_launcher(
+    program: &str,
+    args: &[String],
+    search_path: &std::ffi::OsStr,
+) -> RelayResult<Option<std::path::PathBuf>> {
+    // Standard Windows npm/pnpm/yarn installs often expose only a .cmd shim.
+    // Prefer a native .exe if available; otherwise allow .cmd only when every
+    // resolved argument belongs to a strict cmd.exe-inert character allowlist.
+    if !matches!(program, "npm" | "pnpm" | "yarn") {
+        return Ok(None);
     }
-    match preset.args.as_slice() {
-        [version] if version == "--version" => {}
-        [run, script] if run == "run" && matches!(script.as_str(), "lint" | "typecheck" | "test" | "build") => {}
-        _ => return None,
+    let mut cmd_candidate = None;
+    for dir in std::env::split_paths(search_path).filter(|dir| dir.is_absolute()) {
+        let exe = dir.join(format!("{program}.exe"));
+        if exe.is_file() {
+            return Ok(Some(exe));
+        }
+        if cmd_candidate.is_none() {
+            let cmd = dir.join(format!("{program}.cmd"));
+            if cmd.is_file() {
+                cmd_candidate = Some(cmd);
+            }
+        }
     }
-    std::env::split_paths(search_path)
-        .filter(|dir| dir.is_absolute())
-        .flat_map(|dir| [dir.join(format!("{program}.exe")), dir.join(format!("{program}.cmd"))])
-        .find(|path| path.is_file())
+    let Some(cmd) = cmd_candidate else {
+        return Ok(None);
+    };
+    if let Some(unsafe_arg) = args.iter().find(|arg| !is_safe_cmd_arg(arg)) {
+        return Err(RelayError::Internal(format!(
+            "argument '{unsafe_arg}' contains characters not allowed for Windows .cmd launcher '{program}'"
+        )));
+    }
+    Ok(Some(cmd))
 }
 
 #[cfg(all(windows, test))]
 #[test]
-fn package_manager_shims_are_limited_to_fixed_starter_commands() {
+fn package_manager_shims_allow_safe_custom_scripts_and_reject_unsafe_chars() {
     let dir = tempfile::tempdir().unwrap();
-    let shim = dir.path().join("pnpm.cmd");
-    std::fs::write(&shim, "").unwrap();
-    let mut preset = CommandPreset {
-        description: String::new(),
-        program: "pnpm".into(),
-        args: vec!["--version".into()],
-        timeout_secs: 120,
-        allowed_params: vec![],
-    };
-    assert_eq!(windows_package_launcher(&preset, dir.path().as_os_str()), Some(shim));
-    preset.allowed_params.push("mode".into());
-    assert!(windows_package_launcher(&preset, dir.path().as_os_str()).is_none());
+
+    for (program, args) in [
+        ("npm", vec!["run".into(), "test:unit".into()]),
+        (
+            "pnpm",
+            vec!["--filter".into(), "@app/web".into(), "run".into(), "check:ci".into()],
+        ),
+        (
+            "yarn",
+            vec!["run".into(), "test".into(), "--".into(), "--reporter=verbose".into()],
+        ),
+    ] {
+        let other = dir.path().join(format!("{program}.cmd"));
+        std::fs::write(&other, "").unwrap();
+        assert_eq!(
+            resolve_windows_package_launcher(program, &args, dir.path().as_os_str()).unwrap(),
+            Some(other)
+        );
+    }
+
+    assert_eq!(
+        resolve_windows_package_launcher(
+            "python",
+            &["--version".into()],
+            dir.path().as_os_str()
+        )
+        .unwrap(),
+        None
+    );
+
+    for bad_arg in [
+        "foo&calc",
+        "foo|dir",
+        "%COMSPEC%",
+        "foo^bar",
+        "\"quoted\"",
+        "two words",
+        "line\nbreak",
+        "",
+    ] {
+        let err = resolve_windows_package_launcher(
+            "pnpm",
+            &["run".into(), bad_arg.into()],
+            dir.path().as_os_str(),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains(".cmd"), "unexpected error: {err}");
+    }
 }
 
-fn worktree_command(program: impl AsRef<std::ffi::OsStr>, worktree_path: &Path) -> Command {
+#[cfg(all(windows, test))]
+#[test]
+fn package_manager_launcher_prefers_exe_over_cmd() {
+    let dir = tempfile::tempdir().unwrap();
+    let exe = dir.path().join("npm.exe");
+    let cmd = dir.path().join("npm.cmd");
+    std::fs::write(&exe, "").unwrap();
+    std::fs::write(&cmd, "").unwrap();
+
+    // Native .exe runs without cmd.exe shell parsing even when args contain spaces.
+    let resolved = resolve_windows_package_launcher(
+        "npm",
+        &["run".into(), "hello world".into()],
+        dir.path().as_os_str(),
+    )
+    .unwrap();
+    assert_eq!(resolved, Some(exe));
+}
+
+fn worktree_command(
+    program: impl AsRef<std::ffi::OsStr>,
+    worktree_path: &Path,
+    cargo_target_dir: Option<&Path>,
+) -> Command {
     let program = program.as_ref();
     let mut command = Command::new(program);
     command.current_dir(worktree_path).stdin(Stdio::null());
@@ -282,24 +375,39 @@ fn worktree_command(program: impl AsRef<std::ffi::OsStr>, worktree_path: &Path) 
         command.env_remove(key);
     }
     command.env("UV_PROJECT_ENVIRONMENT", worktree_path.join(".venv"));
-    if Path::new(program).file_stem().and_then(|name| name.to_str())
+    if Path::new(program)
+        .file_stem()
+        .and_then(|name| name.to_str())
         .is_some_and(|name| name.eq_ignore_ascii_case("cargo"))
     {
-        command.env("CARGO_TARGET_DIR", worktree_path.join("target"));
+        let target_dir = cargo_target_dir
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| worktree_path.join("target"));
+        command.env("CARGO_TARGET_DIR", target_dir);
     }
     command
 }
 
 #[cfg(test)]
 #[test]
-fn cargo_outputs_are_scoped_to_the_task_checkout() {
+fn cargo_outputs_share_isolated_worktree_target_dir() {
     use std::ffi::OsStr;
-    let checkout = std::env::temp_dir().join("relay-cargo-task");
-    let target = checkout.join("target");
+    let base = std::env::temp_dir().join("relay-cargo-sandbox");
+    let repo_root = base.join("repo");
+    let worktrees_base = base.join("worktrees");
+    let checkout = worktrees_base.join("task-1");
+    let sandbox = WorktreeSandbox::new(&repo_root, &worktrees_base);
+    let shared_target = sandbox.shared_cargo_target_dir().unwrap();
+    assert_eq!(
+        shared_target,
+        std::path::absolute(&worktrees_base).unwrap().join("cargo-target")
+    );
+    assert_ne!(shared_target, repo_root.join("target"));
+    assert_ne!(shared_target, checkout.join("target"));
     for program in ["cargo", "cargo.exe"] {
-        let cmd = worktree_command(program, &checkout);
+        let cmd = worktree_command(program, &checkout, Some(&shared_target));
         assert!(cmd.as_std().get_envs().any(|(key, value)|
-            key == OsStr::new("CARGO_TARGET_DIR") && value == Some(target.as_os_str())));
+            key == OsStr::new("CARGO_TARGET_DIR") && value == Some(shared_target.as_os_str())));
     }
 }
 
@@ -352,7 +460,7 @@ async fn add_uv_dependency(worktree_path: &Path, spec: &str) -> RelayResult<()> 
         }
     }
 
-    let output = worktree_command("uv", worktree_path)
+    let output = worktree_command("uv", worktree_path, None)
         .args(["add", "--no-sync", "--", spec])
         .stdin(Stdio::null())
         .kill_on_drop(true)

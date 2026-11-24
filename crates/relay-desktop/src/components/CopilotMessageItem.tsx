@@ -49,6 +49,7 @@ import type {
   AgentChatMessage_Serialize,
   AgentToolTrace_Serialize,
 } from "../bindings";
+import { extractCleanRunPreset } from "../lib/formatError";
 import type { ApprovalInput } from "../lib/relayApi";
 
 const STREAMDOWN_PLUGINS = { cjk };
@@ -191,6 +192,8 @@ function InlineApprovalCard({
   isResolvingApproval: boolean;
 }) {
   const { t } = useTranslation();
+  const isPatchFix = approval.patch_id != null;
+  const cleanPreset = isPatchFix ? null : extractCleanRunPreset(approval.summary);
   const diffLines = parseDiffLines(approval.diff_preview);
 
   return (
@@ -221,7 +224,11 @@ function InlineApprovalCard({
       </ItemHeader>
 
       <ItemDescription className="line-clamp-none text-xs leading-relaxed text-foreground">
-        {approval.summary}
+        {isPatchFix
+          ? approval.summary
+          : cleanPreset
+            ? t("copilot.cleanRunSummary", { preset: cleanPreset })
+            : t("detail.cleanRun")}
       </ItemDescription>
 
       {diffLines.length > 0 && (
@@ -252,7 +259,9 @@ function InlineApprovalCard({
                 })
               }
             >
-              <span className="relay-text-trim leading-none">{t("detail.dismissFix")}</span>
+              <span className="relay-text-trim leading-none">
+                {t(isPatchFix ? "detail.dismissFix" : "detail.cancelRun")}
+              </span>
             </Button>
             <Button
               type="button"
@@ -268,7 +277,9 @@ function InlineApprovalCard({
               }
             >
               <CheckCircle2 data-icon="inline-start" />
-              <span className="relay-text-trim leading-none">{t("detail.applyAndRun")}</span>
+              <span className="relay-text-trim leading-none">
+                {t(isPatchFix ? "detail.applyAndRun" : "detail.approveRun")}
+              </span>
             </Button>
           </ItemActions>
         </ItemFooter>
@@ -284,7 +295,7 @@ function InlineApprovalCard({
           <MarkerContent>
             {approval.resolved === "approved"
               ? t("copilot.approvalApprovedNote")
-              : t("copilot.approvalRejectedNote")}
+              : t(isPatchFix ? "copilot.approvalRejectedNote" : "copilot.approvalRunRejectedNote")}
           </MarkerContent>
         </Marker>
       )}

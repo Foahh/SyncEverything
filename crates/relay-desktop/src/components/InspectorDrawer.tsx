@@ -90,6 +90,22 @@ function metricEntries(metrics: JsonValue): Array<[string, string]> {
   ]);
 }
 
+function CleanRunApprovalBody() {
+  const { t } = useTranslation();
+  return (
+    <>
+      <Alert className="border-emerald-500/25 bg-[var(--relay-fresh-soft)] text-emerald-800 dark:text-emerald-200">
+        <ShieldCheck className="text-emerald-600 dark:text-emerald-400" />
+        <AlertDescription className="text-emerald-800 dark:text-emerald-200">
+          {t("detail.cleanRunSafeNote")}
+        </AlertDescription>
+      </Alert>
+
+      <p className="text-[13px] leading-relaxed text-foreground">{t("detail.cleanRun")}</p>
+    </>
+  );
+}
+
 function FixProposalBody({ proposal }: { proposal: ActiveProposal }) {
   const { t } = useTranslation();
   return (
@@ -265,7 +281,7 @@ export function InspectorPanelBody({
       <div className="border-b border-border px-4 py-2.5">
         <div className="text-[11px] font-medium text-muted-foreground">
           {isFixMode
-            ? t(proposal ? "detail.fixTitle" : "sidebar.reviewRun")
+            ? t(proposal ? "detail.fixTitle" : "detail.cleanRunTitle")
             : t(`canvas.kind.${selectedNode!.payload.kind}`)}
         </div>
         <h3 className="truncate text-sm font-semibold text-foreground">
@@ -278,7 +294,7 @@ export function InspectorPanelBody({
           proposal ? (
             <FixProposalBody proposal={proposal} />
           ) : (
-            <p>{t("detail.cleanRun")}</p>
+            <CleanRunApprovalBody />
           )
         ) : (
           selectedNode && (
@@ -317,7 +333,9 @@ export function InspectorPanelBody({
               })
             }
           >
-            <span className="relay-text-trim leading-none">{t("detail.dismissFix")}</span>
+            <span className="relay-text-trim leading-none">
+              {t(proposal ? "detail.dismissFix" : "detail.cancelRun")}
+            </span>
           </Button>
           <Button
             variant="default"
@@ -366,7 +384,7 @@ export function InspectorDrawer({
         <div className="min-w-0">
           <div className="text-[11px] font-medium text-muted-foreground">
             {isFixMode
-              ? t(proposal ? "detail.fixTitle" : "sidebar.reviewRun")
+              ? t(proposal ? "detail.fixTitle" : "detail.cleanRunTitle")
               : t(`canvas.kind.${selectedNode!.payload.kind}`)}
           </div>
           <h3 className="truncate text-sm font-semibold text-foreground">

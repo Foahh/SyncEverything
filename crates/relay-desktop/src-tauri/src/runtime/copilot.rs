@@ -724,7 +724,7 @@ impl DesktopRuntime {
             Some(AgentApprovalCard {
                 task_id: latest.spec.task_id.to_string(),
                 patch_id: None,
-                summary: format!("Preflight passed. Approve to run {}.", latest.spec.command_preset),
+                summary: latest.spec.command_preset.clone(),
                 diff_preview: String::new(),
                 resolved: None,
             })

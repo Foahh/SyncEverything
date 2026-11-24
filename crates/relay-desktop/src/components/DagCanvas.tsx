@@ -18,6 +18,7 @@ import {
   Maximize2,
   Play,
   Plus,
+  X,
 } from "lucide-react";
 import { useEffect, useMemo, useRef } from "react";
 import { useTranslation } from "react-i18next";
@@ -47,6 +48,7 @@ interface DagCanvasProps {
   onOpenDispatchTask: () => void;
   onOpenRepoSettings: () => void;
   manifestError: string | null;
+  onDismissManifestError?: () => void;
   onGenerateManifest: () => void;
 }
 
@@ -64,6 +66,7 @@ function DagCanvasInner({
   onOpenDispatchTask,
   onOpenRepoSettings,
   manifestError,
+  onDismissManifestError,
   onGenerateManifest,
 }: DagCanvasProps) {
   const { t } = useTranslation();
@@ -123,9 +126,21 @@ function DagCanvasInner({
           {manifestError && (
             <div
               role="alert"
-              className="rounded-lg border border-destructive/30 bg-card px-3 py-2 text-xs text-destructive"
+              className="pointer-events-auto inline-flex items-center gap-2 rounded-lg border border-destructive/30 bg-card/95 px-3 py-1.5 text-xs font-medium text-destructive shadow-sm backdrop-blur-md"
             >
-              {manifestError}
+              <AlertCircle className="size-3.5 shrink-0" />
+              <span>{manifestError}</span>
+              {onDismissManifestError && (
+                <Button
+                  type="button"
+                  size="icon-xs"
+                  variant="ghost"
+                  aria-label={t("detail.close")}
+                  onClick={onDismissManifestError}
+                >
+                  <X />
+                </Button>
+              )}
             </div>
           )}
           {needsManifestBanner && (
