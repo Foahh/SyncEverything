@@ -16,18 +16,20 @@ Lightweight, seeded PyTorch training and evaluation for demos over a direct LAN 
 
 ## Quick Two-Machine LAN Setup
 
-1. On the Host, copy the three project files to a new directory and initialize Git. While online, use `uv sync` to populate the cache and create `uv.lock`. For CUDA, use an index that provides PyTorch wheels for the Host's platform and CUDA version. [PyTorch installation options](https://pytorch.org/get-started/locally/)
+1. On the Host, copy the three project files to a new directory and initialize Git. While online, use `uv sync` to populate the local `uv` cache and verify the environment. For CUDA, use an index that provides PyTorch wheels for the Host's platform and CUDA version. [PyTorch installation options](https://pytorch.org/get-started/locally/)
 
 ```powershell
 New-Item -ItemType Directory -Path ~/pytorch-cuda-demo
 Copy-Item examples/pytorch-cuda-demo/train.py,examples/pytorch-cuda-demo/pyproject.toml,examples/pytorch-cuda-demo/relay.toml ~/pytorch-cuda-demo
 Set-Location ~/pytorch-cuda-demo
 git init -b main
-uv sync
-uv run --locked --offline python train.py --smoke
-git add train.py pyproject.toml relay.toml uv.lock
+git add train.py pyproject.toml relay.toml
 git commit -m "init pytorch cuda demo"
+uv sync
+uv run --offline python train.py --smoke
 ```
+
+> Note: `uv.lock` is intentionally omitted from the starter files so Windows CUDA workstations and Apple Silicon macOS laptops can each resolve their native PyTorch wheels out of the box. If you want strict lockfile pinning across homogeneous machines, commit your generated `uv.lock` and add `--locked` back to `relay.toml`.
 
 2. Clone this same commit on the laptop. With both machines on the same LAN, start the daemon on the Host with the same uv cache and index settings used during setup. Relay creates a separate environment in each task worktree, so this cache supplies the dependencies when WAN access is unavailable. [uv lockfile and environments](https://docs.astral.sh/uv/concepts/projects/sync/)
 
