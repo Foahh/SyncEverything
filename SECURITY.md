@@ -48,7 +48,7 @@ SyncEverything (powered by the Relay engine) coordinates Git state and task exec
 - Peer-to-peer links run over encrypted QUIC via `iroh`, authenticating peers by Ed25519 `NodeId` and verifying synced blobs (Git bundles, diffs, execution logs) by BLAKE3 content hashes.
 - Pairing relies on short-lived one-time pairing tickets (`--pairing-window-secs`, defaulting to 120 seconds in SyncEverything Desktop and 600 seconds in `relay-daemon serve`).
 - Use `--lan-only` for direct private-LAN pairing without public relay servers, or `--local-only` for single-machine loopback testing.
-- **Revoking a retired or compromised device**: Because interactive peer revocation in Desktop Settings is planned for a future release, revoke trust today by stopping the daemon/desktop app, removing the peer's persisted trust record or rotating the node's key material inside your local `--data-dir` (default `.relay/`), and restarting with a fresh pairing ticket.
+- **Persistent peer trust & interactive revocation**: Paired devices are persisted in SQLite (`trusted_peers`) with a stable node identity (`<blob_dir>/node.key`) and reconnect automatically on startup with exponential backoff. You can rename, reconnect, revoke, or remove peers from **Pair Devices -> Trusted Devices** in SyncEverything Desktop. Revoking a peer immediately closes active QUIC handles (`disconnect_peer`), rejects every incoming `WireRequest` on the Host with `PEER_REVOKED` before dispatch, and blocks `iroh_blobs::ALPN` transfers through `RevocationGuardedBlobs` (even while a new pairing window is open). Remove a revoked entry first if you intentionally want to re-pair that device.
 
 ### 5. Human-in-the-Loop Approval & Secret Hygiene
 

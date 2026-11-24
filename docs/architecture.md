@@ -13,7 +13,7 @@ flowchart LR
     Tauri --> Core["relay-core"]
     Daemon --> Core
     Core --> DB[("SQLite WAL")]
-    Core --> Sandbox["Git worktree and uv"]
+    Core --> Sandbox["Git worktree and PackageManagerAdapter"]
     Core -->|"iroh QUIC: RPC and blobs"| Peer["Peer Relay node"]
     Core -->|"HTTP Chat Completions"| Model["Ollama / compatible cloud API"]
 ```
@@ -21,7 +21,7 @@ flowchart LR
 | Component | Responsibility |
 | --- | --- |
 | [`relay-core`](../crates/relay-core/src/) | Owns the shared contracts, causal DAG engine, SQLite persistence, peer protocols, worktree sandbox, MCP tool handlers, and model client. |
-| [`relay-daemon`](../crates/relay-daemon/src/main.rs) | Provides headless Host startup, stdio and Streamable HTTP MCP, repository health checks (`doctor`), context composition, and a two-node loopback check. |
+| [`relay-daemon`](../crates/relay-daemon/src/main.rs) | Provides headless Host startup, stdio and Streamable HTTP MCP, repository initialization (`init`), repository health checks (`doctor`), context composition, and a two-node loopback check. |
 | [Tauri backend](../crates/relay-desktop/src-tauri/src/) | Manages desktop runtime modes, pairing, peer refresh, task orchestration, built-in agent streaming, Tauri commands, and UI events. Its Specta builder defines the generated TypeScript interface. |
 | [Desktop frontend](../crates/relay-desktop/src/) | Renders the React Flow causal graph, task queue, built-in agent rail, and approval drawer. React Query refreshes workspace data after typed Tauri events. The Vite browser preview uses mock state through the same API wrapper. |
 
@@ -43,7 +43,7 @@ Runs executed on a P2P-enabled Host publish their log under the BLAKE3 hash reco
 
 - `Decision` stores rationale and constraints. `Artifact` identifies a Git revision and environment fingerprint. `Evidence` links a task and preset to its metrics and log hash.
 - `DagEngine` validates graph edges and walks downstream dependencies when an `Artifact` is updated or superseded. It marks affected `Evidence` as `Stale` and records the cause and reason. Agent context omits stale metrics, and MCP evidence reads reject stale results.
-- `RelayEngine` coordinates graph and task changes with [`RelayStore`](../crates/relay-core/src/storage.rs). SQLite in WAL mode persists the graph, tasks and proposals, handoffs, logs, and outbox. Stable UUIDv7 task IDs make repeated submissions idempotent.
+- `RelayEngine` coordinates graph and task changes with [`RelayStore`](../crates/relay-core/src/storage.rs). SQLite in WAL mode persists the graph, tasks and proposals, task log references (`task_log_refs`), handoffs, logs, trusted peers (`trusted_peers`), and outbox. Stable UUIDv7 task IDs make repeated submissions idempotent.
 
 The graph and transition rules are implemented in [`dag.rs`](../crates/relay-core/src/dag.rs), [`engine.rs`](../crates/relay-core/src/engine.rs), and [`state.rs`](../crates/relay-core/src/state.rs).
 

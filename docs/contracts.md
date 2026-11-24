@@ -56,24 +56,24 @@ Exposed over both **Stdio** (`relay-daemon mcp-stdio`, compatible with Claude Co
   * `params: BTreeMap<String, String>`
   * `require_approval: bool`
 * **`TaskState`** transitions:
-  `Queued` → `PreflightRunning` → `SelfHealingProposed` *(paused awaiting Elicitation / UI Diff Approval)* → `Executing` → `Completed` | `Failed` | `Stale` | `Rejected`
+  `Queued` → `PreflightRunning` → `SelfHealingProposed` *(paused awaiting Elicitation / UI Diff Approval)* → `Executing` → `Completed` | `Failed` | `Stale` | `Rejected` (plus `Queued` | `PreflightRunning` | `Executing` → `Cancelled` on explicit local or remote cancellation, persisting partial logs)
 * **Security Boundary (`relay.toml`)**:
-  The Host daemon NEVER executes arbitrary shell strings over P2P or MCP. Every runnable task must resolve to a named preset in `<repo>/relay.toml` with explicit `program`, `args`, `timeout_secs`, and optional `allowed_params`.
+  The Host daemon NEVER executes arbitrary shell strings over P2P or MCP. Every runnable task must resolve to a named preset in `<repo>/relay.toml` with explicit `program`, `args`, `timeout_secs`, and optional `allowed_params`. `[project]` may optionally pin `package_manager` (`uv`, `cargo`, `bun`, `pnpm`, `yarn`, `npm`, or `generic`), validated strictly on manifest load.
 
 ---
 
 ## 4. Wire Protocol Contract (`iroh` 1.5 Single Endpoint, `contracts::wire`)
 
 A single `iroh::Endpoint` handles both direct LAN discovery and NAT-traversing relay routing, registering two ALPNs on `iroh::protocol::Router`:
-1. **`iroh_blobs::ALPN`**: Content-addressed BLAKE3 transfer of:
+1. **`iroh_blobs::ALPN`** (wrapped in `RevocationGuardedBlobs`, rejecting revoked peers before accepting blob streams): Content-addressed BLAKE3 transfer of:
    * Git bundles (`git bundle create`) carrying exact commit history & SHAs
    * Uncommitted working tree delta patches (`git diff` + untracked file archive)
    * Experiment stdout/stderr logs & metric artifacts
-2. **`b"relay/rpc/1"`** (`RELAY_RPC_ALPN`): Length-prefixed JSON frames over QUIC bidirectional streams for:
+2. **`b"relay/rpc/1"`** (`RELAY_RPC_ALPN`, gated by the Host revocation check returning `WireResponse::Error { code: "PEER_REVOKED", ... }` before dispatching any request from a revoked `NodeId` in `trusted_peers`): Length-prefixed JSON frames over QUIC bidirectional streams for:
    * `Ping` / `PeerStatus`
    * `PushSyncBundle` (announces blob hash + commit metadata)
    * `SyncDagDelta` (incremental node/edge/freshness updates)
-   * `SubmitTask` / `ApprovePatch` / `RejectPatch`
+   * `SubmitTask` / `CancelTask` / `ApprovePatch` / `RejectPatch`
    * `FetchTaskState`
 
 ---

@@ -149,7 +149,7 @@ enum Commands {
         #[arg(long)]
         base_commit: Option<String>,
     },
-    /// Deterministically compose model context for Track 5 ablation (full_transcript / flat_summary / dag_bundle).
+    /// Deterministically compose model context for evaluation ablations (full_transcript / flat_summary / dag_bundle).
     ComposeContext {
         /// Context strategy to emit (ignored when --all-strategies is set).
         #[arg(long, value_enum, default_value_t = ContextStrategyArg::DagBundle)]

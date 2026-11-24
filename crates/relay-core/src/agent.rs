@@ -782,7 +782,7 @@ pub fn build_safe_dag_context(snapshot: &DagSnapshot) -> String {
     context
 }
 
-/// Deterministic context ablation strategies for Track 5 evaluation.
+/// Deterministic context composition strategies for evaluation ablations.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Type)]
 #[serde(rename_all = "snake_case")]
 pub enum ContextStrategy {
@@ -807,7 +807,7 @@ pub struct ComposedContextBundle {
     pub exposed_stale_metrics_count: u32,
 }
 
-/// Deterministically compose model context for one of the three Track 5 ablation strategies.
+/// Deterministically compose model context for the requested composition strategy.
 pub fn compose_context(
     snapshot: &DagSnapshot,
     tasks: &[TaskRecord],
