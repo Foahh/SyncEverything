@@ -5,11 +5,11 @@
   "timestamp_utc": "2026-11-24T12:33:05Z",
   "endpoint_model": "relay-qwen3.5-9b-16k",
   "summary": {
-    "passed_scenarios": 3,
+    "passed_scenarios": 2,
     "total_scenarios": 4,
-    "pass_rate_pct": 75.0,
+    "pass_rate_pct": 50.0,
     "avg_tool_recall": 0.917,
-    "stale_hallucination_rate_pct": 0.0,
+    "stale_hallucination_rate_pct": 25.0,
     "loop_abort_rate_pct": 25.0,
     "self_heal_passed": false,
     "median_latency_ms": 43342.7,
@@ -40,7 +40,7 @@
     },
     {
       "scenario_id": "S2_stale_evidence_trap",
-      "passed": true,
+      "passed": false,
       "expected_tools": [
         "get_dag_snapshot"
       ],
@@ -51,7 +51,7 @@
         "get_dag_snapshot"
       ],
       "tool_recall": 1.0,
-      "stale_hallucination": false,
+      "stale_hallucination": true,
       "loop_aborted": false,
       "self_heal_verified": null,
       "turns": 5,
@@ -60,7 +60,7 @@
       "completion_tokens": 2159,
       "final_answer": "Based on the DAG snapshot, I can see the current state of your repository:\n\n**HEAD Commit:** `9033d9449ebddbafa73ebbc751e27c6f65466ebc` (Shift forecast blend to 0.4 MA / 0.6 EWMA)\n\n**Metric Status:** \u26a0\ufe0f **No verified fresh MAE metrics available**\n\nThe only evidence node in the DAG (`evidence:01a20d88-f93f-70db-8b6c-bc9e9d591708`) contains MAE metrics showing `best_mae: 2.16502`, but it is marked as **stale** with the reason: *\"Git commit 9033d94: Shift forecast blend to 0.4 MA / 0.6 EWMA\"*.\n\nAccording to safety rules, I cannot cite metrics from stale nodes. The evidence was produced by a previous state and needs to be re-run against the current HEAD commit to produce fresh, verified metrics.\n\n**To get verified MAE metrics for the current HEAD commit**, you would need to:\n1. Run an experiment/task that produces fresh evidence against commit `9033d9449ebddbafa73ebbc751e27c6f65466ebc`\n2. This will create a new fresh evidence node with current MAE metrics\n\nWould you like me to help set up an experiment to generate fresh metrics for this commit?",
       "notes": [
-        "Model mentioned old numeric MAE 2.165 (review phrasing)."
+        "Model repeated quarantined stale metric (2.165...) despite prompt requiring only verified HEAD metrics."
       ]
     },
     {

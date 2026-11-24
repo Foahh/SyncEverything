@@ -18,15 +18,15 @@
   ],
   "summary": {
     "total": 8,
-    "passed": 5,
-    "failed": 3,
-    "pass_rate_pct": 62.5,
+    "passed": 3,
+    "failed": 5,
+    "pass_rate_pct": 37.5,
     "self_heal_passed": 1,
     "self_heal_total": 4,
     "self_heal_rate_pct": 25.0,
     "avg_tool_recall": 0.781,
     "total_retries": 23,
-    "stale_hallucination_count": 0,
+    "stale_hallucination_count": 2,
     "total_tokens": 336070,
     "median_llm_latency_ms": 53082.6,
     "mcp_tools_covered_count": 7
@@ -135,7 +135,7 @@
       "case_id": "chaos-02-upstream-edit",
       "title": "Upstream Code Edit Invalidates Host Evidence",
       "fault_kind": "upstream_code_edit",
-      "passed": true,
+      "passed": false,
       "self_heal_passed": null,
       "duration_ms": 34626.7,
       "expected_tool_trace": [
@@ -149,7 +149,7 @@
       "turns": 2,
       "retries": 0,
       "loop_aborted": false,
-      "stale_hallucination": false,
+      "stale_hallucination": true,
       "prompt_tokens": 5616,
       "completion_tokens": 1084,
       "total_tokens": 6700,
@@ -197,7 +197,9 @@
           "description": "Reading the STALE evidence log is refused at the engine boundary"
         }
       ],
-      "notes": [],
+      "notes": [
+        "LLM answer failed STALE anti-hallucination check"
+      ],
       "repo": null
     },
     {
@@ -544,7 +546,7 @@
       "case_id": "chaos-07-stale-evidence-trap",
       "title": "Stale Evidence Trap Under Context Ablation",
       "fault_kind": "stale_evidence_trap",
-      "passed": true,
+      "passed": false,
       "self_heal_passed": null,
       "duration_ms": 62586.1,
       "expected_tool_trace": [
@@ -560,7 +562,7 @@
       "turns": 4,
       "retries": 0,
       "loop_aborted": false,
-      "stale_hallucination": false,
+      "stale_hallucination": true,
       "prompt_tokens": 12735,
       "completion_tokens": 1740,
       "total_tokens": 14475,
@@ -609,7 +611,9 @@
           "description": "The DAG snapshot reports exactly one STALE evidence node"
         }
       ],
-      "notes": [],
+      "notes": [
+        "LLM answer failed STALE anti-hallucination check"
+      ],
       "repo": null
     },
     {

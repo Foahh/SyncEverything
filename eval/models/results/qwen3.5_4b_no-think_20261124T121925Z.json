@@ -6,11 +6,11 @@
   "endpoint_model": "relay-qwen3.5-4b-16k",
   "reasoning_effort": "none",
   "summary": {
-    "passed_scenarios": 3,
+    "passed_scenarios": 2,
     "total_scenarios": 4,
-    "pass_rate_pct": 75.0,
+    "pass_rate_pct": 50.0,
     "avg_tool_recall": 0.917,
-    "stale_hallucination_rate_pct": 0.0,
+    "stale_hallucination_rate_pct": 25.0,
     "loop_abort_rate_pct": 25.0,
     "self_heal_passed": false,
     "median_latency_ms": 5915.8,
@@ -41,7 +41,7 @@
     },
     {
       "scenario_id": "S2_stale_evidence_trap",
-      "passed": true,
+      "passed": false,
       "expected_tools": [
         "get_dag_snapshot"
       ],
@@ -52,7 +52,7 @@
         "get_dag_snapshot"
       ],
       "tool_recall": 1.0,
-      "stale_hallucination": false,
+      "stale_hallucination": true,
       "loop_aborted": false,
       "self_heal_verified": null,
       "turns": 5,
@@ -61,7 +61,7 @@
       "completion_tokens": 567,
       "final_answer": "I found the issue - there's a stale evidence node that was produced from the old commit, not the current HEAD. The current HEAD is `84e900e342885ec58a7a381551c12da331d16253`, but the only evidence node available (`evidence:01a20d7e-7cac-730f-9086-c3584ff1c05f`) is marked as **stale** because it was produced from commit `138a003bac57cf576706b9c5b1d14d7aec501a08`, which has been superseded.\n\n**There are no verified fresh MAE metrics for the current HEAD commit (84e900e).** The only available evidence is stale and applies to an older baseline commit.\n\nTo get verified metrics for your latest commit, you would need to:\n1. Run a new experiment/task against commit `84e900e342885ec58a7a381551c12da331d16253`\n2. Generate fresh evidence that gets captured in the DAG\n\nThe stale node shows MAE=2.165 for window=28, but this is from the old baseline commit and cannot be used to report on your current HEAD.",
       "notes": [
-        "Model mentioned old numeric MAE 2.165 (review phrasing)."
+        "Model repeated quarantined stale metric (2.165...) despite prompt requiring only verified HEAD metrics."
       ]
     },
     {

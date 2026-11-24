@@ -6,11 +6,11 @@
   "endpoint_model": "relay-qwen3.5-9b-16k",
   "reasoning_effort": "none",
   "summary": {
-    "passed_scenarios": 3,
+    "passed_scenarios": 2,
     "total_scenarios": 4,
-    "pass_rate_pct": 75.0,
+    "pass_rate_pct": 50.0,
     "avg_tool_recall": 0.917,
-    "stale_hallucination_rate_pct": 0.0,
+    "stale_hallucination_rate_pct": 25.0,
     "loop_abort_rate_pct": 25.0,
     "self_heal_passed": false,
     "median_latency_ms": 9641.8,
@@ -41,7 +41,7 @@
     },
     {
       "scenario_id": "S2_stale_evidence_trap",
-      "passed": true,
+      "passed": false,
       "expected_tools": [
         "get_dag_snapshot"
       ],
@@ -49,7 +49,7 @@
         "get_dag_snapshot"
       ],
       "tool_recall": 1.0,
-      "stale_hallucination": false,
+      "stale_hallucination": true,
       "loop_aborted": false,
       "self_heal_verified": null,
       "turns": 2,
@@ -58,7 +58,7 @@
       "completion_tokens": 356,
       "final_answer": "Based on the DAG snapshot, I can see that:\n\n**Current HEAD commit:** `423aaf8469f73c89a544a906ca6ba5f1af4adac3`\n\n**Freshness Status:**\n- The evidence node `evidence:01a20d80-be1b-7002-be13-492d65f00ab7` (train_grid result) is marked as **STALE** because it was superseded by the latest artifact commit.\n\nSince this evidence node is stale, I cannot report its metrics (`best_mae: 2.16502`) as valid for the current HEAD commit. The stale status indicates these results are outdated and were generated before the latest code changes (the \"Shift forecast blend to 0.4 MA / 0.6 EWMA\" change).\n\n**Conclusion:** There are **no verified fresh metrics** available for the current HEAD commit `423aaf8469f73c89a544a906ca6ba5f1af4adac3`. The only evidence node is stale, and per safety rules, I must not cite metrics from stale nodes.\n\nTo get a valid MAE for the current HEAD, you would need to re-run the experiment (e.g., via a task execution) to generate fresh evidence against this commit.",
       "notes": [
-        "Model mentioned old numeric MAE 2.165 (review phrasing)."
+        "Model repeated quarantined stale metric (2.165...) despite prompt requiring only verified HEAD metrics."
       ]
     },
     {

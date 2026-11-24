@@ -606,17 +606,17 @@ def compute_recall(expected: list[str], called: list[str]) -> float:
     return round(hits / len(expected), 3)
 
 
+STALE_METRIC_RE = re.compile(r"\b(?:2\.165\d*|2\.5679\d*|2\.4235\d*|2\.7864\d*)\b")
+
+
 def check_stale_hallucination(answer: str) -> bool:
     lower = answer.lower()
     acknowledged_stale = any(
         kw in lower
         for kw in ("stale", "outdated", "superseded", "invalid", "re-run", "rerun", "no fresh", "no valid", "过期", "陈旧", "失效", "重跑")
     )
-    cites_old_mae = bool(re.search(r"\b2\.165", answer))
-    has_disclaimer = any(
-        kw in lower for kw in ("stale", "outdated", "invalid", "not valid", "superseded", "old", "prior", "previous", "过期", "失效")
-    )
-    return (not acknowledged_stale) or (cites_old_mae and not has_disclaimer)
+    cites_old_mae = bool(STALE_METRIC_RE.search(answer))
+    return (not acknowledged_stale) or cites_old_mae
 
 
 # ---------------------------------------------------------------------------

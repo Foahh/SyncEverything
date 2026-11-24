@@ -46,14 +46,14 @@ uv run python bench/chaos-cases/run_chaos_suite.py \
   --report-stem chaos-llm-qwen3.5_9b
 ```
 
-- `--mode scripted` (default): writes `results/chaos-report.json` and `results/chaos-report.md`, enforces `tool_recall == 1.0`, verifies 8/8 frozen MCP tool coverage, and runs `relay-daemon sandbox-dual` as an `iroh` loopback connectivity gate (unless `--skip-p2p-gate`).
-- `--mode llm`: equips an OpenAI-compatible LLM (`RELAY_LLM_BASE_URL` / `RELAY_LLM_MODEL` / `RELAY_LLM_API_KEY` from `.env` or environment) with all 8 live MCP tools plus repo-confined read-only helpers (`list_repo_files`, `read_repo_file`), scoring self-healing success rate, tool recall, retry overhead, STALE anti-hallucination immunity, tokens, and latency in `results/<report-stem>.{json,md}` for Track 5. Supports `--report-stem` (default `chaos-llm-report`), `--label`, `--reasoning-effort`, `--warmup`, and `--timeout` (`240s` default); loopback URLs never receive `.env` cloud keys unless `--api-key-env` is explicitly set.
+- `--mode scripted` (default): writes `results/chaos-report.json` and `results/chaos-report.md`, enforces `tool_recall == 1.0`, verifies 8/8 frozen MCP tool coverage, and runs `relay-daemon sandbox-dual` as a single-machine `iroh` loopback connectivity gate (unless `--skip-p2p-gate`; physical two-device Windows + macOS verification belongs to Track 6).
+- `--mode llm`: equips an OpenAI-compatible LLM (`RELAY_LLM_BASE_URL` / `RELAY_LLM_MODEL` / `RELAY_LLM_API_KEY` from `.env` or environment) with all 8 live MCP tools plus repo-confined read-only helpers (`list_repo_files`, `read_repo_file`), scoring self-healing success rate, tool recall, retry overhead, STALE anti-hallucination immunity (strict rule: acknowledge staleness AND do not repeat quarantined `2.165...` stale metrics), tokens, and latency in `results/<report-stem>.{json,md}` for Track 5. Supports `--report-stem` (default `chaos-llm-report`), `--label`, `--reasoning-effort`, `--warmup`, and `--timeout` (`240s` default); loopback URLs never receive `.env` cloud keys unless `--api-key-env` is explicitly set.
 
 Latest verified runs (Windows workstation):
-- **Scripted + P2P Gate**: **8/8 PASS** (`tool_recall = 1.00`, `8/8` MCP tools covered, `sandbox-dual` loopback **PASS** in `976.6 ms`; see `results/chaos-report.md`).
+- **Scripted + P2P Gate**: **8/8 PASS** (`tool_recall = 1.00`, `8/8` MCP tools covered, `sandbox-dual` single-machine loopback **PASS** in `976.6 ms`; see `results/chaos-report.md`).
 - **Live Cloud LLM (`deepseek-flash`)**: **8/8 PASS (100.0%)**, Self-Heal **4/4 (100.0%)**, Avg Tool Recall **1.000**, Retries **0**, Stale Hallucinations **0** (`299,127` tokens; see `results/chaos-llm-report.md`).
-- **Live Local Ollama (`qwen3.5:9b`, 16K ctx)**: **5/8 PASS (62.5%)**, Self-Heal **1/4 (25.0%)** (`uv_spec` offline wheel + STALE/disconnect/replay guards pass; unified `code_diff` hunk cases fail), Avg Tool Recall **0.781**, Retries **23**, Stale Hallucinations **0** (`336,070` tokens; see `results/chaos-llm-qwen3.5_9b.md`).
-- **Live Local Ollama (`qwen3.5:4b`, 16K ctx)**: **5/8 PASS (62.5%)**, Self-Heal **1/4 (25.0%)** (same fault split), Avg Tool Recall **0.781**, Retries **11**, Stale Hallucinations **0** (`220,128` tokens; see `results/chaos-llm-qwen3.5_4b.md`).
+- **Live Local Ollama (`qwen3.5:9b`, 16K ctx)**: **3/8 PASS (37.5%)**, Self-Heal **1/4 (25.0%)** (`uv_spec` offline wheel + disconnect/replay pass; `chaos-02` & `chaos-07` acknowledged STALE in prose yet repeated raw `2.165...` metrics from snapshot; unified `code_diff` hunk cases fail), Avg Tool Recall **0.781**, Retries **23**, Stale Hallucinations **2** (`336,070` tokens; see `results/chaos-llm-qwen3.5_9b.md`).
+- **Live Local Ollama (`qwen3.5:4b`, 16K ctx)**: **3/8 PASS (37.5%)**, Self-Heal **1/4 (25.0%)** (same fault split), Avg Tool Recall **0.781**, Retries **11**, Stale Hallucinations **2** (`220,128` tokens; see `results/chaos-llm-qwen3.5_4b.md`).
 
 ## How a Case Is Executed
 

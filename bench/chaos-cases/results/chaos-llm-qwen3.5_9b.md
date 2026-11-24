@@ -2,18 +2,18 @@
 
 - Generated: 2026-11-24T20:46:27+0800
 - Model: `qwen3.5:9b` (`http://127.0.0.1:11434/v1`)
-- Pass Rate: **5/8 (62.5%)** · Self-Heal: **1/4 (25.0%)**
-- Avg Tool Recall: **0.781** · Retries: **23** · Stale Hallucinations: **0** · Total Tokens: **336070**
+- Pass Rate: **3/8 (37.5%)** · Self-Heal: **1/4 (25.0%)**
+- Avg Tool Recall: **0.781** · Retries: **23** · Stale Hallucinations: **2** · Total Tokens: **336070**
 
 | Case | Fault | Pass | Self-Heal | Tool Recall | Retries | Stale Halluc | Turns | Tokens | LLM Latency (ms) |
 |---|---|---|---|---:|---:|---|---:|---:|---:|
 | `chaos-01-missing-dep` | `missing_dependency` | PASS | YES | 0.75 | 0 | False | 8 | 36149 | 48114.2 |
-| `chaos-02-upstream-edit` | `upstream_code_edit` | PASS | n/a | 1.00 | 0 | False | 2 | 6700 | 31563.0 |
+| `chaos-02-upstream-edit` | `upstream_code_edit` | FAIL | n/a | 1.00 | 0 | True | 2 | 6700 | 31563.0 |
 | `chaos-03-same-line-conflict` | `same_line_conflict` | FAIL | NO | 0.67 | 8 | False | 14 | 103535 | 173223.9 |
 | `chaos-04-mid-run-disconnect` | `mid_run_disconnect` | PASS | n/a | 1.00 | 0 | False | 6 | 19345 | 39471.6 |
 | `chaos-05-runtime-exception` | `runtime_exception` | FAIL | NO | 0.67 | 9 | False | 12 | 84544 | 142440.1 |
 | `chaos-06-corrupted-lock` | `corrupted_env_lock` | FAIL | NO | 0.67 | 6 | False | 11 | 66271 | 226255.8 |
-| `chaos-07-stale-evidence-trap` | `stale_evidence_trap` | PASS | n/a | 1.00 | 0 | False | 4 | 14475 | 58051.0 |
+| `chaos-07-stale-evidence-trap` | `stale_evidence_trap` | FAIL | n/a | 1.00 | 0 | True | 4 | 14475 | 58051.0 |
 | `chaos-08-duplicate-replay` | `duplicate_task_replay` | PASS | n/a | 0.50 | 0 | False | 2 | 5051 | 17312.7 |
 
 ## chaos-01-missing-dep — Missing Python Dependency Auto-Healing
@@ -32,6 +32,9 @@
 ## chaos-02-upstream-edit — Upstream Code Edit Invalidates Host Evidence
 
 - Called MCP tools: `['get_dag_snapshot']` (local read helpers: `[]`)
+
+Notes:
+- LLM answer failed STALE anti-hallucination check
 
 | Assertion | Metric | Expected | Actual | Result |
 |---|---|---|---|---|
@@ -97,6 +100,9 @@ Notes:
 ## chaos-07-stale-evidence-trap — Stale Evidence Trap Under Context Ablation
 
 - Called MCP tools: `['get_dag_snapshot', 'read_evidence_log', 'get_dag_snapshot']` (local read helpers: `[]`)
+
+Notes:
+- LLM answer failed STALE anti-hallucination check
 
 | Assertion | Metric | Expected | Actual | Result |
 |---|---|---|---|---|

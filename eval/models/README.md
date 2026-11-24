@@ -3,7 +3,7 @@
 Benchmark harness evaluating **any OpenAI-compatible model** (local Ollama `qwen3.5:4b` / `qwen3.5:9b`, DeepSeek API, OpenAI, OpenRouter, etc.) directly against the live `relay-daemon mcp-stdio` (`rmcp` 3.11) server across 4 standardized tool-calling scenarios:
 
 1. **`S1_sync_and_handoffs`**: Read-only `inspect_sync_status` + `list_handoffs` selection and grounding.
-2. **`S2_stale_evidence_trap`**: Deterministic `STALE` cascade after an upstream Git commit; verifies 0% stale-metric hallucination.
+2. **`S2_stale_evidence_trap`**: Deterministic `STALE` cascade after an upstream Git commit; enforces a strict stale-metric check requiring the model to BOTH acknowledge staleness AND withhold quarantined stale numeric values (`2.165...`) from its answer.
 3. **`S3_env_diff_diagnosis`**: Commit-vs-Host `check_env_diff` fingerprint drift detection.
 4. **`S4_code_defect_self_heal`**: End-to-end isolated `git worktree` preflight (`NameError`) → verified `code_diff` via `propose_worktree_patch` → human-in-the-loop `approval_required` gate without dirtying the main working tree.
 

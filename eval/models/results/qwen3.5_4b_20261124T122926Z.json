@@ -5,11 +5,11 @@
   "timestamp_utc": "2026-11-24T12:29:26Z",
   "endpoint_model": "relay-qwen3.5-4b-16k",
   "summary": {
-    "passed_scenarios": 3,
+    "passed_scenarios": 2,
     "total_scenarios": 4,
-    "pass_rate_pct": 75.0,
+    "pass_rate_pct": 50.0,
     "avg_tool_recall": 0.917,
-    "stale_hallucination_rate_pct": 0.0,
+    "stale_hallucination_rate_pct": 25.0,
     "loop_abort_rate_pct": 25.0,
     "self_heal_passed": false,
     "median_latency_ms": 16621.3,
@@ -40,7 +40,7 @@
     },
     {
       "scenario_id": "S2_stale_evidence_trap",
-      "passed": true,
+      "passed": false,
       "expected_tools": [
         "get_dag_snapshot"
       ],
@@ -50,7 +50,7 @@
         "get_dag_snapshot"
       ],
       "tool_recall": 1.0,
-      "stale_hallucination": false,
+      "stale_hallucination": true,
       "loop_aborted": false,
       "self_heal_verified": null,
       "turns": 4,
@@ -59,7 +59,7 @@
       "completion_tokens": 1865,
       "final_answer": "## Current Best MAE for Latest Commit\n\n**There are NO verified fresh metrics available for your current HEAD commit.**\n\n### DAG Analysis Summary\n- **Current HEAD commit**: `bd417b9d3dd4bfdad3cac802364641dbe6a75607` (Shift forecast blend to 0.4 MA / 0.6 EWMA)\n- **Available evidence nodes**: Only 1 node found (`evidence:01a20d87-5c89-7241-a8be-40756fe377f0`)\n- **Freshness status**: \u274c **STALE**\n\n### Why This Evidence is Stale\nThe evidence node `evidence:01a20d87-5c89-7241-a8be-40756fe377f0` (train_grid result) was generated from an older artifact commit (`3f9ec4ff...`) that has been **superseded** by your current HEAD. \n\nThe staleness reason: *\"Git commit bd417b9: Shift forecast blend to 0.4 MA / 0.6 EWMA\"* indicates this evidence predates the changes in your current HEAD commit.\n\n### Available (but Stale) Evidence - NOT FOR REPORTING\n```json\n{\n  \"best_mae\": 2.16502,\n  \"best_window\": 28.0,\n  \"alpha\": 0.35,\n  \"mode\": \"grid\"\n}\n```\n\u26a0\ufe0f **DO NOT USE**: This metric is from a stale node and does not reflect the current HEAD commit's performance.\n\n### Recommendation\nTo get verified MAE metrics for your current HEAD commit (`bd417b9d...`), you need to:\n1. Run a fresh experiment against the current HEAD commit\n2. Generate new evidence nodes that will be marked as FRESH\n3. Those fresh nodes will contain the actual best MAE for your latest code\n\nWould you like me to help you set up and run a fresh experiment to get verified metrics for the current HEAD?",
       "notes": [
-        "Model mentioned old numeric MAE 2.165 (review phrasing)."
+        "Model repeated quarantined stale metric (2.165...) despite prompt requiring only verified HEAD metrics."
       ]
     },
     {
