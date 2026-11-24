@@ -10,6 +10,7 @@ from __future__ import annotations
 import csv
 import json
 import statistics
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -22,6 +23,9 @@ import numpy as np
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(REPO_ROOT / "eval"))
+from model_runs import load_model_runs
+
 BENCH_RESULTS = REPO_ROOT / "bench" / "results"
 CHAOS_RESULTS = REPO_ROOT / "bench" / "chaos-cases" / "results"
 MODEL_RESULTS = REPO_ROOT / "eval" / "models" / "results"
@@ -169,7 +173,7 @@ def plot_fig1_baseline_comparison() -> None:
     ax1.set_ylim(0, 122)
     ax1.set_xticks(x)
     ax1.set_xticklabels([baseline_labels[b] for b in baseline_order])
-    ax1.set_ylabel("Task Completion Rate (%, N=12 Runs/Baseline)")
+    ax1.set_ylabel("Task Completion Rate (%)")
     ax1.set_title("(a) Autonomous First-Pass vs. Final Completion")
     p_first = mpatches.Patch(facecolor="#666666", alpha=0.92, edgecolor="#222222", label="First-Pass Autonomous (%)")
     p_final = mpatches.Patch(facecolor="#666666", alpha=0.35, hatch="///", edgecolor="#222222", label="Final Completion (w/ Oracle)")
@@ -186,9 +190,9 @@ def plot_fig1_baseline_comparison() -> None:
     bw2 = 0.25
     offsets = {"file_sync_only": -bw2, "static_template": 0.0, "relay_v1": bw2}
     short_names = {
-        "file_sync_only": "File / Git Sync Only (2 corr, 1 abort)",
-        "static_template": "Static Template (1 corr, 1 abort)",
-        "relay_v1": "Relay v1.0 (0 corr, 0 abort)",
+        "file_sync_only": "File / Git Sync Only",
+        "static_template": "Static Template",
+        "relay_v1": "Relay v1.0",
     }
 
     counts: dict[tuple[str, str], tuple[int, int]] = {}
@@ -210,7 +214,7 @@ def plot_fig1_baseline_comparison() -> None:
             color=colors[b],
             edgecolor="#222222",
             linewidth=0.65,
-            label=short_names[b],
+            label=f"{short_names[b]} ({sum(corrs)} inputs, {sum(aborts)} aborts)",
         )
         ax2.bar(
             tx + offsets[b],
@@ -245,16 +249,16 @@ def plot_fig1_baseline_comparison() -> None:
                     tag = f"{c}c+{a}a"
                 ax2.text(xpos, tot + 0.08, tag, ha="center", va="bottom", fontsize=7.8, fontweight="bold", color="#222222")
 
-    ax2.set_ylim(0, 3.85)
-    ax2.set_yticks([0, 1, 2, 3])
+    ax2.set_ylim(0, max(3, max(sum(pair) for pair in counts.values())) * 1.3)
+    ax2.yaxis.set_major_locator(plt.MaxNLocator(integer=True))
     ax2.set_xticks(tx)
     ax2.set_xticklabels([lbl for _, lbl in task_order])
-    ax2.set_ylabel("Recovery / Failure Events Across 3 Trials (Count)")
-    ax2.set_title("(b) Manual Corrections & Loop Aborts per Task (N=3 Trials)")
+    ax2.set_ylabel("Events per Task (Count)")
+    ax2.set_title(f"(b) Human Inputs & Aborts per Task (N={summary['trials_per_task']} Trials)")
     ax2.text(
         0.98,
         0.64,
-        "c = manual correction\na = unrecovered abort\nRelay UI gate = safety check\n(0 ad-hoc interventions)",
+        "c = clarification or correction\na = aborted run",
         transform=ax2.transAxes,
         ha="right",
         va="top",
@@ -280,6 +284,12 @@ def plot_fig2_context_ablation() -> None:
 
     with scaling_path.open("r", encoding="utf-8") as fh:
         scaling_rows = list(csv.DictReader(fh))
+    hashes = {(r["snapshot_id"], r["strategy"]): r["context_bundle_hash"] for r in scaling_rows}
+    for line in (BENCH_RESULTS / "context_ablation_runs.jsonl").read_text(encoding="utf-8").splitlines():
+        if line.strip():
+            row = json.loads(line)
+            if row["context_bundle_hash"] != hashes[(row["snapshot_id"], row["strategy"])]:
+                raise ValueError("Figure 2 requires measurements and scaling rows from identical context bundles")
 
     strat_order = ["full_transcript", "flat_summary", "dag_bundle"]
     strat_labels = {
@@ -357,6 +367,8 @@ def plot_fig2_context_ablation() -> None:
 
     # Panel (b): Empirical Stale Hallucination Rate (%) by Model & Strategy
     matrix = summary["matrix"]
+    if any(row.get("n_errors", 0) for row in matrix):
+        raise ValueError("Resolve the failed context-ablation requests with --retry-errors before plotting")
     models_seen: list[str] = []
     for row in matrix:
         if row["model"] not in models_seen:
@@ -406,11 +418,11 @@ def plot_fig2_context_ablation() -> None:
 
 
 def plot_fig3_model_pareto() -> None:
-    files = sorted(MODEL_RESULTS.glob("*.json"))
     grouped: dict[str, list[dict[str, Any]]] = {}
-    for p in files:
-        d = json.loads(p.read_text(encoding="utf-8"))
+    for d in load_model_runs(MODEL_RESULTS):
         grouped.setdefault(str(d["model"]), []).append(d)
+    if not grouped:
+        raise ValueError("Figure 3 requires live MCP evaluation results")
 
     order = [
         "qwen3.5:4b (no-think)",
@@ -435,6 +447,10 @@ def plot_fig3_model_pareto() -> None:
         "qwen3.5:4b": "D",
         "qwen3.5:9b": "^",
     }
+
+    for model in present:
+        markers.setdefault(model, "o")
+        palette.setdefault(model, "#555555")
 
     stats_rows: list[dict[str, Any]] = []
     for m in present:
@@ -507,10 +523,10 @@ def plot_fig3_model_pareto() -> None:
 
     ax1.grid(True, which="both", axis="both", linestyle="--", alpha=0.35)
     ax1.set_xlim(0, max(r["lat_m"] + r["lat_sd"] for r in stats_rows) * 1.16)
-    ax1.set_ylim(20, 108)
-    ax1.set_xlabel("Median Scenario Turn Latency (s, Mean ± SD)")
+    ax1.set_ylim(0, 108)
+    ax1.set_xlabel("Median Scenario LLM Latency (s, Mean ± SD)")
     ax1.set_ylabel("Scenario Pass Rate (%, Mean ± SD)")
-    ax1.set_title("(a) Latency vs. Task Success (Cloud Dominates Frontier)")
+    ax1.set_title("(a) Latency vs. Task Success")
 
     # Panel (b): Tool Recall vs Latency + Stale Leakage Indicator
     pos_p2 = {
@@ -555,15 +571,16 @@ def plot_fig3_model_pareto() -> None:
 
     ax2.grid(True, which="both", axis="both", linestyle="--", alpha=0.35)
     ax2.set_xlim(0, max(r["lat_m"] + r["lat_sd"] for r in stats_rows) * 1.16)
-    ax2.set_ylim(78, 106)
-    ax2.set_xlabel("Median Scenario Turn Latency (s, Mean ± SD)")
+    ax2.set_ylim(0, 106)
+    ax2.set_xlabel("Median Scenario LLM Latency (s, Mean ± SD)")
     ax2.set_ylabel("Average MCP Tool Recall (%, Mean ± SD)")
     ax2.set_title("(b) Latency vs. Tool Recall & Stale Leakage")
 
     handles, labels = ax1.get_legend_handles_labels()
     fig.legend(handles, labels, loc="lower center", ncol=len(labels), fontsize=8.1, bbox_to_anchor=(0.5, 0.01))
 
-    n_runs_text = f"N={stats_rows[0]['n']}" if stats_rows else "N=3"
+    counts = sorted({row["n"] for row in stats_rows})
+    n_runs_text = f"N={counts[0]}" if len(counts) == 1 else f"N={counts[0]}–{counts[-1]}"
     fig.suptitle(
         f"Local Quantized Models (Ollama 4B/9B) vs. Cloud API Pareto Tradeoff ({n_runs_text} Independent Trials)",
         fontsize=12.4,
@@ -623,7 +640,7 @@ def plot_fig4_chaos_self_healing() -> None:
             else:
                 bg = "#FAD4D0"
                 fg = "#8F1D14"
-                text = f"DIFF FAIL (r={retries})"
+                text = f"FAIL (r={retries})"
 
             rect = mpatches.Rectangle(
                 (col_idx - 0.46, row_idx - 0.40),

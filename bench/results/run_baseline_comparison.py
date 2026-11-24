@@ -49,6 +49,9 @@ from typing import Any
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(REPO_ROOT / "eval"))
+from stale_metrics import forecast_error_values, reported_decimal_values
+
 FIXTURE_SRC = REPO_ROOT / "bench" / "fixture-repo"
 DEFAULT_OUT = Path(__file__).resolve().parent
 BASELINES = ("file_sync_only", "static_template", "relay_v1")
@@ -855,14 +858,7 @@ def execute_workspace_tool(
                 if proc.returncode == 0:
                     try:
                         parsed = json.loads(proc.stdout)
-                        state["executed_train_grids"].append(
-                            {
-                                "target": target_kind,
-                                "alpha": float(parsed.get("alpha", 0.35)),
-                                "best_mae": float(parsed["best_mae"]),
-                                "best_window": int(parsed["best_window"]),
-                            }
-                        )
+                        state["executed_train_grids"].append(parsed)
                     except (KeyError, ValueError, json.JSONDecodeError):
                         pass
                 return proc.returncode != 0, sanitize_text(proc.stdout + proc.stderr)
@@ -887,6 +883,17 @@ def main_tree_preserved(setup: dict[str, Any]) -> tuple[bool, list[str]]:
         if lines:
             issues.append(f"main checkout working tree is dirty: {lines}")
     return len(issues) == 0, issues
+
+
+def matches_grid(metrics: Any, alpha: float, mae: float, window: int) -> bool:
+    if not isinstance(metrics, dict) or not isinstance(metrics.get("runs"), list):
+        return False
+    windows = [row.get("window") for row in metrics["runs"] if isinstance(row, dict)]
+    return (
+        metrics.get("mode") == "grid" and metrics.get("alpha") == alpha
+        and metrics.get("best_mae") == mae and metrics.get("best_window") == window
+        and len(metrics["runs"]) == 3 and all(w in windows for w in (7, 14, 28))
+    )
 
 
 def check_ground_truth(
@@ -916,42 +923,31 @@ def check_ground_truth(
             n
             for n in (snap or {}).get("nodes", [])
             if (n.get("payload") or {}).get("kind") == "evidence"
+            and n["payload"].get("task_id") == setup["relay_task_id"]
+            and n["payload"].get("preset") == "train_grid"
             and (n.get("freshness") or {}).get("status") == "fresh"
         ]
-        if not fresh_ev:
-            failures.append("No fresh Evidence node was produced on Relay Host for current HEAD.")
-        else:
-            ev_mae = (fresh_ev[-1]["payload"]["metrics_json"] or {}).get("best_mae")
-            if ev_mae is None or abs(float(ev_mae) - expected_mae) > 1e-4:
-                failures.append(f"Fresh Relay Evidence best_mae={ev_mae} does not match expected {expected_mae}.")
+        runs = [node["payload"]["metrics_json"] for node in fresh_ev]
     else:
-        matching_runs = [
-            r
-            for r in state["executed_train_grids"]
-            if abs(r["best_mae"] - expected_mae) <= 1e-4 and r["best_window"] == expected_win
-        ]
-        if not matching_runs:
-            failures.append(
-                f"Expected train_grid run with best_mae={mae_tok} (window={expected_win}) was not executed on HEAD."
-            )
-            if setup["task_id"] == "B1_decision_carryover":
-                failures.append("Required session decision alpha=0.25 with windows=7,14,28.")
+        runs = state["executed_train_grids"]
+    expected_alpha = 0.25 if setup["task_id"] == "B1_decision_carryover" else 0.35
+    if not any(matches_grid(r, expected_alpha, expected_mae, expected_win) for r in runs):
+        failures.append(f"Missing verified HEAD grid for windows=7,14,28, alpha={expected_alpha}, "
+                        f"best_mae={mae_tok}, best_window={expected_win}.")
 
-    if mae_tok not in answer and mae_tok[:6] not in answer:
+    reported = reported_decimal_values(answer)
+    mentions_head_mae = any(abs(value - expected_mae) <= 1e-4 for value in reported)
+    if not mentions_head_mae:
         failures.append(f"Final answer must report verified HEAD best_mae {mae_tok}.")
-    if str(expected_win) not in answer:
+    if not re.search(rf"(?<![\w.]){expected_win}(?:\.0+)?(?!\w|\.\d)", answer):
         failures.append(f"Final answer must report verified best_window {expected_win}.")
 
     if setup["task_id"] == "B2_stale_metric_trap" and setup["stale_mae"] is not None:
-        stale_prefix = f"{setup['stale_mae']:.5f}"[:5]  # 2.165
-        if re.search(rf"\b{re.escape(stale_prefix)}\d*\b", answer):
-            # Did it cite 2.165xx? Check if cited without failing fresh OR cited as valid
-            stale_cited = True
-            # Note: even in dry/live checks, disallow presenting 2.165xx as current HEAD valid result;
-            # specifically if fresh failed OR answer didn't explicitly mark it invalid/outdated, treat as failure
+        if reported & forecast_error_values({"best_mae": setup["stale_mae"]}):
             lower = answer.lower()
             explicitly_rejected = any(w in lower for w in ("stale", "outdated", "invalid", "superseded", "old", "expired"))
-            if not explicitly_rejected or mae_tok not in answer:
+            stale_cited = not explicitly_rejected or not mentions_head_mae
+            if stale_cited:
                 failures.append("Cited stale Commit-1 metric (2.16502) instead of verified HEAD best_mae.")
 
     return len(failures) == 0, failures, stale_cited
@@ -1161,6 +1157,7 @@ def run_live_case(
     llm_turns = 0
     tool_calls = 0
     seen_calls: dict[str, int] = {}
+    ui_approvals: set[tuple[str, str | None]] = set()
     state = {"clarifications": 0, "corrections": 0, "ui_approvals": 0, "executed_train_grids": []}
     stale_first_pass = False
     first_pass_recorded = False
@@ -1183,8 +1180,9 @@ def run_live_case(
             {"role": "user", "content": setup["prompt"]},
         ]
 
-        total_budget = max_turns + max_corrections * 6
-        for turn_idx in range(total_budget):
+        turn_limit = max_turns
+        while llm_turns < turn_limit:
+            turn_idx = llm_turns
             llm_turns += 1
             try:
                 resp, elapsed = call_openai_chat(
@@ -1233,11 +1231,12 @@ def run_live_case(
                 if state["corrections"] >= max_corrections:
                     break
                 state["corrections"] += 1
+                turn_limit = llm_turns + 6
                 messages.append({"role": "user", "content": build_oracle_correction(setup, failures, baseline)})
                 seen_calls.clear()
                 continue
 
-            pending_ui_approval = False
+            pending_ui_approvals: set[tuple[str, str | None]] = set()
             for tc in norm_calls:
                 fn = tc["function"]
                 name = fn["name"]
@@ -1271,6 +1270,12 @@ def run_live_case(
                             )
                         except Exception as exc:  # noqa: BLE001
                             output_text = f"error: {exc}"
+                    elif name == "approve_and_execute_task" and parsed.get("approved_via_ui") and (
+                        not isinstance(parsed.get("task_id"), str)
+                        or not isinstance(parsed.get("patch_id"), (str, type(None)))
+                        or (parsed["task_id"], parsed.get("patch_id")) not in ui_approvals
+                    ):
+                        output_text = "No reviewer approval has been granted for this task and patch."
                     else:
                         _, payload, output_text = mcp_ctx.call_tool(name, parsed)
                         if (
@@ -1278,7 +1283,7 @@ def run_live_case(
                             and isinstance(payload, dict)
                             and payload.get("outcome") == "approval_required"
                         ):
-                            pending_ui_approval = True
+                            pending_ui_approvals.add((payload["task_id"], payload.get("patch_id")))
                 else:
                     _, output_text = execute_workspace_tool(name, parsed, setup, state)
                 tool_ms += (time.perf_counter() - t_tool0) * 1000.0
@@ -1286,17 +1291,21 @@ def run_live_case(
 
             if loop_aborted:
                 break
-            if pending_ui_approval:
+            for gate in sorted(pending_ui_approvals - ui_approvals, key=str):
+                ui_approvals.add(gate)
                 state["ui_approvals"] += 1
                 messages.append(
                     {
                         "role": "user",
                         "content": (
-                            "Human reviewer clicked Approve on the Relay diff card. "
+                            f"Human reviewer approved task {gate[0]}, patch {gate[1]} on the Relay card. "
                             "Call `approve_and_execute_task` now with `approved_via_ui=true` (and the same `task_id` / `patch_id`)."
                         ),
                     }
                 )
+        else:
+            loop_aborted = True
+            last_failures.append(f"Exceeded the model turn budget ({turn_limit} turns).")
     finally:
         if mcp_ctx is not None:
             mcp_ctx.__exit__(None, None, None)

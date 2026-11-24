@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import json
 import os
 import re
@@ -44,6 +45,9 @@ from typing import Any
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(REPO_ROOT / "eval"))
+from stale_metrics import forecast_error_values, reported_decimal_values
+
 FIXTURE_SRC = REPO_ROOT / "bench" / "fixture-repo"
 DEFAULT_OUT = Path(__file__).resolve().parent
 STRATEGIES = ("full_transcript", "flat_summary", "dag_bundle")
@@ -374,31 +378,12 @@ def execute_round(daemon_bin: Path, repo: Path, data: Path, round_idx: int, w_ma
         mcp.call("approve_and_execute_task", {"task_id": task_id, "approved_via_ui": True})
 
 
-def extract_metric_tokens(metrics_json: dict[str, Any]) -> tuple[list[str], str | None]:
-    """Return all numeric tokens present in an Evidence node + best_mae token."""
-    tokens: set[str] = set()
-    best_mae_tok: str | None = None
-    best_mae = metrics_json.get("best_mae")
-    if isinstance(best_mae, (int, float)):
-        best_mae_tok = f"{float(best_mae):.5f}"
-        tokens.add(best_mae_tok)
-        tokens.add(best_mae_tok[:6])
-    for run in metrics_json.get("runs", []) or []:
-        for key in ("mae", "rmse"):
-            val = run.get(key)
-            if isinstance(val, (int, float)):
-                s = f"{float(val):.5f}"
-                tokens.add(s)
-                tokens.add(s[:6])
-    return sorted(tokens), best_mae_tok
-
-
 def read_snapshot_metrics(daemon_bin: Path, repo: Path, data: Path) -> dict[str, Any]:
     with McpStdioClient(daemon_bin, repo, data) as mcp:
         snap = mcp.call("get_dag_snapshot", {"include_stale": True})
 
-    stale_tokens: set[str] = set()
-    fresh_tokens: set[str] = set()
+    stale_tokens: set[float] = set()
+    fresh_tokens: set[float] = set()
     fresh_best_maes: list[str] = []
     stale_best_maes: list[str] = []
 
@@ -406,19 +391,22 @@ def read_snapshot_metrics(daemon_bin: Path, repo: Path, data: Path) -> dict[str,
         payload = node.get("payload") or {}
         if payload.get("kind") != "evidence":
             continue
-        tokens, best_tok = extract_metric_tokens(payload.get("metrics_json") or {})
+        metrics = payload.get("metrics_json") or {}
+        tokens = forecast_error_values(metrics)
+        best = metrics.get("best_mae")
+        best_tok = f"{best:.5f}" if isinstance(best, (int, float)) else None
         status = (node.get("freshness") or {}).get("status")
         if status == "stale":
             stale_tokens.update(tokens)
             if best_tok:
                 stale_best_maes.append(best_tok)
-        else:
+        elif status == "fresh":
             fresh_tokens.update(tokens)
             if best_tok:
                 fresh_best_maes.append(best_tok)
 
     # Exclude any prefix/number shared with a truly fresh HEAD metric
-    exclusive_stale = sorted(tok for tok in stale_tokens if tok not in fresh_tokens)
+    exclusive_stale = sorted(stale_tokens - fresh_tokens)
     return {
         "head_commit_sha": snap.get("head_commit_sha"),
         "stale_best_maes": stale_best_maes,
@@ -586,33 +574,26 @@ def build_queries(snapshots: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
     ]
 
 
-def build_stale_regex(stale_tokens: list[str]) -> re.Pattern[str] | None:
-    if not stale_tokens:
-        return None
-    escaped = [re.escape(tok) for tok in sorted(stale_tokens, key=len, reverse=True)]
-    return re.compile(r"\b(?:" + "|".join(escaped) + r")\d*\b")
-
-
 def score_response(query: dict[str, Any], snapshot: dict[str, Any], answer: str) -> dict[str, Any]:
     lower = answer.lower()
     acknowledged_stale = any(kw in lower for kw in STALE_ACK_KEYWORDS)
-    stale_re = build_stale_regex(snapshot["stale_tokens"])
-    matched_stale = stale_re.findall(answer) if stale_re else []
+    reported = reported_decimal_values(answer)
+    matched_stale = reported.intersection(snapshot["stale_tokens"])
     cites_stale_metric = bool(matched_stale)
 
     cites_fresh_mae: bool | None = None
     constraints_recalled: bool | None = None
 
     if query["kind"] == "mixed_fresh_vs_stale":
-        fresh_maes = snapshot["fresh_best_maes"]
         cites_fresh_mae = any(
-            (tok in answer or tok[:6] in answer)
-            for tok in fresh_maes
+            reported & forecast_error_values({"best_mae": float(token)})
+            for token in snapshot["fresh_best_maes"]
         )
         stale_hallucination = cites_stale_metric or (not cites_fresh_mae)
         passed = bool(cites_fresh_mae and not cites_stale_metric)
     elif query["kind"] == "constraints_and_freshness":
-        has_windows = all(w in answer for w in ("7", "14", "28"))
+        window_numbers = set(re.findall(r"(?<![\w.])\d+(?!\w|\.\d)", answer))
+        has_windows = all(w in window_numbers for w in ("7", "14", "28"))
         has_offline = ("offline" in lower) or ("uv_offline" in lower) or ("离线" in answer)
         constraints_recalled = has_windows and has_offline
         stale_hallucination = (not acknowledged_stale) or cites_stale_metric
@@ -624,7 +605,7 @@ def score_response(query: dict[str, Any], snapshot: dict[str, Any], answer: str)
     return {
         "acknowledged_stale": acknowledged_stale,
         "cites_stale_metric": cites_stale_metric,
-        "matched_stale_tokens": sorted(set(matched_stale)),
+        "matched_stale_tokens": [str(v) for v in sorted(matched_stale)],
         "cites_fresh_mae": cites_fresh_mae,
         "constraints_recalled": constraints_recalled,
         "stale_hallucination": stale_hallucination,
@@ -752,20 +733,34 @@ def main() -> int:
     parser.add_argument("--dry-run", action="store_true", help="Verify real compose-context snapshots offline")
     args = parser.parse_args()
 
-    daemon_bin = find_daemon_binary(args.daemon_bin)
     out_dir = Path(args.out).resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    with tempfile.TemporaryDirectory(prefix="relay-ablation-") as tmp:
-        workroot = Path(tmp)
-        print("[ablation] Building 5 real DAG checkpoints via relay-daemon...", flush=True)
-        snapshots = build_all_snapshots(daemon_bin, workroot)
+    inputs_file = out_dir / "context_ablation_inputs.json"
+    runs_jsonl = out_dir / "context_ablation_runs.jsonl"
+    if args.retry_errors:
+        if args.dry_run or not (inputs_file.is_file() and runs_jsonl.is_file()):
+            parser.error("--retry-errors requires saved live inputs and rows from the same run; rerun legacy datasets in full")
+        inputs_bytes = inputs_file.read_text(encoding="utf-8").encode("utf-8")
+        inputs = json.loads(inputs_bytes)
+        snapshots = inputs["snapshots"]
+    else:
+        daemon_bin = find_daemon_binary(args.daemon_bin)
+        with tempfile.TemporaryDirectory(prefix="relay-ablation-") as tmp:
+            print("[ablation] Building 5 real DAG checkpoints via relay-daemon...", flush=True)
+            snapshots = build_all_snapshots(daemon_bin, Path(tmp))
+        inputs = {
+            "snapshots": snapshots, "queries": build_queries(snapshots), "system_prompt": ABLATION_SYSTEM_PROMPT,
+            "daemon_bin": str(daemon_bin.relative_to(REPO_ROOT)) if daemon_bin.is_relative_to(REPO_ROOT) else daemon_bin.name,
+        }
+        inputs_bytes = json.dumps(inputs, ensure_ascii=False, indent=2).encode("utf-8")
+    inputs_sha256 = hashlib.sha256(inputs_bytes).hexdigest()
 
     # Verify mixed snapshot keeps fresh value distinct from stale tokens
     mixed = snapshots["depth_mixed_6"]
     assert mixed["fresh_best_maes"], "depth_mixed_6 missing fresh MAE"
     for ftok in mixed["fresh_best_maes"]:
-        assert ftok not in mixed["stale_tokens"], f"Fresh MAE {ftok} collided with stale tokens"
+        assert float(ftok) not in mixed["stale_tokens"], f"Fresh MAE {ftok} collided with stale tokens"
 
     # Build deterministic scaling rows
     scaling_rows: list[dict[str, Any]] = []
@@ -786,14 +781,7 @@ def main() -> int:
                 }
             )
 
-    scaling_csv = out_dir / "context_ablation_scaling.csv"
-    with scaling_csv.open("w", encoding="utf-8", newline="") as fh:
-        writer = csv.DictWriter(fh, fieldnames=list(scaling_rows[0].keys()))
-        writer.writeheader()
-        writer.writerows(scaling_rows)
-    print(f"[ablation] Wrote {scaling_csv}", flush=True)
-
-    queries = build_queries(snapshots)
+    queries = inputs["queries"]
 
     if args.dry_run:
         # Assert scorer behavior on all 6 queries across strategies without live LLM calls
@@ -807,30 +795,31 @@ def main() -> int:
         return 0
 
     model_specs = resolve_model_specs(args.models)
-    runs_jsonl = out_dir / "context_ablation_runs.jsonl"
-    existing_by_key: dict[tuple[str, str, str], dict[str, Any]] = {}
-    run_records: list[dict[str, Any]] = []
+    records: dict[tuple[str, str, str], dict[str, Any]] = {}
     retry_keys: set[tuple[str, str, str]] = set()
-    if args.retry_errors and runs_jsonl.is_file():
+    if args.retry_errors:
+        selected = {spec["label"] for spec in model_specs}
         for line in runs_jsonl.read_text(encoding="utf-8").splitlines():
             if not line.strip():
                 continue
             rec = json.loads(line)
             key = (rec["model"], rec["query_id"], rec["strategy"])
-            existing_by_key[key] = rec
-            if rec.get("error"):
+            expected_hash = snapshots[rec["snapshot_id"]]["bundles"][rec["strategy"]]["context_bundle_hash"]
+            if rec.get("inputs_sha256") != inputs_sha256 or rec["context_bundle_hash"] != expected_hash:
+                raise ValueError(f"Saved inputs do not match row {key}; rerun the complete experiment")
+            if key in records:
+                raise ValueError(f"Duplicate result row {key}")
+            records[key] = rec
+            if rec.get("error") and rec["model"] in selected:
                 retry_keys.add(key)
         if not retry_keys:
-            print("[ablation] --retry-errors: zero error rows found in context_ablation_runs.jsonl", flush=True)
-            return 0
+            print("[ablation] --retry-errors: no error rows for the selected models", flush=True)
+            return int(any(r["error"] is not None for r in records.values()))
         print(f"[ablation] --retry-errors: retrying {sorted(retry_keys)}", flush=True)
 
     for spec in model_specs:
         label = spec["label"]
         if args.retry_errors and not any(k[0] == label for k in retry_keys):
-            for q in queries:
-                for strat in STRATEGIES:
-                    run_records.append(existing_by_key[(label, q["query_id"], strat)])
             continue
         if spec["is_local"]:
             _, w_ms = call_openai_chat(
@@ -850,20 +839,11 @@ def main() -> int:
                 key = (label, q["query_id"], strat)
                 bundle = snap["bundles"][strat]
                 if args.retry_errors and key not in retry_keys:
-                    run_records.append(existing_by_key[key])
                     continue
-                if args.retry_errors and key in existing_by_key:
-                    prev_tokens = existing_by_key[key].get("estimated_tokens")
-                    prev_exposed = existing_by_key[key].get("exposed_stale_metrics_count")
-                    if (
-                        prev_exposed != bundle["exposed_stale_metrics_count"]
-                        or abs(int(prev_tokens or 0) - int(bundle["estimated_tokens"])) > 10
-                    ):
-                        raise RuntimeError(
-                            f"Snapshot structure drift for {key}: tokens {prev_tokens} vs {bundle['estimated_tokens']}"
-                        )
+                if args.retry_errors and (records[key]["endpoint_model"], records[key]["base_url"]) != (spec["model"], spec["base_url"]):
+                    raise ValueError(f"Retry endpoint or model changed for {key}; rerun the complete experiment")
                 messages = [
-                    {"role": "system", "content": ABLATION_SYSTEM_PROMPT},
+                    {"role": "system", "content": inputs["system_prompt"]},
                     {
                         "role": "user",
                         "content": (
@@ -889,15 +869,16 @@ def main() -> int:
                     )
                     msg = resp["choices"][0]["message"]
                     answer = (msg.get("content") or "").strip()
-                    if not answer and msg.get("reasoning"):
-                        answer = str(msg["reasoning"]).strip()
                     usage = resp.get("usage") or {}
                     p_tok = int(usage.get("prompt_tokens", 0))
                     c_tok = int(usage.get("completion_tokens", 0))
                 except Exception as exc:
                     error_msg = sanitize_text(str(exc))
 
-                scored = score_response(q, snap, answer)
+                scored = score_response(q, snap, answer) if error_msg is None else {
+                    "acknowledged_stale": None, "cites_stale_metric": None, "matched_stale_tokens": [],
+                    "cites_fresh_mae": None, "constraints_recalled": None, "stale_hallucination": None, "passed": None,
+                }
                 record = {
                     "timestamp_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
                     "model": label,
@@ -910,6 +891,7 @@ def main() -> int:
                     "strategy": strat,
                     "estimated_tokens": bundle["estimated_tokens"],
                     "context_bundle_hash": bundle["context_bundle_hash"],
+                    "inputs_sha256": inputs_sha256,
                     "exposed_stale_metrics_count": bundle["exposed_stale_metrics_count"],
                     "latency_ms": round(latency_ms, 1),
                     "prompt_tokens": p_tok,
@@ -919,8 +901,8 @@ def main() -> int:
                     **scored,
                     "answer_excerpt": sanitize_text(answer[:800]),
                 }
-                run_records.append(record)
-                status = "LEAK" if scored["stale_hallucination"] else "SAFE"
+                records[key] = record
+                status = "ERROR" if error_msg is not None else ("LEAK" if scored["stale_hallucination"] else "SAFE")
                 print(
                     f"[{status}] model={label:<14} {q['query_id']:<34} {strat:<15} "
                     f"pass={scored['passed']} ack={scored['acknowledged_stale']} "
@@ -931,16 +913,24 @@ def main() -> int:
         if spec["is_local"]:
             subprocess.run(["ollama", "stop", spec["model"]], capture_output=True, check=False)
 
+    run_records = list(records.values())
+    if not args.retry_errors:
+        inputs_file.write_bytes(inputs_bytes)
+    scaling_csv = out_dir / "context_ablation_scaling.csv"
+    with scaling_csv.open("w", encoding="utf-8", newline="") as fh:
+        writer = csv.DictWriter(fh, fieldnames=list(scaling_rows[0].keys()))
+        writer.writeheader()
+        writer.writerows(scaling_rows)
     with runs_jsonl.open("w", encoding="utf-8", newline="\n") as fh:
         for rec in run_records:
             fh.write(json.dumps(rec) + "\n")
 
     # Aggregate summary by (model, strategy)
     summary_matrix: list[dict[str, Any]] = []
-    for spec in model_specs:
-        label = spec["label"]
+    for label in dict.fromkeys(r["model"] for r in run_records):
         for strat in STRATEGIES:
-            subset = [r for r in run_records if r["model"] == label and r["strategy"] == strat]
+            attempted = [r for r in run_records if r["model"] == label and r["strategy"] == strat]
+            subset = [r for r in attempted if r["error"] is None]
             n = len(subset)
             halluc_cnt = sum(1 for r in subset if r["stale_hallucination"])
             cites_stale_cnt = sum(1 for r in subset if r["cites_stale_metric"])
@@ -952,12 +942,13 @@ def main() -> int:
                     "model": label,
                     "strategy": strat,
                     "n_queries": n,
+                    "n_errors": len(attempted) - n,
                     "stale_hallucination_count": halluc_cnt,
-                    "stale_hallucination_rate_pct": round(100.0 * halluc_cnt / n, 1) if n else 0.0,
+                    "stale_hallucination_rate_pct": round(100.0 * halluc_cnt / n, 1) if n else None,
                     "cites_stale_metric_count": cites_stale_cnt,
-                    "cites_stale_metric_rate_pct": round(100.0 * cites_stale_cnt / n, 1) if n else 0.0,
+                    "cites_stale_metric_rate_pct": round(100.0 * cites_stale_cnt / n, 1) if n else None,
                     "pass_count": pass_cnt,
-                    "pass_rate_pct": round(100.0 * pass_cnt / n, 1) if n else 0.0,
+                    "pass_rate_pct": round(100.0 * pass_cnt / n, 1) if n else None,
                     "mixed_fresh_accurate": bool(q5_rows and q5_rows[0]["cites_fresh_mae"] and not q5_rows[0]["cites_stale_metric"]),
                     "constraints_recalled": bool(q6_rows and q6_rows[0]["constraints_recalled"]),
                     "avg_estimated_tokens": round(statistics.mean(r["estimated_tokens"] for r in subset), 1) if n else 0.0,
@@ -969,7 +960,7 @@ def main() -> int:
     summary_payload = {
         "experiment": "track5-context-ablation",
         "generated_at_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "daemon_bin": sanitize_text(str(daemon_bin.relative_to(REPO_ROOT)) if daemon_bin.is_relative_to(REPO_ROOT) else daemon_bin.name),
+        "daemon_bin": inputs["daemon_bin"],
         "blake3_determinism_verified": True,
         "scaling": scaling_rows,
         "matrix": summary_matrix,
@@ -977,7 +968,7 @@ def main() -> int:
     summary_json = out_dir / "context_ablation_summary.json"
     summary_json.write_text(json.dumps(summary_payload, indent=2), encoding="utf-8")
     print(f"[ablation] Saved {runs_jsonl} and {summary_json}", flush=True)
-    return 0
+    return int(any(r["error"] is not None for r in run_records))
 
 
 if __name__ == "__main__":

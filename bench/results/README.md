@@ -38,6 +38,15 @@ uv run python bench/results/run_baseline_comparison.py --daemon-bin target/debug
 uv run python bench/results/run_context_ablation.py --daemon-bin target/debug/relay-daemon.exe --out bench/results
 ```
 
+The ablation runner saves the verbatim contexts, prompts and scoring inputs in
+`context_ablation_inputs.json`. Every result row records the SHA-256 of this file
+and the context bundle's BLAKE3 hash. Keep it with the JSONL and scaling CSV.
+To retry failed requests against those same inputs, use `--retry-errors` with
+the same output directory. Add `--models` to retry a particular model. Other
+models' rows stay in the dataset. Older runs without saved inputs require a
+full rerun. Network errors are recorded separately and must be resolved before
+generating Figure 2.
+
 ### 4. Underlying `relay-daemon` CLI Primitives (`doctor`, `compose-context`)
 ```powershell
 cargo run -q -p relay-daemon -- --repo-root bench/fixture-repo doctor --json --skip-llm
