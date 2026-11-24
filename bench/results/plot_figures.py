@@ -591,11 +591,17 @@ def plot_fig3_model_pareto() -> None:
 
 
 def plot_fig4_chaos_self_healing() -> None:
+    def _qwen_label(name: str, data: dict[str, Any]) -> str:
+        mode = "Local no-think" if data.get("reasoning_effort") == "none" else "Local 16K"
+        return f"{name}\n({mode})"
+
+    qwen9 = json.loads((CHAOS_RESULTS / "chaos-llm-qwen3.5_9b.json").read_text(encoding="utf-8"))
+    qwen4 = json.loads((CHAOS_RESULTS / "chaos-llm-qwen3.5_4b.json").read_text(encoding="utf-8"))
     runners = [
         ("Scripted\n(+P2P Gate)", json.loads((CHAOS_RESULTS / "chaos-report.json").read_text(encoding="utf-8"))),
         ("deepseek-flash\n(Cloud API)", json.loads((CHAOS_RESULTS / "chaos-llm-report.json").read_text(encoding="utf-8"))),
-        ("qwen3.5:9b\n(Local 16K)", json.loads((CHAOS_RESULTS / "chaos-llm-qwen3.5_9b.json").read_text(encoding="utf-8"))),
-        ("qwen3.5:4b\n(Local 16K)", json.loads((CHAOS_RESULTS / "chaos-llm-qwen3.5_4b.json").read_text(encoding="utf-8"))),
+        (_qwen_label("qwen3.5:9b", qwen9), qwen9),
+        (_qwen_label("qwen3.5:4b", qwen4), qwen4),
     ]
 
     case_labels = [
@@ -603,7 +609,7 @@ def plot_fig4_chaos_self_healing() -> None:
         ("chaos-02-upstream-edit", "C02: Upstream Edit (STALE)"),
         ("chaos-03-same-line-conflict", "C03: Same-Line Conflict"),
         ("chaos-04-mid-run-disconnect", "C04: Mid-Run Disconnect"),
-        ("chaos-05-runtime-exception", "C05: NameError (code_diff)"),
+        ("chaos-05-runtime-exception", "C05: NameError (file_edits)"),
         ("chaos-06-corrupted-lock", "C06: Corrupted uv.lock"),
         ("chaos-07-stale-evidence-trap", "C07: Stale Evidence Trap"),
         ("chaos-08-duplicate-replay", "C08: Duplicate Task Replay"),
@@ -721,7 +727,7 @@ def plot_fig4_chaos_self_healing() -> None:
     retry_offsets = [(24, 20), (0, 14), (4, 18)]
     for rx, rt, ur, dr, off in zip(lx, total_retries, uv_retries, diff_retries, retry_offsets):
         ax2_r.annotate(
-            f"{rt} retries\n(uv={ur}, diff={dr})",
+            f"{rt} retries\n(uv={ur}, edit={dr})",
             xy=(rx, rt),
             xytext=off,
             textcoords="offset points",

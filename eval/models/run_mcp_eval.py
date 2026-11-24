@@ -8,7 +8,7 @@ qwen3.5:4b/9b or Cloud APIs) across 4 standardized tool-calling scenarios:
   S1_sync_and_handoffs    — Read-only sync status & handoff tool selection
   S2_stale_evidence_trap  — Deterministic STALE anti-hallucination guard
   S3_env_diff_diagnosis   — Environment fingerprint & missing-package diff
-  S4_code_defect_heal     — Isolated worktree preflight -> code_diff patch -> approval gate
+  S4_code_defect_heal     — Isolated worktree preflight -> file_edits patch -> approval gate
 
 Zero third-party Python dependencies (pure Python 3.11+ stdlib).
 """
@@ -255,6 +255,11 @@ def is_loopback_url(url: str) -> bool:
     return host in {"127.0.0.1", "localhost", "::1"}
 
 
+def is_retryable_ollama_xml_500(code: int, detail: str) -> bool:
+    lower = detail.lower()
+    return code == 500 and ("xml syntax error" in lower or "unexpected eof" in lower)
+
+
 def call_openai_chat(
     base_url: str,
     model: str,
@@ -287,21 +292,21 @@ def call_openai_chat(
     }
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
-    req = urllib.request.Request(
-        url,
-        data=json.dumps(body).encode("utf-8"),
-        headers=headers,
-        method="POST",
-    )
+    payload = json.dumps(body).encode("utf-8")
     t0 = time.perf_counter()
-    try:
-        with urllib.request.urlopen(req, timeout=timeout_secs) as resp:
-            raw = resp.read().decode("utf-8")
-    except urllib.error.HTTPError as err:
-        detail = err.read().decode("utf-8", errors="replace")
-        raise RuntimeError(f"HTTP {err.code} from {url}: {detail[:400]}") from err
-    elapsed_ms = (time.perf_counter() - t0) * 1000.0
-    return json.loads(raw), elapsed_ms
+    for attempt in range(2):
+        req = urllib.request.Request(url, data=payload, headers=headers, method="POST")
+        try:
+            with urllib.request.urlopen(req, timeout=timeout_secs) as resp:
+                raw = resp.read().decode("utf-8")
+            elapsed_ms = (time.perf_counter() - t0) * 1000.0
+            return json.loads(raw), elapsed_ms
+        except urllib.error.HTTPError as err:
+            detail = err.read().decode("utf-8", errors="replace")
+            if attempt == 0 and is_retryable_ollama_xml_500(err.code, detail):
+                continue
+            raise RuntimeError(f"HTTP {err.code} from {url}: {detail[:400]}") from err
+    raise RuntimeError(f"Failed request to {url}")
 
 
 def warmup_model(
@@ -617,7 +622,7 @@ def run_s2_stale_evidence_trap(daemon: Path, system_prompt: str, cfg: argparse.N
             )
             if err2:
                 raise RuntimeError(f"S2 setup execute failed: {out2}")
-            is_err, snapshot_json = setup_mcp.call_tool("get_dag_snapshot", {"include_stale": False})
+            is_err, snapshot_json = setup_mcp.call_tool("get_dag_snapshot", {})
             if is_err:
                 raise RuntimeError(f"Could not read S2 baseline: {snapshot_json}")
             before_edit = json.loads(snapshot_json)
@@ -641,7 +646,7 @@ def run_s2_stale_evidence_trap(daemon: Path, system_prompt: str, cfg: argparse.N
             "Only report verified metrics that apply to the current HEAD commit."
         )
         expected = ["get_dag_snapshot"]
-        dry_steps = [("get_dag_snapshot", {"include_stale": True})] if cfg.dry_run else None
+        dry_steps = [("get_dag_snapshot", {})] if cfg.dry_run else None
         dry_final = (
             f"The prior experiment result is STALE/outdated because commit {commit2[:7]} modified "
             "src/forecast.py. No fresh MAE exists for HEAD yet; please re-run train_grid."
@@ -662,13 +667,17 @@ def run_s2_stale_evidence_trap(daemon: Path, system_prompt: str, cfg: argparse.N
                 timeout_secs=cfg.timeout,
             )
 
-            is_err, snapshot_json = mcp.call_tool("get_dag_snapshot", {"include_stale": True})
+            is_err, snapshot_json = mcp.call_tool("get_dag_snapshot", {})
             if is_err:
                 raise RuntimeError(f"Could not read S2 ground truth: {snapshot_json}")
 
+        ground_truth_snap = json.loads(snapshot_json)
+        assert ground_truth_snap.get("fresh_evidence_count") == 0
+        assert ground_truth_snap.get("stale_evidence_count") == 1
+        assert ground_truth_snap.get("metric_authority_note")
         rec = recall(expected, called)
         acknowledged_stale, cites_old_mae, stale_hallucination = evaluate_stale_answer(
-            answer, json.loads(snapshot_json), before_edit
+            answer, ground_truth_snap, before_edit
         )
         observed_stale = any(snap["stale_count"] > 0 for snap in tool_results(outcomes, "get_dag_snapshot"))
         passed = observed_stale and acknowledged_stale and not stale_hallucination and not looped
@@ -800,36 +809,32 @@ def run_s4_code_defect_self_heal(daemon: Path, system_prompt: str, cfg: argparse
         prompt = (
             f"Task {task_id} is queued for commit {head}. "
             "Follow Relay's safe Host workflow: run preflight in its isolated worktree; "
-            "if smoke fails, diagnose the traceback and call propose_worktree_patch with a minimal unified git diff "
-            f"(`patch_kind: \"code_diff\"`) that defines `DEFAULT_ALPHA = 0.35` in `src/forecast.py` "
-            f"(note line {next(i for i, line in enumerate(broken.splitlines(), 1) if 'default=DEFAULT_ALPHA' in line)} references `default=DEFAULT_ALPHA`); once smoke passes, call approve_and_execute_task "
+            "if smoke fails, inspect the traceback and error_snippets (and call read_worktree_file if needed), "
+            "then call propose_worktree_patch with `patch_kind: \"file_edits\"` and exact `edits` "
+            "to define `DEFAULT_ALPHA = 0.35` in `src/forecast.py`; once smoke passes, call approve_and_execute_task "
             "and stop cleanly when approval_required is returned."
         )
         expected = ["run_preflight_in_worktree", "propose_worktree_patch", "approve_and_execute_task"]
-        fix_diff = (
-            "diff --git a/src/forecast.py b/src/forecast.py\n"
-            "--- a/src/forecast.py\n"
-            "+++ b/src/forecast.py\n"
-            "@@ -11,6 +11,8 @@ import json\n"
-            " import math\n"
-            " import time\n"
-            " from typing import Iterable\n"
-            " \n"
-            "+DEFAULT_ALPHA = 0.35\n"
-            "+\n"
-            " \n"
-            " def generate_series(length: int = 240) -> list[float]:\n"
-        )
         dry_steps = (
             [
                 ("run_preflight_in_worktree", {"task_id": task_id}),
                 (
+                    "read_worktree_file",
+                    {"task_id": task_id, "file_path": "src/forecast.py", "start_line": 1, "end_line": 30},
+                ),
+                (
                     "propose_worktree_patch",
                     {
                         "task_id": task_id,
-                        "patch_kind": "code_diff",
+                        "patch_kind": "file_edits",
                         "summary": "Define DEFAULT_ALPHA = 0.35 to fix NameError in main()",
-                        "content": fix_diff,
+                        "edits": [
+                            {
+                                "file_path": "src/forecast.py",
+                                "old_text": "from typing import Iterable\n",
+                                "new_text": "from typing import Iterable\n\nDEFAULT_ALPHA = 0.35\n",
+                            }
+                        ],
                     },
                 ),
                 ("approve_and_execute_task", {"task_id": task_id}),
@@ -838,7 +843,7 @@ def run_s4_code_defect_self_heal(daemon: Path, system_prompt: str, cfg: argparse
             else None
         )
         dry_final = (
-            f"Verified code_diff patch for task {task_id} in isolated worktree; "
+            f"Verified file_edits patch for task {task_id} in isolated worktree; "
             "waiting for user approval (approval_required)."
         )
 

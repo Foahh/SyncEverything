@@ -622,6 +622,11 @@ def score_response(query: dict[str, Any], snapshot: dict[str, Any], answer: str)
     }
 
 
+def is_retryable_ollama_xml_500(code: int, detail: str) -> bool:
+    lower = detail.lower()
+    return code == 500 and ("xml syntax error" in lower or "unexpected eof" in lower)
+
+
 def call_openai_chat(
     base_url: str,
     model: str,
@@ -647,15 +652,20 @@ def call_openai_chat(
     headers = {"Content-Type": "application/json", "User-Agent": "Relay-Ablation/1.0"}
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
-    req = urllib.request.Request(url, data=json.dumps(body).encode("utf-8"), headers=headers, method="POST")
+    payload = json.dumps(body).encode("utf-8")
     t0 = time.perf_counter()
-    try:
-        with urllib.request.urlopen(req, timeout=timeout_secs) as resp:
-            raw = resp.read().decode("utf-8")
-    except urllib.error.HTTPError as err:
-        detail = err.read().decode("utf-8", errors="replace")
-        raise RuntimeError(f"HTTP {err.code}: {detail[:300]}") from err
-    return json.loads(raw), (time.perf_counter() - t0) * 1000.0
+    for attempt in range(2):
+        req = urllib.request.Request(url, data=payload, headers=headers, method="POST")
+        try:
+            with urllib.request.urlopen(req, timeout=timeout_secs) as resp:
+                raw = resp.read().decode("utf-8")
+            return json.loads(raw), (time.perf_counter() - t0) * 1000.0
+        except urllib.error.HTTPError as err:
+            detail = err.read().decode("utf-8", errors="replace")
+            if attempt == 0 and is_retryable_ollama_xml_500(err.code, detail):
+                continue
+            raise RuntimeError(f"HTTP {err.code}: {detail[:300]}") from err
+    raise RuntimeError(f"Failed request to {url}")
 
 
 def resolve_model_specs(requested: list[str] | None) -> list[dict[str, Any]]:
@@ -676,19 +686,19 @@ def resolve_model_specs(requested: list[str] | None) -> list[dict[str, Any]]:
             "is_local": False,
         },
         "qwen3.5:4b": {
-            "label": "qwen3.5:4b",
+            "label": "qwen3.5:4b (no-think)",
             "base_url": "http://127.0.0.1:11434/v1",
             "model": "relay-qwen3.5-4b-16k",
             "api_key": None,
-            "reasoning_effort": None,
+            "reasoning_effort": "none",
             "is_local": True,
         },
         "qwen3.5:9b": {
-            "label": "qwen3.5:9b",
+            "label": "qwen3.5:9b (no-think)",
             "base_url": "http://127.0.0.1:11434/v1",
             "model": "relay-qwen3.5-9b-16k",
             "api_key": None,
-            "reasoning_effort": None,
+            "reasoning_effort": "none",
             "is_local": True,
         },
     }
@@ -893,6 +903,7 @@ def main() -> int:
                     "model": label,
                     "endpoint_model": spec["model"],
                     "base_url": spec["base_url"],
+                    "reasoning_effort": spec["reasoning_effort"],
                     "query_id": q["query_id"],
                     "query_kind": q["kind"],
                     "snapshot_id": q["snapshot_id"],

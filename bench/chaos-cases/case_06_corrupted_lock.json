@@ -1,7 +1,7 @@
 {
   "case_id": "chaos-06-corrupted-lock",
   "title": "Corrupted Lockfile Recovery",
-  "description": "A truncated `uv.lock` is committed, so every `uv run` fails to parse the lockfile before the experiment starts. The host must detect the parse failure in its isolated worktree, propose a lockfile-restoring `code_diff`, re-verify smoke, and execute only after approval.",
+  "description": "A truncated `uv.lock` is committed, so every `uv run` fails to parse the lockfile before the experiment starts. The host must detect the parse failure in its isolated worktree, propose a lockfile-restoring `file_edits` patch, re-verify smoke, and execute only after approval.",
   "initial_commit": "HEAD",
   "injected_fault": {
     "kind": "corrupted_env_lock",

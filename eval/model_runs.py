@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any
 
 
-SCORING_VERSION = 2
+SCORING_VERSION = 3
 
 
 def load_model_runs(directory: Path) -> list[dict[str, Any]]:

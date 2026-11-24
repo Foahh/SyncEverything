@@ -1,9 +1,12 @@
+import io
 import json
 import runpy
 import tempfile
 import unittest
+import urllib.error
+import urllib.request
 from pathlib import Path
-from unittest.mock import Mock, patch
+from unittest.mock import MagicMock, Mock, patch
 
 from stale_metrics import cites_stale_forecast_error
 from model_runs import SCORING_VERSION, load_model_runs
@@ -88,3 +91,22 @@ class ReleaseScoringTests(unittest.TestCase):
             result = run(daemon, ROOT, "", cfg, allow_human_approval=True)
         self.assertEqual([event["is_err"] for event in result["tool_events"]], [False, True, True, False])
         self.assertEqual(daemon.call.call_count, 2)
+
+    def test_ollama_xml_500_retries_once_in_eval_and_chaos_clients(self):
+        xml_err = lambda: urllib.error.HTTPError(
+            "http://127.0.0.1:11434/v1/chat/completions",
+            500,
+            "Internal Server Error",
+            {},
+            io.BytesIO(b'{"error":"XML syntax error on line 29: unexpected EOF"}'),
+        )
+        ok_resp = MagicMock()
+        ok_resp.__enter__.return_value = ok_resp
+        ok_resp.read.return_value = b'{"choices":[{"message":{"content":"ok"}}]}'
+
+        for module in (MODELS, CHAOS):
+            fn = module["call_openai_chat"]
+            with patch.object(urllib.request, "urlopen", side_effect=[xml_err(), ok_resp]) as urlopen:
+                data, _ = fn("http://127.0.0.1:11434/v1", "qwen3.5:9b", None, [], [])
+            self.assertEqual(data["choices"][0]["message"]["content"], "ok")
+            self.assertEqual(urlopen.call_count, 2)
