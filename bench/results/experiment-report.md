@@ -1,6 +1,13 @@
 # Relay v1.0 — Track 5 Experimental Evaluation Report
 
-> Consolidated quantitative evaluation across four empirical suites using live `relay-daemon` (`iroh` 1.5, `rmcp` 3.11, SQLite WAL, `petgraph` DAG, `git worktree` + `uv` offline sandbox), ready for Track 6 technical report and defense presentation reuse.
+> **Release audit, 2026-11-24.** The tables and figures below record the pre-audit runs.
+> In Experiment 2, 53 of 54 JSONL rows have a different context hash from the
+> corresponding entry in the scaling CSV. In Experiment 1, two runs used 13
+> model turns before receiving any correction under a 12-turn autonomous budget.
+> Recompute the affected comparisons with the corrected runners before using
+> these numbers in release or paper claims.
+
+> Consolidated quantitative evaluation across four empirical suites using live `relay-daemon` (`iroh` 1.5, `rmcp` 3.11, SQLite WAL, `petgraph` DAG, `git worktree` + `uv` offline sandbox).
 
 ---
 

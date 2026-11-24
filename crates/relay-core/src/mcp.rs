@@ -6,7 +6,7 @@ use crate::contracts::{
 };
 use crate::engine::RelayEngine;
 use crate::error::{RelayError, RelayResult};
-use crate::sandbox::{PreflightReport, WorktreeHandle, WorktreeSandbox, load_manifest};
+use crate::sandbox::{PreflightReport, WorktreeHandle, WorktreeSandbox};
 use crate::state::validate_transition;
 use crate::sync::RelayNode;
 use chrono::Utc;
@@ -82,7 +82,7 @@ impl RelayMcpServer {
             transport_path: TransportPath::Offline,
             connected: false,
             rtt_ms: None,
-            last_synced_commit: engine.head_commit_sha().await,
+            last_synced_commit: engine.head_commit_sha().await?,
             pending_outbox_count: engine.pending_outbox_count().await?,
         })
     }
@@ -133,25 +133,31 @@ impl RelayMcpServer {
             .await
     }
 
-    pub async fn handle_get_dag_snapshot(&self, args: GetDagSnapshotArgs) -> DagSnapshot {
-        let mut snapshot = self
-            .context
+    pub async fn handle_get_dag_snapshot(&self, args: GetDagSnapshotArgs) -> RelayResult<DagSnapshot> {
+        let mut snapshot = self.context
             .engine
             .dag_snapshot(args.include_stale.unwrap_or(true))
-            .await;
+            .await?;
         redact_stale_evidence_metrics(&mut snapshot);
-        snapshot
+        Ok(snapshot)
     }
 
     pub async fn handle_read_evidence_log(
         &self,
         args: ReadEvidenceLogArgs,
     ) -> RelayResult<EvidenceLog> {
-        let (node, log_tail) = self
-            .context
-            .engine
-            .read_evidence_log(&args.node_id, args.max_lines.unwrap_or(120))
-            .await?;
+        let engine = &self.context.engine;
+        let max_lines = args.max_lines.unwrap_or(120);
+        let result = engine.read_evidence_log(&args.node_id, max_lines).await;
+        let (node, log_tail) = match (result, self.context.node()) {
+            (Err(RelayError::MissingEvidenceLog { hash, .. }), Some(transport)) => {
+                let log = transport.fetch_evidence_log(&hash).await?;
+                engine.cache_log_blob(&hash, &log).await?;
+                // A peer can invalidate the result while the blob is in flight.
+                engine.read_evidence_log(&args.node_id, max_lines).await?
+            }
+            (result, _) => result?,
+        };
         Ok(EvidenceLog { node, log_tail })
     }
 
@@ -344,7 +350,7 @@ impl RelayMcpContext {
         let id = task.spec.task_id;
         let result = async {
             let handle = self.worktree(task).await?;
-            let manifest = load_manifest(handle.worktree_path())?;
+            let manifest = sandbox.task_manifest(handle.worktree_path())?;
             let report = sandbox
                 .run_preflight(id, handle.worktree_path(), handle.branch_name(), &manifest)
                 .await?;
@@ -375,7 +381,7 @@ impl RelayMcpContext {
         self.start_preflight(task).await?;
         let result = async {
             let handle = self.worktree(task).await?;
-            let manifest = load_manifest(handle.worktree_path())?;
+            let manifest = sandbox.task_manifest(handle.worktree_path())?;
             let proposal = sandbox
                 .apply_and_verify_patch(
                     task.spec.task_id,
@@ -457,7 +463,7 @@ impl RelayMcpContext {
     ) -> RelayResult<ApprovalExecutionResponse> {
         let spec = &task.spec;
         let handle = self.worktree(task).await?;
-        sandbox.validate_worktree_base(spec.task_id, &handle, &spec.base_commit_sha).await?;
+        let sha = sandbox.validate_worktree_base(spec.task_id, &handle, &spec.base_commit_sha).await?;
         let diff = handle.diff().await?;
         if let Some(patch) = &task.active_proposal {
             if !patch.smoke_verified
@@ -474,7 +480,7 @@ impl RelayMcpContext {
             ));
         }
 
-        let manifest = load_manifest(handle.worktree_path())?;
+        let manifest = sandbox.task_manifest(handle.worktree_path())?;
         let output = sandbox
             .run_preset(handle.worktree_path(), &manifest, &spec.command_preset, &spec.params)
             .await?;
@@ -488,15 +494,16 @@ impl RelayMcpContext {
             )));
         }
 
-        let sha = &spec.base_commit_sha;
         let (env_fingerprint, changed_files) = tokio::try_join!(
-            sandbox.env_fingerprint_at_commit(sha),
-            sandbox.changed_files_in_commit(sha),
+            sandbox.env_fingerprint_at_commit(&sha),
+            sandbox.changed_files_in_commit(&sha),
         )?;
         let now = Utc::now();
-        let device_origin = self
-            .node()
-            .map_or_else(|| "local".into(), |node| node.id().to_string());
+        let node = self.node();
+        if let Some(node) = &node {
+            node.publish_evidence_log(&output.raw_log).await?;
+        }
+        let device_origin = node.map_or_else(|| "local".into(), |node| node.id().to_string());
         let artifact = GraphNode {
             id: format!("artifact:{}", Uuid::now_v7()),
             label: sha.clone(),
@@ -641,7 +648,7 @@ impl RelayMcpServer {
         &self,
         Parameters(args): Parameters<GetDagSnapshotArgs>,
     ) -> Result<CallToolResult, McpError> {
-        tool_result(Ok(self.handle_get_dag_snapshot(args).await))
+        tool_result(self.handle_get_dag_snapshot(args).await)
     }
 
     #[tool(

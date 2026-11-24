@@ -59,16 +59,17 @@ def make_spiral_dataset(
     num_samples: int, num_classes: int = 4, seed: int = 42
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     gen = torch.Generator().manual_seed(seed)
-    per_class = max(num_samples // num_classes, 16)
+    per_class, remainder = divmod(num_samples, num_classes)
     xs = []
     ys = []
     for cls_idx in range(num_classes):
-        t = torch.linspace(0.15, 1.0, per_class)
+        count = per_class + (cls_idx < remainder)
+        t = torch.linspace(0.15, 1.0, count)
         angle = t * 2.5 * math.pi + cls_idx * (2.0 * math.pi / num_classes)
-        noise = torch.randn((per_class, 2), generator=gen) * 0.08
+        noise = torch.randn((count, 2), generator=gen) * 0.08
         coords = torch.stack([t * torch.sin(angle), t * torch.cos(angle)], dim=1) + noise
         xs.append(coords)
-        ys.append(torch.full((per_class,), cls_idx, dtype=torch.long))
+        ys.append(torch.full((count,), cls_idx, dtype=torch.long))
 
     features = torch.cat(xs, dim=0)
     labels = torch.cat(ys, dim=0)
@@ -210,7 +211,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--samples", type=int, default=4096)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--device", choices=["auto", "cuda", "mps", "cpu"], default="auto")
-    return parser.parse_args()
+    args = parser.parse_args()
+    if args.hidden < 1:
+        parser.error("--hidden must be positive")
+    if not args.smoke:
+        if args.epochs < 1 or args.batch_size < 1:
+            parser.error("--epochs and --batch-size must be positive")
+        if args.samples < 64:
+            parser.error("--samples must be at least 64")
+        if not math.isfinite(args.lr) or args.lr <= 0:
+            parser.error("--lr must be finite and positive")
+    return args
 
 
 def main() -> None:
@@ -229,7 +240,7 @@ def main() -> None:
             seed=args.seed,
         )
     )
-    print(json.dumps(metrics, indent=2))
+    print(json.dumps(metrics, indent=2, allow_nan=False))
 
 
 if __name__ == "__main__":

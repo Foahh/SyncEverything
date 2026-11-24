@@ -7,7 +7,9 @@ use relay_core::agent::{
 use relay_core::contracts::{RuntimeMode, TaskSpec};
 use relay_core::engine::RelayEngine;
 use relay_core::mcp::RelayMcpServer;
-use relay_core::sandbox::{HeadSyncOutcome, WorktreeSandbox, load_manifest, sync_git_head_into_engine};
+use relay_core::sandbox::{
+    HeadSyncOutcome, WorktreeSandbox, load_manifest, sync_git_head_explicitly, sync_git_head_into_engine,
+};
 use relay_core::sync::{NetworkProfile, RelayNode, RelayNodeConfig, RelayNodeEvent};
 use rmcp::ServiceExt;
 use rmcp::transport::streamable_http_server::{
@@ -81,8 +83,10 @@ enum Commands {
     Serve {
         #[arg(long, default_value = "127.0.0.1:7608")]
         mcp_addr: SocketAddr,
+        /// Bind P2P to the IPv4 loopback interface for same-machine pairing.
         #[arg(long, conflicts_with = "lan_only")]
         local_only: bool,
+        /// Pair using direct IP addresses with public discovery and relays disabled.
         #[arg(long, conflicts_with = "local_only")]
         lan_only: bool,
         /// Seconds to accept an incoming P2P pairing request (0 = 24 hours).
@@ -163,7 +167,7 @@ impl Repository {
             (Some(id), _) => Some(id),
             (None, Some(root)) => manifest_repo_id(root)?.or_else(|| {
                 root.file_name()
-                    .map(|name| sanitize_repo_id(&name.to_string_lossy()))
+                    .map(|name| relay_core::sandbox::slugify_repo_id(&name.to_string_lossy()))
             }),
             (None, None) => None,
         };
@@ -182,26 +186,6 @@ impl Repository {
             .filter(|root| root.join(".git").exists() && load_manifest(root).is_ok())
             .map(|root| WorktreeSandbox::new(root, data_dir.join("worktrees")));
         Ok((Arc::new(engine), sandbox))
-    }
-}
-
-fn sanitize_repo_id(raw: &str) -> String {
-    let cleaned: String = raw
-        .trim()
-        .chars()
-        .map(|ch| {
-            if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_') {
-                ch
-            } else {
-                '-'
-            }
-        })
-        .collect();
-    let trimmed = cleaned.trim_matches(|ch| ch == '-' || ch == '_');
-    if trimmed.is_empty() {
-        "default-workspace".into()
-    } else {
-        trimmed.to_owned()
     }
 }
 
@@ -276,7 +260,6 @@ async fn main() -> Result<()> {
     }
 
     let repo = Repository::resolve(cli.repo_root.clone(), cli.repo_id.clone())?;
-    let llm_config = resolve_llm_config(&cli)?;
     match cli.command {
         Commands::Serve {
             mcp_addr,
@@ -284,6 +267,7 @@ async fn main() -> Result<()> {
             lan_only,
             pairing_window_secs,
         } => {
+            let llm_config = resolve_llm_config(&cli)?;
             let profile = if local_only {
                 NetworkProfile::LocalOnly
             } else if lan_only {
@@ -372,33 +356,37 @@ async fn main() -> Result<()> {
             http_result?;
             node_result?;
         }
-        Commands::McpStdio => {
+        Commands::McpStdio | Commands::McpHttp { .. } => {
+            let (device, addr) = match cli.command {
+                Commands::McpHttp { addr } => ("mcp-http", Some(addr)),
+                _ => ("mcp-stdio", None),
+            };
             let (engine, sandbox) = repo.open(&cli.data_dir).await?;
-            if let Some(sb) = &sandbox
-                && let Err(error) = sync_git_head_into_engine(&engine, sb, "mcp-stdio").await
-            {
-                warn!(%error, "Unable to sync initial Git HEAD for mcp-stdio");
-            }
+            let git_task = if let Some(sb) = &sandbox {
+                if let Err(error) = sync_git_head_into_engine(&engine, sb, device).await {
+                    warn!(%error, device, "Unable to sync initial Git HEAD for MCP");
+                }
+                Some(spawn_git_head_watcher(engine.clone(), sb.clone(), device.into()))
+            } else {
+                None
+            };
             let server = RelayMcpServer::new(engine, sandbox, None);
-            let service = server.serve((tokio::io::stdin(), tokio::io::stdout())).await?;
-            service.waiting().await?;
-        }
-        Commands::McpHttp { addr } => {
-            let (engine, sandbox) = repo.open(&cli.data_dir).await?;
-            if let Some(sb) = &sandbox
-                && let Err(error) = sync_git_head_into_engine(&engine, sb, "mcp-http").await
-            {
-                warn!(%error, "Unable to sync initial Git HEAD for mcp-http");
+            if let Some(addr) = addr {
+                serve_mcp_http(TcpListener::bind(addr).await?, server).await?;
+            } else {
+                let service = server.serve((tokio::io::stdin(), tokio::io::stdout())).await?;
+                service.waiting().await?;
             }
-            let server = RelayMcpServer::new(engine, sandbox, None);
-            serve_mcp_http(TcpListener::bind(addr).await?, server).await?;
+            if let Some(task) = git_task {
+                task.abort();
+            }
         }
         Commands::SandboxDual => sandbox_dual(&repo, &cli.data_dir).await?,
         Commands::LlmCheck | Commands::Doctor { .. } => unreachable!(),
         Commands::SyncHead => {
             let (engine, sandbox) = repo.open(&cli.data_dir).await?;
             let sb = sandbox.context("repository must contain both .git and relay.toml")?;
-            let out = match sync_git_head_into_engine(&engine, &sb, "cli").await? {
+            let out = match sync_git_head_explicitly(&engine, &sb, "cli").await? {
                 HeadSyncOutcome::Unchanged => json!({"status": "unchanged"}),
                 HeadSyncOutcome::Seeded { commit_sha } => {
                     json!({"status": "seeded", "commit_sha": commit_sha})
@@ -424,7 +412,7 @@ async fn main() -> Result<()> {
             let sb = sandbox.context("repository must contain both .git and relay.toml")?;
             let _ = sync_git_head_into_engine(&engine, &sb, "cli").await?;
             let base_commit_sha = match base_commit {
-                Some(sha) => sha,
+                Some(rev) => sb.resolve_commit(&rev).await?,
                 None => sb.head_commit_sha().await?,
             };
             let mut param_map = BTreeMap::new();
@@ -459,7 +447,7 @@ async fn main() -> Result<()> {
             {
                 warn!(%error, "Unable to sync Git HEAD before composing context");
             }
-            let snapshot = engine.dag_snapshot(true).await;
+            let snapshot = engine.dag_snapshot(true).await?;
             let tasks = engine.list_tasks().await?;
             let handoffs = engine.list_handoffs(u32::MAX).await?;
             if all_strategies {
@@ -682,7 +670,7 @@ fn spawn_host_event_loop(
                         }
                     });
                 }
-                RelayNodeEvent::ApprovalResolved(task_id, decision) => {
+                RelayNodeEvent::ApprovalResolved(task_id, _, decision) => {
                     if sandbox.is_none() {
                         continue;
                     }

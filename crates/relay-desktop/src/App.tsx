@@ -1,5 +1,6 @@
 import { useMemo, useState } from "react";
-import type { ApprovalDecision, GraphNode, TaskRecord_Serialize } from "./bindings";
+import type { GraphNode, TaskRecord_Serialize } from "./bindings";
+import { findCommitArtifact, needsTaskApproval, type ApprovalInput } from "./lib/relayApi";
 import { DagCanvas } from "./components/DagCanvas";
 import { LeftRail } from "./components/LeftRail";
 import { RightWorkbenchRail, type RightRailTab } from "./components/RightWorkbenchRail";
@@ -71,18 +72,14 @@ export default function App() {
   const pendingFixTask: TaskRecord_Serialize | null = useMemo(() => {
     if (activeApprovalTaskId) {
       const explicit = tasks.find((t) => t.spec.task_id === activeApprovalTaskId);
-      if (explicit?.state === "self_healing_proposed" && explicit.active_proposal) {
-        return explicit;
-      }
+      return explicit && needsTaskApproval(explicit) ? explicit : null;
     }
-    return (
-      tasks.find((t) => t.state === "self_healing_proposed" && t.active_proposal != null) ?? null
-    );
+    return tasks.find(needsTaskApproval) ?? null;
   }, [tasks, activeApprovalTaskId]);
 
   const latestArtifact = useMemo(() => {
     if (!dag) return null;
-    return [...dag.nodes].reverse().find((n) => n.payload.kind === "artifact") ?? null;
+    return findCommitArtifact(dag, dag.head_commit_sha);
   }, [dag]);
 
   const handleSelectNode = (nodeId: string | null) => {
@@ -122,13 +119,13 @@ export default function App() {
     });
   };
 
-  const handleRecordDecision = (values: {
+  const handleRecordDecision = async (values: {
     label: string;
     rationale: string;
     constraints: string[];
   }) => {
     const now = new Date().toISOString();
-    const id = `dec-${Date.now().toString(36)}`;
+    const id = `dec-${crypto.randomUUID()}`;
     const node: GraphNode = {
       id,
       label: values.label,
@@ -152,22 +149,16 @@ export default function App() {
           },
         ]
       : [];
-    upsertNode.mutate(
-      { node, edges },
-      {
-        onSuccess: () => {
-          setSelectedNodeId(id);
-          setInspectorMode("node");
-          setRightRailTab("inspector");
-          setRightRailOpen(true);
-        },
-      },
-    );
+    await upsertNode.mutateAsync({ node, edges });
+    setSelectedNodeId(id);
+    setInspectorMode("node");
+    setRightRailTab("inspector");
+    setRightRailOpen(true);
   };
 
-  const handleDispatchTask = (values: DispatchTaskFormValues) => {
-    submitTask.mutate({
-      task_id: crypto.randomUUID(),
+  const handleDispatchTask = async (values: DispatchTaskFormValues) => {
+    await submitTask.mutateAsync({
+      task_id: values.taskId,
       repo_id: workspace?.repo_id ?? dag?.repo_id ?? "default-workspace",
       base_commit_sha: dag?.head_commit_sha ?? "HEAD",
       command_preset: values.preset,
@@ -183,28 +174,26 @@ export default function App() {
     setSettingsModalOpen(true);
   };
 
-  const handleResolveApproval = (
-    taskId: string,
-    decision: ApprovalDecision,
-    fromTab: RightRailTab,
-  ) => {
-    resolveApproval.mutate(
-      { taskId, decision },
-      {
-        onSuccess: (updated) => {
-          if (fromTab === "agent") {
-            return;
-          }
-          if (updated.evidence_node_id) {
-            setSelectedNodeId(updated.evidence_node_id);
-            setInspectorMode("node");
-            setRightRailTab("inspector");
-          } else {
-            setRightRailTab("agent");
-          }
-        },
+  const openPairing = () => {
+    if (workspace?.repo_root) setPairModalOpen(true);
+    else handleOpenSettings("repo");
+  };
+
+  const handleResolveApproval = (approval: ApprovalInput, fromTab: RightRailTab) => {
+    resolveApproval.mutate(approval, {
+      onSuccess: (updated) => {
+        if (fromTab === "agent") {
+          return;
+        }
+        if (updated.evidence_node_id) {
+          setSelectedNodeId(updated.evidence_node_id);
+          setInspectorMode("node");
+          setRightRailTab("inspector");
+        } else {
+          setRightRailTab("agent");
+        }
       },
-    );
+    });
   };
 
   return (
@@ -218,7 +207,7 @@ export default function App() {
         isCopilotOpen={rightRailOpen && rightRailTab === "agent"}
         onToggleTheme={toggleTheme}
         onToggleCopilot={handleToggleCopilot}
-        onOpenPairModal={() => setPairModalOpen(true)}
+        onOpenPairModal={openPairing}
         onOpenRunTask={() => setTaskModalOpen(true)}
         onOpenRepoSettings={() => handleOpenSettings("repo")}
         onOpenLlmSettings={() => handleOpenSettings("llm")}
@@ -229,7 +218,7 @@ export default function App() {
           status={status}
           tasks={tasks}
           onOpenRunTask={() => setTaskModalOpen(true)}
-          onOpenPairModal={() => setPairModalOpen(true)}
+          onOpenPairModal={openPairing}
           onOpenApproval={handleOpenApproval}
           onSelectEvidenceNode={handleSelectNode}
           onSwitchMode={(mode) => switchMode.mutate(mode)}
@@ -256,8 +245,8 @@ export default function App() {
           onOpenRecordDecision={() => setDecisionModalOpen(true)}
           onOpenDispatchTask={() => setTaskModalOpen(true)}
           onOpenRepoSettings={() => handleOpenSettings("repo")}
-          onOpenPairModal={() => setPairModalOpen(true)}
-          onGenerateManifest={() => initManifest.mutate(undefined)}
+          manifestError={initManifest.error ? String(initManifest.error) : null}
+          onGenerateManifest={() => initManifest.mutate(workspace?.repo_root)}
         />
 
         <RightWorkbenchRail
@@ -273,6 +262,7 @@ export default function App() {
           pendingFixTask={pendingFixTask}
           onResolveApproval={handleResolveApproval}
           isResolvingApproval={resolveApproval.isPending}
+          approvalError={resolveApproval.error == null ? null : String(resolveApproval.error)}
           messages={copilot.messages}
           isStreaming={copilot.isStreaming}
           streamingMessageId={copilot.streamingMessageId}
@@ -303,7 +293,12 @@ export default function App() {
         onOpenRepoSettings={() => handleOpenSettings("repo")}
       />
 
-      <PairDeviceModal isOpen={pairModalOpen} onOpenChange={setPairModalOpen} />
+      <PairDeviceModal
+        key={`${workspace?.repo_root}:${status?.mode}`}
+        mode={status?.mode ?? "local_dual_sandbox"}
+        isOpen={pairModalOpen}
+        onOpenChange={setPairModalOpen}
+      />
 
       <WorkspaceSettingsModal
         isOpen={settingsModalOpen}

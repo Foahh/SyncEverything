@@ -48,8 +48,8 @@ import type {
   AgentApprovalCard_Serialize,
   AgentChatMessage_Serialize,
   AgentToolTrace_Serialize,
-  ApprovalDecision,
 } from "../bindings";
+import type { ApprovalInput } from "../lib/relayApi";
 
 const STREAMDOWN_PLUGINS = { cjk };
 
@@ -187,7 +187,7 @@ function InlineApprovalCard({
   isResolvingApproval,
 }: {
   approval: AgentApprovalCard_Serialize;
-  onResolveApproval: (taskId: string, decision: ApprovalDecision) => void;
+  onResolveApproval: (approval: ApprovalInput) => void;
   isResolvingApproval: boolean;
 }) {
   const { t } = useTranslation();
@@ -244,7 +244,13 @@ function InlineApprovalCard({
               variant="outline"
               size="sm"
               disabled={isResolvingApproval}
-              onClick={() => onResolveApproval(approval.task_id, "rejected")}
+              onClick={() =>
+                onResolveApproval({
+                  taskId: approval.task_id,
+                  patchId: approval.patch_id,
+                  decision: "rejected",
+                })
+              }
             >
               <span className="relay-text-trim leading-none">{t("detail.dismissFix")}</span>
             </Button>
@@ -253,7 +259,13 @@ function InlineApprovalCard({
               variant="default"
               size="sm"
               disabled={isResolvingApproval}
-              onClick={() => onResolveApproval(approval.task_id, "approved")}
+              onClick={() =>
+                onResolveApproval({
+                  taskId: approval.task_id,
+                  patchId: approval.patch_id,
+                  decision: "approved",
+                })
+              }
             >
               <CheckCircle2 data-icon="inline-start" />
               <span className="relay-text-trim leading-none">{t("detail.applyAndRun")}</span>
@@ -283,7 +295,7 @@ function InlineApprovalCard({
 interface CopilotMessageItemProps {
   message: AgentChatMessage_Serialize;
   isStreaming: boolean;
-  onResolveApproval: (taskId: string, decision: ApprovalDecision) => void;
+  onResolveApproval: (approval: ApprovalInput) => void;
   isResolvingApproval: boolean;
   onOpenLlmSettings: () => void;
 }

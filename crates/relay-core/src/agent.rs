@@ -5,7 +5,7 @@ pub use copilot::{
 };
 
 use crate::contracts::{
-    ApproveAndExecuteArgs, DagSnapshot, Freshness, HandoffSummary, NodeKind, PatchKind,
+    ApprovalExecutionResponse, ApproveAndExecuteArgs, DagSnapshot, Freshness, HandoffSummary, NodeKind, PatchKind,
     ProposeWorktreePatchArgs, RunPreflightArgs, TaskId, TaskRecord, TaskState,
 };
 use crate::engine::RelayEngine;
@@ -467,6 +467,8 @@ impl SelfHealingAgent {
 /// Outcome of the Host preflight -> diagnose -> execute pipeline.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HostTaskOutcome {
+    /// Clean preflight is persisted and the requested preset needs human confirmation.
+    AwaitingApproval,
     /// Smoke passed cleanly and the requested preset ran to completion.
     Completed,
     /// Smoke failed, self-healing verified a patch, and task is awaiting user approval.
@@ -512,16 +514,20 @@ pub async fn run_host_task_pipeline(
     }
 
     if report.smoke_passed {
-        mcp.handle_approve_and_execute(
+        let outcome = mcp.handle_approve_and_execute(
             ApproveAndExecuteArgs {
                 task_id,
                 patch_id: None,
-                approved_via_ui: Some(true),
+                approved_via_ui: None,
             },
             None,
         )
         .await?;
-        return Ok(HostTaskOutcome::Completed);
+        return Ok(match outcome {
+            ApprovalExecutionResponse::ApprovalRequired { .. } => HostTaskOutcome::AwaitingApproval,
+            ApprovalExecutionResponse::ExecutionStarted { .. } => HostTaskOutcome::Completed,
+            ApprovalExecutionResponse::Rejected { .. } => HostTaskOutcome::Skipped,
+        });
     }
 
     let heal_result: RelayResult<HostTaskOutcome> = async {
@@ -530,7 +536,7 @@ pub async fn run_host_task_pipeline(
             task.spec.repo_id,
             task.spec.base_commit_sha,
             task.spec.command_preset,
-            build_safe_dag_context(&engine.dag_snapshot(true).await),
+            build_safe_dag_context(&engine.dag_snapshot(true).await?),
         );
         let llm = LlmClient::new(llm_config, Duration::from_secs(30))?;
         let proposal = SelfHealingAgent::new(llm)
@@ -665,7 +671,8 @@ pub fn compose_context(
         if matches!(node.payload, NodeKind::Evidence { .. }) {
             match node.freshness {
                 Freshness::Stale { .. } => stale_evidence_count += 1,
-                Freshness::Fresh | Freshness::PendingVerify => fresh_evidence_count += 1,
+                Freshness::Fresh => fresh_evidence_count += 1,
+                Freshness::PendingVerify => {}
             }
         }
     }
@@ -776,7 +783,7 @@ pub fn compose_context(
             }
             out.push_str("\n[ACTIVE TASKS]\n");
             for task in tasks {
-                if !matches!(task.state, TaskState::Completed | TaskState::Rejected) {
+                if crate::state::is_active(task.state) {
                     let entry = json!({
                         "task_id": task.spec.task_id,
                         "preset": task.spec.command_preset,

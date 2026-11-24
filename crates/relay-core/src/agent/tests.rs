@@ -270,6 +270,7 @@ fn compose_context_ablation_strategies_are_deterministic_and_quarantine_stale_in
                 updated_at: now,
             },
             evidence("ev-fresh", Freshness::Fresh, "1.942-fresh"),
+            evidence("ev-pending", Freshness::PendingVerify, "unverified"),
             evidence(
                 "ev-stale",
                 Freshness::Stale {
@@ -289,7 +290,7 @@ fn compose_context_ablation_strategies_are_deterministic_and_quarantine_stale_in
         stale_count: 1,
         captured_at: now,
     };
-    let tasks = vec![TaskRecord {
+    let mut tasks = vec![TaskRecord {
         spec: TaskSpec {
             task_id: Uuid::now_v7(),
             repo_id: "forecast-bench".into(),
@@ -308,6 +309,11 @@ fn compose_context_ablation_strategies_are_deterministic_and_quarantine_stale_in
         created_at: now,
         updated_at: now,
     }];
+    let mut failed = tasks[0].clone();
+    failed.spec.task_id = Uuid::now_v7();
+    failed.spec.command_preset = "failed-preset".into();
+    failed.state = TaskState::Failed;
+    tasks.push(failed);
     let handoffs = vec![HandoffSummary {
         handoff_id: "ho-1".into(),
         repo_id: "forecast-bench".into(),
@@ -329,6 +335,8 @@ fn compose_context_ablation_strategies_are_deterministic_and_quarantine_stale_in
     assert_eq!(full.exposed_stale_metrics_count, 1);
     assert_eq!(flat.exposed_stale_metrics_count, 1);
     assert_eq!(dag.exposed_stale_metrics_count, 0);
+    assert_eq!(dag.fresh_evidence_count, 1);
+    assert!(!dag.content.contains("failed-preset"));
 
     assert!(full.content.contains("2.165-stale-secret"));
     assert!(flat.content.contains("2.165-stale-secret"));
@@ -348,17 +356,21 @@ async fn stream_chat_with_tools_parses_chunked_sse_text_and_tool_calls() {
         let (mut socket, _) = listener.accept().await.unwrap();
         let mut buf = [0u8; 8192];
         let _ = socket.read(&mut buf).await.unwrap();
+        socket.write_all(b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ntransfer-encoding: chunked\r\n\r\n").await.unwrap();
         let sse = concat!(
-            "HTTP/1.1 200 OK\r\n",
-            "content-type: text/event-stream\r\n",
-            "connection: close\r\n\r\n",
             "data: {\"choices\":[{\"delta\":{\"content\":\"Checking \"}}]}\n\n",
-            "data: {\"choices\":[{\"delta\":{\"content\":\"DAG...\"}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"content\":\"结果...\"}}]}\n\n",
             "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_abc\",\"function\":{\"name\":\"get_dag_\",\"arguments\":\"{\\\"include_\"}}]}}]}\n\n",
             "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"name\":\"snapshot\",\"arguments\":\"stale\\\":true}\"}}]}}]}\n\n",
             "data: [DONE]\n\n"
         );
-        socket.write_all(sse.as_bytes()).await.unwrap();
+        let split = sse.find('结').unwrap() + 1;
+        for chunk in [&sse.as_bytes()[..split], &sse.as_bytes()[split..]] {
+            socket.write_all(format!("{:x}\r\n", chunk.len()).as_bytes()).await.unwrap();
+            socket.write_all(chunk).await.unwrap();
+            socket.write_all(b"\r\n").await.unwrap();
+        }
+        socket.write_all(b"0\r\n\r\n").await.unwrap();
     });
 
     let client = endpoint(format!("http://{addr}/v1"));
@@ -375,8 +387,8 @@ async fn stream_chat_with_tools_parses_chunked_sse_text_and_tool_calls() {
         .unwrap();
     server.await.unwrap();
 
-    assert_eq!(streamed, vec!["Checking ", "DAG..."]);
-    assert_eq!(turn.content, "Checking DAG...");
+    assert_eq!(streamed, vec!["Checking ", "结果..."]);
+    assert_eq!(turn.content, "Checking 结果...");
     assert_eq!(turn.tool_calls.len(), 1);
     assert_eq!(turn.tool_calls[0].id, "call_abc");
     assert_eq!(turn.tool_calls[0].name, "get_dag_snapshot");
@@ -495,12 +507,20 @@ async fn engine_persists_chat_history_and_resolves_approvals() {
     assert_eq!(listed[1].traces.len(), 1);
     assert_eq!(listed[1].approval.as_ref().unwrap().resolved, None);
 
+    for patch in [None, Some("previous-patch")] {
+        assert_eq!(
+            engine.mark_chat_approval_resolved("task-42", patch, "approved").await.unwrap(),
+            0
+        );
+    }
     let updated = engine
-        .mark_chat_approval_resolved("task-42", "approved")
+        .mark_chat_approval_resolved("task-42", Some("patch-9"), "approved")
         .await
         .unwrap();
     assert_eq!(updated, 1);
 
+    // A final stream update can arrive after the user has already acted on the card.
+    engine.upsert_chat_message(&assistant_msg).await.unwrap();
     let after = engine.list_chat_messages(50).await.unwrap();
     assert_eq!(
         after[1].approval.as_ref().unwrap().resolved.as_deref(),

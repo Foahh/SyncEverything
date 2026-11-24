@@ -11,14 +11,14 @@ use crate::engine::RelayEngine;
 use crate::error::{RelayError, RelayResult};
 use crate::sandbox::{WorktreeSandbox, compute_env_fingerprint};
 use chrono::Utc;
-use iroh::endpoint::{Connection, presets};
+use iroh::endpoint::{Connection, NetReportConfig, PortmapperConfig, presets};
 use iroh::protocol::Router;
 use iroh::{Endpoint, EndpointAddr, EndpointId, RelayMode};
 use iroh_blobs::store::fs::FsStore;
 use iroh_blobs::{BlobsProtocol, Hash};
 use peer::PeerState;
 use rpc::{encode_frame, read_frame, write_frame};
-use std::net::Ipv4Addr;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
@@ -47,7 +47,7 @@ pub struct RelayNodeConfig {
 #[derive(Debug)]
 pub enum RelayNodeEvent {
     TaskSubmitted(TaskId),
-    ApprovalResolved(TaskId, ApprovalDecision),
+    ApprovalResolved(TaskId, Option<String>, ApprovalDecision),
     DagChanged,
     PeerPaired,
 }
@@ -113,23 +113,19 @@ impl RelayNode {
         tokio::fs::create_dir_all(&blob_dir).await?;
         let endpoint = match config.profile {
             NetworkProfile::StandardN0 => Endpoint::bind(presets::N0).await,
-            NetworkProfile::LanOnly => {
-                Endpoint::builder(presets::Minimal)
-                    .clear_ip_transports()
-                    .bind_addr((Ipv4Addr::UNSPECIFIED, 0))
-                    .map_err(transport_error)?
+            NetworkProfile::LanOnly | NetworkProfile::LocalOnly => {
+                let mut builder = Endpoint::builder(presets::Minimal)
                     .relay_mode(RelayMode::Disabled)
-                    .bind()
-                    .await
-            }
-            NetworkProfile::LocalOnly => {
-                Endpoint::builder(presets::Minimal)
-                    .clear_ip_transports()
-                    .bind_addr((Ipv4Addr::LOCALHOST, 0))
-                    .map_err(transport_error)?
-                    .relay_mode(RelayMode::Disabled)
-                    .bind()
-                    .await
+                    .portmapper_config(PortmapperConfig::Disabled)
+                    .net_report_config(NetReportConfig::minimal());
+                if config.profile == NetworkProfile::LocalOnly {
+                    builder = builder
+                        .clear_ip_transports()
+                        .bind_addr((Ipv4Addr::LOCALHOST, 0))
+                        .map_err(transport_error)?;
+                }
+                // The default IP transports bind all IPv4 and available IPv6 interfaces.
+                builder.bind().await
             }
         }
         .map_err(transport_error)?;
@@ -165,7 +161,11 @@ impl RelayNode {
                 EndpointAddr::with_ip_addr,
             );
         }
-        self.endpoint().addr()
+        let addr = self.endpoint().addr();
+        if self.shared.profile == NetworkProfile::LanOnly {
+            return direct_lan_addr(&addr);
+        }
+        addr
     }
 
     pub fn endpoint(&self) -> &Endpoint {
@@ -285,6 +285,23 @@ impl RelayNode {
     /// Fetch and pin a blob by its BLAKE3 hash.
     pub async fn pull_blob_from(&self, peer_addr: EndpointAddr, hash: Hash) -> RelayResult<()> {
         self.shared.pull_blob_from(peer_addr, hash).await
+    }
+
+    pub(crate) async fn publish_evidence_log(&self, text: &str) -> RelayResult<()> {
+        self.store().blobs().add_slice(text.as_bytes()).with_tag().await.map_err(transport_error)?;
+        Ok(())
+    }
+
+    pub(crate) async fn fetch_evidence_log(&self, hash_text: &str) -> RelayResult<String> {
+        let hash: Hash = hash_text.parse().map_err(transport_error)?;
+        let addr = self.shared.peer().selected_addr().ok_or_else(|| {
+            RelayError::Transport("no paired peer is available for the evidence log".into())
+        })?;
+        tokio::time::timeout(RPC_TIMEOUT, self.pull_blob_from(addr, hash))
+            .await
+            .map_err(|_| RelayError::Transport("evidence log transfer timed out".into()))??;
+        let bytes = self.store().blobs().get_bytes(hash).await.map_err(transport_error)?;
+        String::from_utf8(bytes.into()).map_err(transport_error)
     }
 
     /// Publish the Git bundle and optional working diff before announcing their hashes.
@@ -423,10 +440,7 @@ impl NodeState {
                 local
             }
             NetworkProfile::LanOnly => {
-                let mut direct = EndpointAddr::new(addr.id);
-                for ip in addr.ip_addrs() {
-                    direct = direct.with_ip_addr(*ip);
-                }
+                let direct = direct_lan_addr(&addr);
                 if direct.is_empty() {
                     return Err(RelayError::Transport(format!(
                         "no direct LAN IP address for {}",
@@ -455,6 +469,20 @@ impl NodeState {
         }
         Ok(())
     }
+}
+
+fn direct_lan_addr(addr: &EndpointAddr) -> EndpointAddr {
+    let usable = |socket: &SocketAddr| {
+        let ip = socket.ip().to_canonical();
+        socket.port() != 0
+            && !ip.is_unspecified()
+            && !ip.is_multicast()
+            && ip != IpAddr::V4(Ipv4Addr::BROADCAST)
+    };
+    addr.ip_addrs()
+        .copied()
+        .filter(usable)
+        .fold(EndpointAddr::new(addr.id), EndpointAddr::with_ip_addr)
 }
 
 struct TempBundle {

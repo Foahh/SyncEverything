@@ -7,19 +7,19 @@ smoke_preset = "check"
 description = "Compile-check all Rust crates in the workspace"
 program = "cargo"
 args = ["check", "--workspace"]
-timeout_secs = 300
+timeout_secs = 900
 allowed_params = []
 
 [presets.test_core]
 description = "Run unit & integration tests for relay-core and relay-daemon"
 program = "cargo"
 args = ["test", "-p", "relay-core", "-p", "relay-daemon"]
-timeout_secs = 300
+timeout_secs = 1800
 allowed_params = []
 
 [presets.test]
 description = "Run workspace Rust tests (excluding desktop GUI crate)"
 program = "cargo"
 args = ["test", "--workspace", "--exclude", "relay-desktop"]
-timeout_secs = 300
+timeout_secs = 1800
 allowed_params = []

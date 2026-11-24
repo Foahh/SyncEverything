@@ -6,6 +6,7 @@ use crate::contracts::{
 };
 use crate::dag::{DagEngine, supersedes_edge};
 use crate::error::{RelayError, RelayResult};
+use crate::sandbox::HeadSyncOutcome;
 use crate::state::{is_active, validate_transition};
 use crate::storage::{
     RelayStore, fetch_task, fetch_tasks, insert_task, write_edge, write_freshness, write_handoff,
@@ -18,7 +19,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
-use tokio::sync::{Mutex, MutexGuard, OwnedRwLockWriteGuard, RwLock, watch};
+use tokio::sync::{Mutex, MutexGuard, OwnedMutexGuard, watch};
 use uuid::Uuid;
 
 enum EvidenceArtifact<'a> {
@@ -26,12 +27,36 @@ enum EvidenceArtifact<'a> {
     FromCommit(&'a GraphNode),
 }
 
+#[derive(Debug)]
+struct CachedDag {
+    graph: DagEngine,
+    revision: i64,
+}
+
+async fn dag_revision(conn: &mut SqliteConnection) -> RelayResult<i64> {
+    Ok(sqlx::query_scalar("SELECT value FROM dag_revision WHERE id = 1")
+        .fetch_one(conn).await?)
+}
+
+async fn load_graph(conn: &mut SqliteConnection, repo_id: &str) -> RelayResult<DagEngine> {
+    let (nodes, edges) = RelayStore::fetch_dag(conn, repo_id).await?;
+    let mut graph = DagEngine::new(repo_id);
+    for node in nodes {
+        graph.upsert_node(node);
+    }
+    for edge in edges {
+        graph.restore_edge(edge)?;
+    }
+    graph.refresh_head_commit();
+    Ok(graph)
+}
+
 /// Coordinates Relay state for one repository.
 #[derive(Clone, Debug)]
 pub struct RelayEngine {
     repo_id: String,
     store: RelayStore,
-    dag: Arc<RwLock<DagEngine>>,
+    dag: Arc<Mutex<CachedDag>>,
     mode: watch::Sender<RuntimeMode>,
     pending_outbox: Arc<AtomicU32>,
     metadata_writes: Arc<Mutex<()>>,
@@ -72,15 +97,13 @@ impl RelayEngine {
         repo_root: Option<PathBuf>,
         default_mode: RuntimeMode,
     ) -> RelayResult<Self> {
-        let (nodes, edges) = store.load_dag(&repo_id).await?;
-        let mut dag = DagEngine::new(&repo_id);
-        for node in nodes {
-            dag.upsert_node(node);
-        }
-        for edge in edges {
-            dag.add_edge(edge)?;
-        }
-        dag.refresh_head_commit();
+        let mut tx = store.begin_write().await?;
+        let mut graph = load_graph(&mut tx, &repo_id).await?;
+        let repaired = graph.reconcile_superseded_evidence();
+        let nodes: Vec<_> = repaired.iter().filter_map(|id| graph.get_node(id)).collect();
+        write_freshness(&mut tx, nodes).await?;
+        let revision = dag_revision(&mut tx).await?;
+        tx.commit().await?;
         let mode = store
             .get_runtime_mode(&repo_id)
             .await?
@@ -89,7 +112,7 @@ impl RelayEngine {
         Ok(Self {
             repo_id,
             store,
-            dag: Arc::new(RwLock::new(dag)),
+            dag: Arc::new(Mutex::new(CachedDag { graph, revision })),
             mode: watch::Sender::new(mode),
             pending_outbox: Arc::new(AtomicU32::new(pending_outbox)),
             metadata_writes: Arc::new(Mutex::new(())),
@@ -106,12 +129,35 @@ impl RelayEngine {
         self.repo_root.as_deref()
     }
 
-    pub async fn dag_snapshot(&self, include_stale: bool) -> DagSnapshot {
-        self.dag.read().await.snapshot(include_stale)
+    async fn current_dag(&self, conn: &mut SqliteConnection) -> RelayResult<OwnedMutexGuard<CachedDag>> {
+        let mut cached = self.dag.clone().lock_owned().await;
+        let revision = dag_revision(conn).await?;
+        if cached.revision != revision {
+            let mut graph = load_graph(conn, &self.repo_id).await?;
+            graph.reconcile_superseded_evidence();
+            *cached = CachedDag { graph, revision };
+        }
+        Ok(cached)
     }
 
-    pub(crate) async fn head_commit_sha(&self) -> Option<String> {
-        self.dag.read().await.head_commit_sha().map(str::to_owned)
+    async fn read_dag(&self) -> RelayResult<OwnedMutexGuard<CachedDag>> {
+        let mut tx = self.store.pool().begin().await?;
+        let dag = self.current_dag(&mut tx).await?;
+        tx.commit().await?;
+        Ok(dag)
+    }
+
+    pub async fn dag_snapshot(&self, include_stale: bool) -> RelayResult<DagSnapshot> {
+        Ok(self.read_dag().await?.graph.snapshot(include_stale))
+    }
+
+    pub(crate) async fn head_commit_sha(&self) -> RelayResult<Option<String>> {
+        Ok(self.read_dag().await?.graph.head_commit_sha().map(str::to_owned))
+    }
+
+    pub async fn head_artifact_id(&self) -> RelayResult<Option<String>> {
+        let dag = self.read_dag().await?;
+        Ok(dag.graph.head_commit_sha().and_then(|sha| dag.graph.artifact_id_for_commit(sha)).map(str::to_owned))
     }
 
     pub async fn upsert_node_and_edges(
@@ -133,8 +179,9 @@ impl RelayEngine {
         edges: Vec<GraphEdge>,
         from_peer: bool,
     ) -> RelayResult<DagSnapshot> {
-        let dag = self.dag.clone().write_owned().await;
-        let mut staged = dag.clone();
+        let mut tx = self.store.begin_write().await?;
+        let dag = self.current_dag(&mut tx).await?;
+        let mut staged = dag.graph.clone();
         let mut changed_nodes = BTreeSet::new();
         let mut updated_artifacts = BTreeSet::new();
         let mut stale_commits = BTreeMap::new();
@@ -183,26 +230,28 @@ impl RelayEngine {
         }
 
         let mut supersessions = BTreeMap::new();
+        let mut edges_changed = false;
         for edge in &edges {
-            staged.upsert_edge(edge.clone())?;
+            edges_changed |= staged.upsert_edge(edge.clone())?;
             if edge.kind == EdgeKind::Supersedes {
                 supersessions.insert(edge.id.as_str(), edge);
             } else {
                 supersessions.remove(edge.id.as_str());
             }
         }
+        if edges_changed {
+            staged.validate_edge_changes(&dag.graph)?;
+        }
         // Traverse the finished graph so invalidation also covers edges received in this delta.
-        let mut invalidated = BTreeSet::new();
         for edge in supersessions.into_values() {
             let old_sha = staged.artifact_commit(&edge.to)?;
             let new_sha = staged.artifact_commit(&edge.from)?;
             let reason = format!("Artifact {} superseded by {}", edge.to, edge.from);
             if old_sha != new_sha {
-                stale_commits.insert(old_sha.into(), reason.clone());
+                stale_commits.insert(old_sha.into(), reason);
             }
-            let report = staged.invalidate_evidence(&edge.to, &edge.from, reason)?;
-            invalidated.extend(report.invalidated_evidence_ids);
         }
+        let mut invalidated: BTreeSet<_> = staged.reconcile_superseded_evidence().into_iter().collect();
         for id in updated_artifacts {
             let reason = format!("Artifact {id} updated");
             let report = staged.propagate_staleness(&id, reason)?;
@@ -210,7 +259,6 @@ impl RelayEngine {
         }
         staged.refresh_head_commit();
 
-        let mut tx = self.store.begin_write().await?;
         for id in &changed_nodes {
             if let Some(node) = staged.get_node(id) {
                 write_node(&mut tx, &self.repo_id, node).await?;
@@ -236,16 +284,84 @@ impl RelayEngine {
         new_artifact: GraphNode,
         reason: impl Into<String>,
     ) -> RelayResult<StalePropagationReport> {
-        let dag = self.dag.clone().write_owned().await;
-        let old_sha = dag.artifact_commit(old_artifact_id)?.to_owned();
+        let mut tx = self.store.begin_write().await?;
+        let dag = self.current_dag(&mut tx).await?;
+        self.persist_supersession(tx, dag, old_artifact_id, new_artifact, reason.into()).await
+    }
+
+    pub(crate) async fn observed_git_head(&self, checkout: &Path) -> RelayResult<Option<String>> {
+        self.store.observed_git_head(&self.repo_id, checkout).await
+    }
+
+    pub(crate) async fn observe_git_artifact(
+        &self,
+        checkout: &Path,
+        mut artifact: GraphNode,
+        expected_prior: Option<&str>,
+        explicit: bool,
+    ) -> RelayResult<HeadSyncOutcome> {
+        let NodeKind::Artifact { git_commit_sha, .. } = &artifact.payload else {
+            return Err(RelayError::Internal("Git HEAD requires an artifact".into()));
+        };
+        let commit_sha = git_commit_sha.clone();
+        let mut tx = self.store.begin_write().await?;
+        let prior = RelayStore::fetch_observed_head(&mut tx, &self.repo_id, checkout).await?;
+        if prior.as_deref() != expected_prior {
+            // Another watcher finished after this observer sampled the physical checkout.
+            return if explicit {
+                Err(RelayError::Git("another observer updated Git HEAD during sync; retry sync-head".into()))
+            } else {
+                Ok(HeadSyncOutcome::Unchanged)
+            };
+        }
+        if !explicit && prior.as_deref() == Some(commit_sha.as_str()) {
+            return Ok(HeadSyncOutcome::Unchanged);
+        }
+        let dag = self.current_dag(&mut tx).await?;
+        RelayStore::write_observed_head(&mut tx, &self.repo_id, checkout, &commit_sha).await?;
+        if let Some(previous_sha) = dag.graph.head_commit_sha() {
+            // Pairing may import a newer artifact before this checkout is first observed.
+            // Capture its baseline without treating an unchanged working copy as a new edit.
+            if previous_sha == commit_sha || (prior.is_none() && !explicit) {
+                tx.commit().await?;
+                return Ok(HeadSyncOutcome::Unchanged);
+            }
+            let old_id = dag.graph.artifact_id_for_commit(previous_sha)
+                .ok_or_else(|| RelayError::Internal("previous HEAD has no artifact".into()))?.to_owned();
+            if dag.graph.get_node(&artifact.id).is_some() {
+                // Revisiting a commit starts a new snapshot without cycling back to its old results.
+                artifact.id = format!("{}:{}", artifact.id, blake3::hash(old_id.as_bytes()).to_hex());
+            }
+            let short_sha: String = commit_sha.chars().take(7).collect();
+            let reason = format!("Git commit {short_sha}: {}", artifact.label);
+            let report = self.persist_supersession(tx, dag, &old_id, artifact, reason).await?;
+            Ok(HeadSyncOutcome::Superseded { commit_sha, report })
+        } else {
+            let mut staged = dag.graph.clone();
+            write_node(&mut tx, &self.repo_id, &artifact).await?;
+            staged.upsert_node(artifact);
+            staged.refresh_head_commit();
+            commit_dag(tx, dag, staged).await?;
+            Ok(HeadSyncOutcome::Seeded { commit_sha })
+        }
+    }
+
+    async fn persist_supersession(
+        &self,
+        mut tx: Transaction<'static, Sqlite>,
+        dag: OwnedMutexGuard<CachedDag>,
+        old_artifact_id: &str,
+        new_artifact: GraphNode,
+        reason: String,
+    ) -> RelayResult<StalePropagationReport> {
+        let old_sha = dag.graph.artifact_commit(old_artifact_id)?.to_owned();
         let edge = supersedes_edge(old_artifact_id, &new_artifact.id);
-        let mut staged = dag.clone();
+        let mut staged = dag.graph.clone();
         let report = staged.supersede_artifact(old_artifact_id, new_artifact, reason)?;
         let new_node = staged
             .get_node(&edge.from)
             .ok_or_else(|| RelayError::NodeNotFound(edge.from.clone()))?;
 
-        let mut tx = self.store.begin_write().await?;
         write_node(&mut tx, &self.repo_id, new_node).await?;
         write_edge(&mut tx, &self.repo_id, &edge).await?;
         let invalidated_nodes: Vec<&GraphNode> = report
@@ -267,24 +383,27 @@ impl RelayEngine {
         node_id: &str,
         max_lines: u32,
     ) -> RelayResult<(GraphNode, String)> {
-        let dag = self.dag.read().await;
-        let node = dag.assert_evidence_fresh(node_id)?;
+        let mut tx = self.store.pool().begin().await?;
+        let dag = self.current_dag(&mut tx).await?;
+        let node = dag.graph.assert_evidence_fresh(node_id)?;
         let NodeKind::Evidence { log_blob_hash, .. } = &node.payload else {
             return Err(RelayError::Internal(format!("node {node_id} is not evidence")));
         };
 
-        let content = self
-            .store
-            .get_log_blob(log_blob_hash)
+        let content = RelayStore::fetch_log_blob(&mut tx, log_blob_hash)
             .await?
-            .ok_or_else(|| {
-                RelayError::Internal(format!(
-                    "log blob {log_blob_hash} for evidence {node_id} is missing",
-                ))
+            .ok_or_else(|| RelayError::MissingEvidenceLog {
+                node_id: node_id.to_owned(),
+                hash: log_blob_hash.clone(),
             })?;
+        tx.commit().await?;
         let mut tail: Vec<_> = content.lines().rev().take(max_lines as usize).collect();
         tail.reverse();
         Ok((node.clone(), tail.join("\n")))
+    }
+
+    pub(crate) async fn cache_log_blob(&self, hash: &str, log: &str) -> RelayResult<()> {
+        self.store.put_log_blob(hash, log).await
     }
 
     pub async fn submit_task(&self, spec: TaskSpec) -> RelayResult<(TaskRecord, bool)> {
@@ -328,7 +447,6 @@ impl RelayEngine {
         outbox: Option<&Value>,
     ) -> RelayResult<(TaskRecord, bool)> {
         self.check_repo(&incoming.spec.repo_id)?;
-        let dag = self.dag.read().await;
         let mut tx = self.store.begin_write().await?;
         let (mut record, inserted) = insert_task(&mut tx, incoming).await?;
         self.check_repo(&record.spec.repo_id)?;
@@ -353,7 +471,7 @@ impl RelayEngine {
                     .iter()
                     .filter(|task| is_active(task.state))
                     .count() as u32,
-                stale_evidence_count: dag.stale_count(),
+                stale_evidence_count: self.current_dag(&mut tx).await?.graph.stale_count(),
                 created_at: record.created_at,
             };
             write_handoff(&mut tx, &handoff).await?;
@@ -560,10 +678,11 @@ impl RelayEngine {
         evidence_task_id.clone_from(&task_id_text);
         log_blob_hash.clone_from(&hash);
 
-        let dag = self.dag.clone().write_owned().await;
+        let mut tx = self.store.begin_write().await?;
+        let dag = self.current_dag(&mut tx).await?;
         let (artifact_node_id, new_artifact) = match artifact {
             EvidenceArtifact::Existing(id) => {
-                dag.artifact_commit(id)?;
+                dag.graph.artifact_commit(id)?;
                 (id, None)
             }
             EvidenceArtifact::FromCommit(node) => {
@@ -573,7 +692,7 @@ impl RelayEngine {
                         node.id,
                     )));
                 };
-                match dag.artifact_id_for_commit(git_commit_sha) {
+                match dag.graph.artifact_id_for_commit(git_commit_sha) {
                     Some(id) => (id, None),
                     None => (node.id.as_str(), Some(node)),
                 }
@@ -585,10 +704,9 @@ impl RelayEngine {
             to: evidence_node.id.clone(),
             kind: EdgeKind::ProducedFrom,
         };
-        let mut tx = self.store.begin_write().await?;
         let mut task = self.require_task(&mut tx, task_id).await?;
         move_task(&mut task, TaskState::Completed)?;
-        if let Some(existing) = dag.get_node(&evidence_node.id) {
+        if let Some(existing) = dag.graph.get_node(&evidence_node.id) {
             match &existing.payload {
                 NodeKind::Evidence { task_id, .. } if task_id == &task_id_text => {
                     if matches!(existing.freshness, Freshness::Stale { .. }) {
@@ -605,20 +723,30 @@ impl RelayEngine {
             }
         }
 
-        let mut staged = dag.clone();
+        let mut staged = dag.graph.clone();
         if let Some(artifact) = new_artifact {
             staged.upsert_node(artifact.clone());
-            staged.refresh_head_commit();
             write_node(&mut tx, &self.repo_id, artifact).await?;
+            if let Some(head_id) = dag.graph.head_commit_sha().and_then(|sha| dag.graph.artifact_id_for_commit(sha)) {
+                // Executing an explicitly selected revision does not switch the active checkout.
+                let historical = supersedes_edge(&artifact.id, head_id);
+                staged.upsert_edge(historical.clone())?;
+                write_edge(&mut tx, &self.repo_id, &historical).await?;
+            }
+            staged.refresh_head_commit();
         }
         staged.upsert_node(evidence_node.clone());
         staged.upsert_edge(edge.clone())?;
+        staged.validate_edge_changes(&dag.graph)?;
+        let invalidated = staged.reconcile_superseded_evidence();
         task.evidence_node_id = Some(evidence_node.id.clone());
         task.error_message = None;
 
         write_log_blob(&mut tx, &hash, raw_log).await?;
         write_node(&mut tx, &self.repo_id, &evidence_node).await?;
         write_edge(&mut tx, &self.repo_id, &edge).await?;
+        let stale_nodes: Vec<_> = invalidated.iter().filter_map(|id| staged.get_node(id)).collect();
+        write_freshness(&mut tx, stale_nodes).await?;
         write_task(&mut tx, &task).await?;
         commit_dag(tx, dag, staged).await?;
         Ok(task)
@@ -656,10 +784,11 @@ impl RelayEngine {
     pub async fn mark_chat_approval_resolved(
         &self,
         task_id: &str,
+        patch_id: Option<&str>,
         decision: &str,
     ) -> RelayResult<u32> {
         self.store
-            .resolve_chat_approvals(&self.repo_id, task_id, decision)
+            .resolve_chat_approvals(&self.repo_id, task_id, patch_id, decision)
             .await
     }
 
@@ -850,13 +979,14 @@ fn move_task(task: &mut TaskRecord, next_state: TaskState) -> RelayResult<()> {
 
 // Keep the write guard through commit and publication, even if the caller stops waiting.
 async fn commit_dag(
-    tx: Transaction<'static, Sqlite>,
-    mut dag: OwnedRwLockWriteGuard<DagEngine>,
+    mut tx: Transaction<'static, Sqlite>,
+    mut dag: OwnedMutexGuard<CachedDag>,
     staged: DagEngine,
 ) -> RelayResult<()> {
+    let revision = dag_revision(&mut tx).await?;
     tokio::spawn(async move {
         tx.commit().await?;
-        *dag = staged;
+        *dag = CachedDag { graph: staged, revision };
         Ok(())
     })
     .await

@@ -141,7 +141,7 @@ async fn dual_node_ping_and_dag_delta_sync_over_iroh() {
     let delta = dag_delta(COMMIT);
     let snapshot = client.sync_dag_delta(host.addr(), delta.clone()).await.unwrap();
     assert_delta(&snapshot, &delta, COMMIT);
-    assert_delta(&host_engine.dag_snapshot(true).await, &delta, COMMIT);
+    assert_delta(&host_engine.dag_snapshot(true).await.unwrap(), &delta, COMMIT);
     assert_eq!(client.peer_status().last_synced_commit.as_deref(), Some(COMMIT));
 
     let result = client
@@ -172,6 +172,40 @@ async fn git_fixture(repo: &Path, args: &[&str]) -> String {
         .unwrap();
     assert!(output.status.success(), "{args:?}: {}", String::from_utf8_lossy(&output.stderr));
     String::from_utf8(output.stdout).unwrap().trim_end().to_owned()
+}
+
+#[tokio::test]
+async fn mirrored_evidence_reads_paired_log_then_uses_offline_cache() {
+    use crate::contracts::ReadEvidenceLogArgs;
+    use crate::mcp::RelayMcpServer;
+
+    let temp = TempDir::new();
+    let (host, _) = start_local(&temp, "log-host", None).await;
+    let (client, engine) = start_local(&temp, "log-client", None).await;
+    let client = Arc::new(client);
+    client.set_remote_peer(host.addr());
+    let log = "first line\nlast line\n";
+    host.publish_evidence_log(log).await.unwrap();
+    let mut delta = dag_delta(COMMIT);
+    let evidence = delta.upsert_nodes.iter_mut().find(|node| node.id == "evidence").unwrap();
+    let NodeKind::Evidence { log_blob_hash, .. } = &mut evidence.payload else { unreachable!() };
+    *log_blob_hash = blake3::hash(log.as_bytes()).to_hex().to_string();
+    engine.apply_dag_delta(delta.clone()).await.unwrap();
+    let server = RelayMcpServer::new(engine.clone(), None, Some(client.clone()));
+    let args = ReadEvidenceLogArgs { node_id: "evidence".into(), max_lines: Some(1) };
+    assert_eq!(server.handle_read_evidence_log(args.clone()).await.unwrap().log_tail, "last line");
+    host.shutdown().await.unwrap();
+    assert_eq!(server.handle_read_evidence_log(args.clone()).await.unwrap().log_tail, "last line");
+    let evidence = delta.upsert_nodes.iter_mut().find(|node| node.id == "evidence").unwrap();
+    evidence.freshness = Freshness::Stale {
+        caused_by: "artifact".into(), reason: "new commit".into(), marked_at: Utc::now(),
+    };
+    engine.apply_dag_delta(delta).await.unwrap();
+    assert!(matches!(
+        server.handle_read_evidence_log(args).await,
+        Err(RelayError::StaleEvidenceBlocked { .. })
+    ));
+    client.shutdown_shared().await.unwrap();
 }
 
 async fn init_repo(repo: &Path) {
@@ -222,8 +256,6 @@ args = ["--version"]
     let receiver = WorktreeSandbox::new(&target, temp.join("target-worktrees"));
     let (host, host_engine) = start_local(&temp, "host-blobs", Some(receiver.clone())).await;
     let (client, _) = start_local(&temp, "client-blobs", None).await;
-    host.register_peer_addr(client.addr());
-
     let delta = dag_delta(&commit);
     let meta = client
         .push_sync_bundle(host.addr(), REPO, &sender, delta.clone())
@@ -231,6 +263,15 @@ args = ["--version"]
         .unwrap();
     assert_eq!(meta.base_commit_sha, commit);
     assert_eq!(meta.branch_name, "main");
+    let reply = host
+        .send_rpc(client.addr(), WireRequest::PushSyncBundle {
+            meta: meta.clone(),
+            dag_delta: delta.clone(),
+        })
+        .await
+        .unwrap();
+    assert!(matches!(reply, WireResponse::Error { .. }));
+    assert!(client.shared.engine.dag_snapshot(true).await.unwrap().nodes.is_empty());
     let hash: Hash = meta.git_bundle_blob_hash.parse().unwrap();
     let blob = host.store().blobs().get_bytes(hash).await.unwrap();
     assert_eq!(hash.as_bytes(), blake3::hash(&blob).as_bytes());
@@ -245,7 +286,7 @@ args = ["--version"]
         receiver.changed_files_in_commit(&commit).await.unwrap(),
         vec!["pyproject.toml", "relay.toml"]
     );
-    assert_delta(&host_engine.dag_snapshot(true).await, &delta, &commit);
+    assert_delta(&host_engine.dag_snapshot(true).await.unwrap(), &delta, &commit);
     assert_eq!(host.peer_status().last_synced_commit.as_deref(), Some(commit.as_str()));
 
     let task_id = Uuid::now_v7();
@@ -309,7 +350,7 @@ async fn offline_outbox_flushes_when_peer_comes_online() {
     assert_eq!(client.peer_status().pending_outbox_count, 0);
     assert_eq!(client_engine.pending_outbox_count().await.unwrap(), 0);
     assert_eq!(client.flush_outbox(host.addr()).await.unwrap(), 0);
-    assert_delta(&host_engine.dag_snapshot(true).await, &delta, COMMIT);
+    assert_delta(&host_engine.dag_snapshot(true).await.unwrap(), &delta, COMMIT);
 
     client.shutdown().await.unwrap();
     host.shutdown().await.unwrap();
@@ -365,7 +406,7 @@ async fn interactive_host_accepts_one_ticket_and_emits_each_rpc_mutation_once() 
     }
     assert!(matches!(
         changes.try_recv().unwrap(),
-        RelayNodeEvent::ApprovalResolved(id, ApprovalDecision::Rejected) if id == spec.task_id
+        RelayNodeEvent::ApprovalResolved(id, None, ApprovalDecision::Rejected) if id == spec.task_id
     ));
     assert!(changes.try_recv().is_err());
 
@@ -439,8 +480,38 @@ async fn lan_only_nodes_advertise_direct_ips_without_relay_and_sync() {
     let delta = dag_delta(COMMIT);
     let snapshot = client.sync_dag_delta(host_addr, delta.clone()).await.unwrap();
     assert_delta(&snapshot, &delta, COMMIT);
-    assert_delta(&host_engine.dag_snapshot(true).await, &delta, COMMIT);
+    assert_delta(&host_engine.dag_snapshot(true).await.unwrap(), &delta, COMMIT);
 
     host.shutdown().await.unwrap();
     client.shutdown().await.unwrap();
+}
+
+#[test]
+fn lan_ticket_keeps_dialable_ipv4_and_ipv6_only() {
+    let id = iroh::SecretKey::generate().public();
+    let valid = [
+        "192.168.1.4:7608".parse().unwrap(),
+        "[fd00::4]:7608".parse().unwrap(),
+    ];
+    let mut ticket = EndpointAddr::new(id)
+        .with_relay_url("https://relay.example.invalid".parse().unwrap());
+    for ip in valid {
+        ticket = ticket.with_ip_addr(ip);
+    }
+    for raw in [
+        "0.0.0.0:7608",
+        "[::]:7608",
+        "192.168.1.4:0",
+        "224.0.0.1:7608",
+        "[ff02::1]:7608",
+        "255.255.255.255:7608",
+        "[::ffff:255.255.255.255]:7608",
+    ] {
+        ticket = ticket.with_ip_addr(raw.parse().unwrap());
+    }
+    let direct = direct_lan_addr(&ticket);
+    assert_eq!(direct.id, id);
+    assert!(direct.relay_urls().next().is_none());
+    assert_eq!(direct.ip_addrs().count(), valid.len());
+    assert!(valid.iter().all(|ip| direct.ip_addrs().any(|addr| addr == ip)));
 }

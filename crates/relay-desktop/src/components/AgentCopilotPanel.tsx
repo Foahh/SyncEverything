@@ -17,11 +17,8 @@ import {
 import { AlertCircle, ArrowUp, Cpu, SlidersHorizontal, Sparkles, Square } from "lucide-react";
 import { useId, useState, type FormEvent, type KeyboardEvent } from "react";
 import { useTranslation } from "react-i18next";
-import type {
-  AgentChatMessage_Serialize,
-  ApprovalDecision,
-  LlmSettingsView_Serialize,
-} from "../bindings";
+import type { AgentChatMessage_Serialize, LlmSettingsView_Serialize } from "../bindings";
+import type { ApprovalInput } from "../lib/relayApi";
 import { CopilotMessageItem } from "./CopilotMessageItem";
 
 interface AgentCopilotPanelProps {
@@ -32,7 +29,7 @@ interface AgentCopilotPanelProps {
   llmSettings: LlmSettingsView_Serialize | undefined;
   onSendMessage: (prompt: string) => Promise<void>;
   onCancelTurn: () => Promise<void>;
-  onResolveApproval: (taskId: string, decision: ApprovalDecision) => void;
+  onResolveApproval: (approval: ApprovalInput) => void;
   isResolvingApproval: boolean;
   onOpenLlmSettings: () => void;
 }

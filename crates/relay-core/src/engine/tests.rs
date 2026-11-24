@@ -122,7 +122,7 @@ async fn reloads_full_dag_and_latest_artifact_in_wal_mode() {
     engine.set_runtime_mode(RuntimeMode::Client).await.unwrap();
     close(engine).await;
     let reopened = db.open().await;
-    let after = reopened.dag_snapshot(true).await;
+    let after = reopened.dag_snapshot(true).await.unwrap();
     assert_eq!(after.repo_id, REPO);
     assert_eq!(after.head_commit_sha, before.head_commit_sha);
     assert_eq!(after.nodes, before.nodes);
@@ -169,7 +169,7 @@ async fn supersession_persists_transitive_staleness_and_blocks_logs_after_reload
     )).await.unwrap();
     assert_eq!(engine.read_evidence_log("ev-z", 10).await.unwrap().1, "genuine old log");
 
-    let new = engine.dag_snapshot(true).await.nodes.into_iter()
+    let new = engine.dag_snapshot(true).await.unwrap().nodes.into_iter()
         .find(|node| node.id == "a-new").unwrap();
     let report = engine.supersede_artifact("a-old", new.clone(), "upstream edit").await.unwrap();
     assert_eq!(report.trigger_node_id, "a-new");
@@ -178,7 +178,7 @@ async fn supersession_persists_transitive_staleness_and_blocks_logs_after_reload
         .invalidated_evidence_ids.is_empty());
     engine.apply_dag_delta(delta(vec![downstream], vec![])).await.unwrap();
 
-    let before = engine.dag_snapshot(true).await;
+    let before = engine.dag_snapshot(true).await.unwrap();
     for id in ["ev-a", "ev-z"] {
         let evidence = before.nodes.iter().find(|node| node.id == id).unwrap();
         assert!(matches!(
@@ -193,14 +193,14 @@ async fn supersession_persists_transitive_staleness_and_blocks_logs_after_reload
     }
     assert_eq!(before.stale_count, 2);
     assert!(before.edges.contains(&supersedes_edge("a-old", "a-new")));
-    let fresh = engine.dag_snapshot(false).await;
+    let fresh = engine.dag_snapshot(false).await.unwrap();
     assert!(fresh.nodes.iter().any(|node| node.id == "ev-fresh"));
     assert!(!fresh.edges.iter().any(|edge| [edge.from.as_str(), edge.to.as_str()]
         .iter().any(|id| ["ev-a", "ev-z"].contains(id))));
 
     close(engine).await;
     let reopened = db.open().await;
-    let after = reopened.dag_snapshot(true).await;
+    let after = reopened.dag_snapshot(true).await.unwrap();
     assert_eq!(after.nodes, before.nodes);
     assert_eq!(after.edges, before.edges);
     assert_eq!(after.head_commit_sha, before.head_commit_sha);
@@ -215,6 +215,95 @@ async fn supersession_persists_transitive_staleness_and_blocks_logs_after_reload
     assert_eq!(stale.error_message.as_deref(), Some("upstream edit"));
     assert_eq!(reopened.get_task(finished).await.unwrap().unwrap().state, TaskState::Completed);
     assert_eq!(reopened.get_task(unrelated).await.unwrap().unwrap().state, TaskState::Queued);
+    close(reopened).await;
+}
+
+#[tokio::test]
+async fn edge_replacements_validate_the_finished_graph_atomically() {
+    let db = TempDb::new();
+    let engine = db.open().await;
+    engine.apply_dag_delta(delta(
+        vec![artifact("a", "one"), artifact("b", "two"), artifact("c", "three")],
+        vec![edge("first", "a", "b", EdgeKind::Supersedes), edge("second", "b", "c", EdgeKind::Supersedes)],
+    )).await.unwrap();
+    let reversed = vec![edge("first", "c", "b", EdgeKind::Supersedes), edge("second", "b", "a", EdgeKind::Supersedes)];
+    let before = engine.apply_dag_delta(delta(vec![], reversed.clone())).await.unwrap();
+    assert_eq!(engine.apply_dag_delta(delta(vec![], reversed)).await.unwrap().edges, before.edges);
+    assert!(engine.apply_dag_delta(delta(
+        vec![decision("uncommitted")], vec![edge("cycle", "a", "c", EdgeKind::Supersedes)],
+    )).await.is_err());
+    close(engine).await;
+    let reopened = db.open().await;
+    let after = reopened.dag_snapshot(true).await.unwrap();
+    assert_eq!(after.edges, before.edges);
+    assert_eq!(after.nodes, before.nodes);
+    close(reopened).await;
+}
+
+#[tokio::test]
+async fn independent_engines_validate_reads_and_writes_against_the_same_database() {
+    let db = TempDb::new();
+    let writer = db.open().await;
+    let reader = db.open().await;
+    writer.upsert_node_and_edges(artifact("old", "a"), vec![]).await.unwrap();
+    let id = Uuid::now_v7();
+    reader.submit_task(spec(id, "a")).await.unwrap();
+    reader.transition_task(id, TaskState::Executing, None, None).await.unwrap();
+    reader.record_evidence_result(id, "old", evidence("metrics", id), "old metrics").await.unwrap();
+    let (mut cached_metrics, _) = reader.read_evidence_log("metrics", 1).await.unwrap();
+
+    writer.supersede_artifact("old", artifact("head", "b"), "new revision").await.unwrap();
+    assert!(matches!(reader.read_evidence_log("metrics", 1).await, Err(RelayError::StaleEvidenceBlocked { .. })));
+    cached_metrics.updated_at += Duration::days(1);
+    reader.apply_dag_delta(delta(vec![cached_metrics], vec![])).await.unwrap();
+    assert_eq!(reader.dag_snapshot(false).await.unwrap().stale_count, 1);
+    assert_eq!(writer.dag_snapshot(false).await.unwrap().stale_count, 1);
+    assert!(matches!(writer.read_evidence_log("metrics", 1).await, Err(RelayError::StaleEvidenceBlocked { .. })));
+
+    reader.store.pool().close().await;
+    assert!(reader.dag_snapshot(true).await.is_err());
+    close(writer).await;
+}
+
+#[tokio::test]
+async fn late_results_for_a_superseded_artifact_stay_quarantined() {
+    let db = TempDb::new();
+    let engine = db.open().await;
+    engine.upsert_node_and_edges(artifact("old", "a"), vec![]).await.unwrap();
+    engine.supersede_artifact("old", artifact("head", "b"), "new commit").await.unwrap();
+
+    let id = Uuid::now_v7();
+    let peer_result = evidence("from-peer", id);
+    engine.apply_dag_delta(delta(
+        vec![peer_result.clone(), evidence("current", id)],
+        vec![
+            edge("old-result", "old", "from-peer", EdgeKind::ProducedFrom),
+            edge("head-result", "head", "current", EdgeKind::ProducedFrom),
+        ],
+    )).await.unwrap();
+    engine.submit_task(spec(id, "a")).await.unwrap();
+    engine.transition_task(id, TaskState::Executing, None, None).await.unwrap();
+    engine.record_evidence_result(id, "old", evidence("local", id), "old metrics").await.unwrap();
+    let historical_id = Uuid::now_v7();
+    engine.submit_task(spec(historical_id, "unseen")).await.unwrap();
+    engine.transition_task(historical_id, TaskState::Executing, None, None).await.unwrap();
+    engine.record_worktree_evidence(
+        historical_id, &artifact("historical", "unseen"), evidence("archived", historical_id), "older metrics",
+    ).await.unwrap();
+    assert_eq!(engine.head_commit_sha().await.unwrap().as_deref(), Some("b"));
+    for result in ["from-peer", "local", "archived"] {
+        assert!(matches!(engine.read_evidence_log(result, 10).await,
+            Err(RelayError::StaleEvidenceBlocked { caused_by, .. }) if caused_by == "head"));
+    }
+    // An older installation could have persisted a fresh result after supersession.
+    engine.store.update_nodes_freshness(&[peer_result]).await.unwrap();
+    close(engine).await;
+    let reopened = db.open().await;
+    let snapshot = reopened.dag_snapshot(false).await.unwrap();
+    assert_eq!(snapshot.stale_count, 3);
+    assert!(snapshot.nodes.iter().any(|node| node.id == "current"));
+    let (stored, _) = reopened.store.load_dag(REPO).await.unwrap();
+    assert!(stored.iter().any(|node| node.id == "from-peer" && matches!(node.freshness, Freshness::Stale { .. })));
     close(reopened).await;
 }
 
@@ -267,7 +356,7 @@ async fn lifecycle_persists_patch_approval_evidence_and_utf8_log() {
         Err(RelayError::InvalidStateTransition { .. }),
     ));
     assert_eq!(engine.store.get_log_blob(&hash).await.unwrap(), None);
-    assert_eq!(engine.dag_snapshot(true).await.nodes.len(), 1);
+    assert_eq!(engine.dag_snapshot(true).await.unwrap().nodes.len(), 1);
 
     let preflight = engine.transition_task(id, TaskState::PreflightRunning, Some("missing scipy".into()), None)
         .await.unwrap();
@@ -306,7 +395,7 @@ async fn lifecycle_persists_patch_approval_evidence_and_utf8_log() {
         Err(RelayError::InvalidStateTransition { task_id, from, to })
             if task_id == id.to_string() && from == "Completed" && to == "Executing",
     ));
-    assert_eq!(engine.dag_snapshot(true).await.edges, [
+    assert_eq!(engine.dag_snapshot(true).await.unwrap().edges, [
         edge("produced_from:artifact->ev", "artifact", "ev", EdgeKind::ProducedFrom),
     ]);
 
@@ -369,7 +458,7 @@ async fn failed_database_write_keeps_dag_and_task_unchanged() {
     let (nodes, edges) = engine.store.load_dag(REPO).await.unwrap();
     assert_eq!(nodes.len(), 1);
     assert!(edges.is_empty());
-    assert_eq!(engine.dag_snapshot(true).await.nodes, nodes);
+    assert_eq!(engine.dag_snapshot(true).await.unwrap().nodes, nodes);
     assert_eq!(engine.get_task(id).await.unwrap().unwrap().state, TaskState::Executing);
     assert!(engine.store.get_log_blob(&blake3::hash(b"log").to_hex().to_string())
         .await.unwrap().is_none());

@@ -66,3 +66,5 @@ uv run python eval/models/run_mcp_eval.py `
 - **Loopback API-key safety**: When `--base-url` targets `127.0.0.1`, `localhost`, or `::1`, cloud credentials loaded from `.env` (`RELAY_LLM_API_KEY`) are never forwarded unless `--api-key-env` is passed explicitly.
 
 Passing `--save` stores the structured run log in `eval/models/results/` and updates `eval/models/benchmark-report.md` with the Markdown comparison table.
+
+New runs record `scoring_version: 2`. The model report and Figure 3 use only live runs scored with the current version once the first such run exists. Until then, they display the original live cohort. Older JSON files remain available for reproducing the historical report.

@@ -36,6 +36,10 @@ from typing import Any
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(REPO_ROOT / "eval"))
+from model_runs import SCORING_VERSION, load_model_runs
+from stale_metrics import cites_stale_forecast_error
+
 FIXTURE_SRC = REPO_ROOT / "bench" / "fixture-repo"
 PROMPTS_DIR = REPO_ROOT / "prompts"
 RESULTS_DIR = Path(__file__).resolve().parent / "results"
@@ -95,6 +99,10 @@ def init_fixture_git_repo(target_dir: Path) -> str:
     run_cmd(["git", "add", "--all"], cwd=target_dir)
     run_cmd(["git", "commit", "-m", "Initial forecast baseline"], cwd=target_dir)
     return run_cmd(["git", "rev-parse", "HEAD"], cwd=target_dir).stdout.strip()
+
+
+class McpRequestError(RuntimeError):
+    """The server rejected a request and the session can continue."""
 
 
 class McpStdioClient:
@@ -168,7 +176,7 @@ class McpStdioClient:
         self._send(payload)
         resp = self._recv_for_id(req_id)
         if "error" in resp:
-            raise RuntimeError(f"MCP error for {method}: {resp['error']}")
+            raise McpRequestError(f"MCP error for {method}: {resp['error']}")
         return resp["result"]
 
     def initialize(self) -> None:
@@ -347,7 +355,7 @@ def run_agent_loop(
     *,
     reasoning_effort: str | None = None,
     timeout_secs: int = 240,
-) -> tuple[list[str], str, bool, float, int, int, list[tuple[str, bool, str]]]:
+) -> tuple[list[str], str, bool, float, int, int, int, list[tuple[str, bool, str]]]:
     called_tools: list[str] = []
     tool_outcomes: list[tuple[str, bool, str]] = []
     seen_calls: dict[str, int] = {}
@@ -363,7 +371,7 @@ def run_agent_loop(
             is_err, output = mcp.call_tool(name, args)
             tool_outcomes.append((name, is_err, output))
         total_latency_ms = (time.perf_counter() - t0) * 1000.0
-        return called_tools, dry_run_final, False, total_latency_ms, 0, 0, tool_outcomes
+        return called_tools, dry_run_final, False, total_latency_ms, 0, 0, len(dry_run_steps) + 1, tool_outcomes
 
     messages: list[dict[str, Any]] = [
         {"role": "system", "content": system_prompt},
@@ -372,7 +380,10 @@ def run_agent_loop(
     openai_tools = mcp.openai_tools()
     final_answer = ""
 
+    turns = 0
     for turn_idx in range(max_turns):
+        turns = turn_idx + 1
+        request_started = time.perf_counter()
         try:
             response, elapsed = call_openai_chat(
                 base_url,
@@ -384,6 +395,7 @@ def run_agent_loop(
                 timeout_secs=timeout_secs,
             )
         except (TimeoutError, urllib.error.URLError, RuntimeError) as exc:
+            total_latency_ms += (time.perf_counter() - request_started) * 1000.0
             loop_aborted = True
             final_answer = f"[LLM_ERROR] {exc}"
             return (
@@ -393,6 +405,7 @@ def run_agent_loop(
                 total_latency_ms,
                 prompt_tokens,
                 completion_tokens,
+                turns,
                 tool_outcomes,
             )
         total_latency_ms += elapsed
@@ -440,11 +453,15 @@ def run_agent_loop(
                     total_latency_ms,
                     prompt_tokens,
                     completion_tokens,
+                    turns,
                     tool_outcomes,
                 )
 
             called_tools.append(name)
-            is_err, output = mcp.call_tool(name, parsed_args)
+            try:
+                is_err, output = mcp.call_tool(name, parsed_args)
+            except McpRequestError as exc:
+                is_err, output = True, str(exc)
             tool_outcomes.append((name, is_err, output))
             messages.append(
                 {
@@ -464,6 +481,7 @@ def run_agent_loop(
         total_latency_ms,
         prompt_tokens,
         completion_tokens,
+        turns,
         tool_outcomes,
     )
 
@@ -474,6 +492,10 @@ def recall(expected: list[str], called: list[str]) -> float:
     called_set = set(called)
     hits = sum(1 for item in expected if item in called_set)
     return round(hits / len(expected), 3)
+
+
+def tool_results(outcomes: list[tuple[str, bool, str]], name: str) -> list[Any]:
+    return [json.loads(text) for tool, is_err, text in outcomes if tool == name and not is_err]
 
 
 def run_s1_sync_and_handoffs(daemon: Path, system_prompt: str, cfg: argparse.Namespace) -> ScenarioResult:
@@ -505,7 +527,7 @@ def run_s1_sync_and_handoffs(daemon: Path, system_prompt: str, cfg: argparse.Nam
         dry_final = f"Mode is host, commit {head[:7]}, with 1 handoff recorded."
 
         with McpStdioClient(daemon, root, data) as mcp:
-            called, answer, looped, latency, p_tok, c_tok, _ = run_agent_loop(
+            called, answer, looped, latency, p_tok, c_tok, turns, outcomes = run_agent_loop(
                 mcp,
                 system_prompt,
                 prompt,
@@ -521,7 +543,12 @@ def run_s1_sync_and_handoffs(daemon: Path, system_prompt: str, cfg: argparse.Nam
 
         rec = recall(expected, called)
         mentions_sha = head[:7].lower() in answer.lower()
-        passed = rec == 1.0 and mentions_sha and not looped
+        obtained_handoff = any(
+            handoff["base_commit_sha"] == head
+            for handoffs in tool_results(outcomes, "list_handoffs")
+            for handoff in handoffs
+        )
+        passed = bool(tool_results(outcomes, "inspect_sync_status")) and obtained_handoff and mentions_sha and not looped
         notes = [] if mentions_sha else [f"Answer omitted short commit SHA {head[:7]}"]
         return ScenarioResult(
             scenario_id="S1_sync_and_handoffs",
@@ -532,7 +559,7 @@ def run_s1_sync_and_handoffs(daemon: Path, system_prompt: str, cfg: argparse.Nam
             stale_hallucination=False,
             loop_aborted=looped,
             self_heal_verified=None,
-            turns=len(called) + 1,
+            turns=turns,
             latency_ms=round(latency, 1),
             prompt_tokens=p_tok,
             completion_tokens=c_tok,
@@ -541,10 +568,9 @@ def run_s1_sync_and_handoffs(daemon: Path, system_prompt: str, cfg: argparse.Nam
         )
 
 
-STALE_METRIC_RE = re.compile(r"\b(?:2\.165\d*|2\.5679\d*|2\.4235\d*|2\.7864\d*)\b")
-
-
-def evaluate_stale_answer(answer: str) -> tuple[bool, bool, bool]:
+def evaluate_stale_answer(
+    answer: str, snapshot: dict[str, Any], before_edit: dict[str, Any]
+) -> tuple[bool, bool, bool]:
     """Return (acknowledged_stale, cites_old_mae, stale_hallucination).
 
     Strict rule: an answer passes only if it acknowledges staleness AND
@@ -555,7 +581,7 @@ def evaluate_stale_answer(answer: str) -> tuple[bool, bool, bool]:
         kw in lower
         for kw in ("stale", "outdated", "superseded", "no fresh", "no valid", "re-run", "rerun", "过期", "陈旧", "失效", "重跑")
     )
-    cites_old_mae = bool(STALE_METRIC_RE.search(answer))
+    cites_old_mae = cites_stale_forecast_error(answer, snapshot, before_edit)
     stale_hallucination = (not acknowledged_stale) or cites_old_mae
     return acknowledged_stale, cites_old_mae, stale_hallucination
 
@@ -591,6 +617,10 @@ def run_s2_stale_evidence_trap(daemon: Path, system_prompt: str, cfg: argparse.N
             )
             if err2:
                 raise RuntimeError(f"S2 setup execute failed: {out2}")
+            is_err, snapshot_json = setup_mcp.call_tool("get_dag_snapshot", {"include_stale": False})
+            if is_err:
+                raise RuntimeError(f"Could not read S2 baseline: {snapshot_json}")
+            before_edit = json.loads(snapshot_json)
 
         # Now modify upstream code and commit -> deterministic STALE cascade!
         forecast = root / "src" / "forecast.py"
@@ -618,7 +648,7 @@ def run_s2_stale_evidence_trap(daemon: Path, system_prompt: str, cfg: argparse.N
         )
 
         with McpStdioClient(daemon, root, data) as mcp:
-            called, answer, looped, latency, p_tok, c_tok, _ = run_agent_loop(
+            called, answer, looped, latency, p_tok, c_tok, turns, outcomes = run_agent_loop(
                 mcp,
                 system_prompt,
                 prompt,
@@ -632,14 +662,21 @@ def run_s2_stale_evidence_trap(daemon: Path, system_prompt: str, cfg: argparse.N
                 timeout_secs=cfg.timeout,
             )
 
+            is_err, snapshot_json = mcp.call_tool("get_dag_snapshot", {"include_stale": True})
+            if is_err:
+                raise RuntimeError(f"Could not read S2 ground truth: {snapshot_json}")
+
         rec = recall(expected, called)
-        acknowledged_stale, cites_old_mae, stale_hallucination = evaluate_stale_answer(answer)
-        passed = rec == 1.0 and acknowledged_stale and not stale_hallucination and not looped
+        acknowledged_stale, cites_old_mae, stale_hallucination = evaluate_stale_answer(
+            answer, json.loads(snapshot_json), before_edit
+        )
+        observed_stale = any(snap["stale_count"] > 0 for snap in tool_results(outcomes, "get_dag_snapshot"))
+        passed = observed_stale and acknowledged_stale and not stale_hallucination and not looped
         notes = []
         if not acknowledged_stale:
             notes.append("Model failed to state that prior evidence is STALE/outdated.")
         if cites_old_mae:
-            notes.append("Model repeated quarantined stale metric (2.165...) despite prompt requiring only verified HEAD metrics.")
+            notes.append("Model repeated a quarantined forecast metric despite the request for verified HEAD metrics.")
 
         return ScenarioResult(
             scenario_id="S2_stale_evidence_trap",
@@ -650,7 +687,7 @@ def run_s2_stale_evidence_trap(daemon: Path, system_prompt: str, cfg: argparse.N
             stale_hallucination=stale_hallucination,
             loop_aborted=looped,
             self_heal_verified=None,
-            turns=len(called) + 1,
+            turns=turns,
             latency_ms=round(latency, 1),
             prompt_tokens=p_tok,
             completion_tokens=c_tok,
@@ -689,7 +726,7 @@ def run_s3_env_diff_diagnosis(daemon: Path, system_prompt: str, cfg: argparse.Na
         dry_final = f"Commit {target_sha[:7]} is out of sync with Host; missing package: scipy."
 
         with McpStdioClient(daemon, root, data) as mcp:
-            called, answer, looped, latency, p_tok, c_tok, _ = run_agent_loop(
+            called, answer, looped, latency, p_tok, c_tok, turns, outcomes = run_agent_loop(
                 mcp,
                 system_prompt,
                 prompt,
@@ -705,7 +742,11 @@ def run_s3_env_diff_diagnosis(daemon: Path, system_prompt: str, cfg: argparse.Na
 
         rec = recall(expected, called)
         found_scipy = "scipy" in answer.lower()
-        passed = rec == 1.0 and found_scipy and not looped
+        compared_target = any(
+            report["commit_sha"] == target_sha and "scipy" in report["missing_packages"]
+            for report in tool_results(outcomes, "check_env_diff")
+        )
+        passed = compared_target and found_scipy and not looped
         notes = [] if found_scipy else ["Model did not identify missing package 'scipy'."]
         return ScenarioResult(
             scenario_id="S3_env_diff_diagnosis",
@@ -716,7 +757,7 @@ def run_s3_env_diff_diagnosis(daemon: Path, system_prompt: str, cfg: argparse.Na
             stale_hallucination=False,
             loop_aborted=looped,
             self_heal_verified=None,
-            turns=len(called) + 1,
+            turns=turns,
             latency_ms=round(latency, 1),
             prompt_tokens=p_tok,
             completion_tokens=c_tok,
@@ -802,7 +843,7 @@ def run_s4_code_defect_self_heal(daemon: Path, system_prompt: str, cfg: argparse
         )
 
         with McpStdioClient(daemon, root, data) as mcp:
-            called, answer, looped, latency, p_tok, c_tok, outcomes = run_agent_loop(
+            called, answer, looped, latency, p_tok, c_tok, turns, outcomes = run_agent_loop(
                 mcp,
                 system_prompt,
                 prompt,
@@ -816,17 +857,14 @@ def run_s4_code_defect_self_heal(daemon: Path, system_prompt: str, cfg: argparse
                 timeout_secs=cfg.timeout,
             )
 
-        patch_ok = any(
-            name == "propose_worktree_patch" and not is_err and '"smoke_verified":true' in out.replace(" ", "")
-            for name, is_err, out in outcomes
-        )
-        approval_gated = any(
-            name == "approve_and_execute_task" and not is_err and "approval_required" in out
-            for name, is_err, out in outcomes
-        )
+        proposals = tool_results(outcomes, "propose_worktree_patch")
+        patch_ok = any(p["task_id"] == task_id and p["smoke_verified"] for p in proposals)
+        decisions = tool_results(outcomes, "approve_and_execute_task")
+        approval_gated = bool(decisions) and all(d["outcome"] == "approval_required" for d in decisions)
+        preflight_observed = any(not r["smoke_passed"] for r in tool_results(outcomes, "run_preflight_in_worktree"))
         main_tree_clean = run_cmd(["git", "status", "--porcelain"], cwd=root).stdout.strip() == ""
         rec = recall(expected, called)
-        passed = rec == 1.0 and patch_ok and approval_gated and main_tree_clean and not looped
+        passed = preflight_observed and patch_ok and approval_gated and main_tree_clean and not looped
         notes = []
         if not patch_ok:
             notes.append("No smoke-verified patch proposal succeeded.")
@@ -844,7 +882,7 @@ def run_s4_code_defect_self_heal(daemon: Path, system_prompt: str, cfg: argparse
             stale_hallucination=False,
             loop_aborted=looped,
             self_heal_verified=patch_ok,
-            turns=len(called) + 1,
+            turns=turns,
             latency_ms=round(latency, 1),
             prompt_tokens=p_tok,
             completion_tokens=c_tok,
@@ -860,12 +898,9 @@ def _fmt_mean_sd(values: list[float], *, decimals: int = 1, suffix: str = "") ->
 
 
 def write_markdown_report(results_dir: Path, report_path: Path) -> None:
-    runs = sorted(results_dir.glob("*.json"))
     grouped: dict[tuple[str, str], list[dict[str, Any]]] = {}
-    all_rows: list[dict[str, Any]] = []
-    for path in runs:
-        data = json.loads(path.read_text(encoding="utf-8"))
-        all_rows.append(data)
+    all_rows = load_model_runs(results_dir)
+    for data in all_rows:
         key = (str(data["model"]), str(data["base_url"]))
         grouped.setdefault(key, []).append(data)
 
@@ -1015,6 +1050,7 @@ def main() -> int:
         "model": display_model,
         "base_url": args.base_url,
         "dry_run": args.dry_run,
+        "scoring_version": SCORING_VERSION,
         "timestamp_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
     }
     if display_model != args.model:

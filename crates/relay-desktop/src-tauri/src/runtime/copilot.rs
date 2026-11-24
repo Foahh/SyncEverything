@@ -8,7 +8,7 @@ use relay_core::agent::{
 use relay_core::contracts::{
     ApprovalExecutionResponse, ApproveAndExecuteArgs, CheckEnvDiffArgs, EdgeKind, Freshness,
     GetDagSnapshotArgs, GraphEdge, GraphNode, ListHandoffsArgs, NodeKind, ProposeWorktreePatchArgs,
-    ReadEvidenceLogArgs, RunPreflightArgs, RuntimeMode, TaskSpec, TaskState,
+    ReadEvidenceLogArgs, RunPreflightArgs, RuntimeMode, TaskRecord, TaskSpec, TaskState,
 };
 use relay_core::error::{RelayError, RelayResult};
 use relay_core::sandbox::{WorktreeSandbox, load_manifest, resolve_preset};
@@ -19,12 +19,35 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 use tauri_specta::Event;
+use tokio::sync::oneshot;
+use tokio::task::JoinHandle;
 use tokio::time::sleep;
 use uuid::Uuid;
 
 const MAX_COPILOT_TURNS: usize = 8;
 const MAX_IDENTICAL_CALLS: u32 = 3;
 const HISTORY_WINDOW: u32 = 16;
+
+pub(super) struct ChatTurn {
+    cancel: Arc<AtomicBool>,
+    stop_stream: Option<oneshot::Sender<()>>,
+    worker: JoinHandle<()>,
+}
+
+// The lifecycle lock serializes send/clear/cancel. The worker never takes that lock.
+async fn finish_previous_turn(active: &mut Option<ChatTurn>) -> bool {
+    let Some(turn) = active.as_mut() else { return false };
+    let was_running = !turn.worker.is_finished();
+    turn.cancel.store(true, Ordering::Relaxed);
+    if let Some(stop) = turn.stop_stream.take() {
+        let _ = stop.send(());
+    }
+    if let Err(error) = (&mut turn.worker).await {
+        tracing::warn!(%error, "Copilot turn stopped before it finished");
+    }
+    *active = None;
+    was_running
+}
 
 struct ToolExecOutcome {
     output_json: String,
@@ -68,17 +91,13 @@ impl DesktopRuntime {
     }
 
     pub(crate) async fn cancel_chat_turn(&self) -> bool {
-        let guard = self.active_chat_cancel.lock().await;
-        if let Some(flag) = guard.as_ref() {
-            flag.store(true, Ordering::Relaxed);
-            true
-        } else {
-            false
-        }
+        let mut active = self.active_chat_turn.lock().await;
+        finish_previous_turn(&mut active).await
     }
 
     pub(crate) async fn clear_chat_messages(&self) -> RelayResult<()> {
-        let _ = self.cancel_chat_turn().await;
+        let mut active = self.active_chat_turn.lock().await;
+        finish_previous_turn(&mut active).await;
         self.engine.clear_chat_messages().await?;
         emit_state(&self.app, "chat_updated", "Chat history cleared");
         Ok(())
@@ -93,8 +112,8 @@ impl DesktopRuntime {
             return Err(RelayError::Internal("Message cannot be empty".into()));
         }
 
-        // Cancel any earlier turn before starting a new one.
-        let _ = self.cancel_chat_turn().await;
+        let mut active = self.active_chat_turn.lock().await;
+        finish_previous_turn(&mut active).await;
 
         let now = Utc::now();
         let repo_id = self.engine.repo_id().to_owned();
@@ -123,14 +142,15 @@ impl DesktopRuntime {
         self.engine.upsert_chat_message(&assistant_msg).await?;
 
         let cancel = Arc::new(AtomicBool::new(false));
-        *self.active_chat_cancel.lock().await = Some(cancel.clone());
-
+        let worker_cancel = cancel.clone();
+        let (stop_stream, stopped) = oneshot::channel();
         let runtime = self.clone();
         let turn_id = Uuid::now_v7().to_string();
         let initial = assistant_msg.clone();
-        tauri::async_runtime::spawn(async move {
-            runtime.run_copilot_turn(turn_id, assistant_msg, cancel).await;
+        let worker = tokio::spawn(async move {
+            runtime.run_copilot_turn(turn_id, assistant_msg, worker_cancel, stopped).await;
         });
+        *active = Some(ChatTurn { cancel, stop_stream: Some(stop_stream), worker });
 
         Ok(initial)
     }
@@ -140,6 +160,7 @@ impl DesktopRuntime {
         turn_id: String,
         mut assistant_msg: AgentChatMessage,
         cancel: Arc<AtomicBool>,
+        mut stopped: oneshot::Receiver<()>,
     ) {
         let message_id = assistant_msg.id.clone();
         self.emit_chat_event(AgentChatStreamEvent {
@@ -160,14 +181,20 @@ impl DesktopRuntime {
                     &turn_id,
                     &mut assistant_msg,
                     error.to_string(),
-                    &cancel,
                 )
                 .await;
                 return;
             }
         };
 
-        let mut messages = self.build_copilot_messages(&message_id).await;
+        let mut messages = match self.build_copilot_messages(&message_id).await {
+            Ok(messages) => messages,
+            Err(error) => {
+                self.finish_turn_with_error(&turn_id, &mut assistant_msg, error.to_string())
+                    .await;
+                return;
+            }
+        };
         let tools = copilot_tool_definitions();
         let mut seen_calls: HashMap<String, u32> = HashMap::new();
 
@@ -179,7 +206,7 @@ impl DesktopRuntime {
             let app_handle = self.app.clone();
             let turn_id_cb = turn_id.clone();
             let message_id_cb = message_id.clone();
-            let streamed = llm
+            let request = llm
                 .stream_chat_with_tools(&messages, &tools, &cancel, |delta| {
                     let event = AgentChatStreamEvent {
                         turn_id: turn_id_cb.clone(),
@@ -191,8 +218,12 @@ impl DesktopRuntime {
                         error: None,
                     };
                     let _ = event.emit(&app_handle);
-                })
-                .await;
+                });
+            let streamed = tokio::select! {
+                biased;
+                _ = &mut stopped => break,
+                response = request => response,
+            };
 
             let turn = match streamed {
                 Ok(turn) => turn,
@@ -204,7 +235,6 @@ impl DesktopRuntime {
                         &turn_id,
                         &mut assistant_msg,
                         error.to_string(),
-                        &cancel,
                     )
                     .await;
                     return;
@@ -323,6 +353,12 @@ impl DesktopRuntime {
 
                 if let Some(card) = outcome.approval_card {
                     assistant_msg.approval = Some(card.clone());
+                    if let Err(error) = self.engine.upsert_chat_message(&assistant_msg).await {
+                        self.finish_turn_with_error(
+                            &turn_id, &mut assistant_msg, error.to_string(),
+                        ).await;
+                        return;
+                    }
                     self.emit_chat_event(AgentChatStreamEvent {
                         turn_id: turn_id.clone(),
                         message_id: message_id.clone(),
@@ -359,7 +395,6 @@ impl DesktopRuntime {
         if let Err(error) = self.engine.upsert_chat_message(&assistant_msg).await {
             tracing::warn!(%error, "Unable to persist final Copilot message");
         }
-        self.clear_active_cancel(&cancel).await;
 
         let kind = if assistant_msg.error.is_some() {
             "turn_error"
@@ -383,11 +418,9 @@ impl DesktopRuntime {
         turn_id: &str,
         assistant_msg: &mut AgentChatMessage,
         error: String,
-        cancel: &Arc<AtomicBool>,
     ) {
         assistant_msg.error = Some(error.clone());
         let _ = self.engine.upsert_chat_message(assistant_msg).await;
-        self.clear_active_cancel(cancel).await;
         self.emit_chat_event(AgentChatStreamEvent {
             turn_id: turn_id.to_owned(),
             message_id: assistant_msg.id.clone(),
@@ -400,23 +433,16 @@ impl DesktopRuntime {
         emit_state(&self.app, "chat_updated", "Copilot turn ended with error");
     }
 
-    async fn clear_active_cancel(&self, cancel: &Arc<AtomicBool>) {
-        let mut guard = self.active_chat_cancel.lock().await;
-        if guard.as_ref().is_some_and(|active| Arc::ptr_eq(active, cancel)) {
-            *guard = None;
-        }
-    }
-
     fn emit_chat_event(&self, event: AgentChatStreamEvent) {
         if let Err(error) = event.emit(&self.app) {
             tracing::warn!(%error, kind = %event.kind, "Unable to emit Copilot stream event");
         }
     }
 
-    async fn build_copilot_messages(&self, exclude_message_id: &str) -> Vec<Value> {
-        let snapshot = self.engine.dag_snapshot(true).await;
+    async fn build_copilot_messages(&self, exclude_message_id: &str) -> RelayResult<Vec<Value>> {
+        let snapshot = self.engine.dag_snapshot(true).await?;
         let status = self.status().await;
-        let tasks = self.engine.list_tasks().await.unwrap_or_default();
+        let tasks = self.engine.list_tasks().await?;
         let active_tasks: Vec<Value> = tasks
             .iter()
             .take(6)
@@ -429,8 +455,8 @@ impl DesktopRuntime {
                 })
             })
             .collect();
-        let presets: Vec<Value> = self
-            .workspace
+        let workspace = self.workspace_info();
+        let presets: Vec<Value> = workspace
             .presets
             .iter()
             .map(|p| {
@@ -444,8 +470,8 @@ impl DesktopRuntime {
 
         let workspace_ctx = format!(
             "{COPILOT_SYSTEM_PROMPT}\n\n[ACTIVE WORKSPACE CONTEXT]\nrepo_id: {}\nname: {}\nruntime_mode: {:?}\nhead_commit_sha: {}\nstale_evidence_count: {}\nwhitelisted_presets: {}\nrecent_tasks: {}",
-            self.workspace.repo_id,
-            self.workspace.name,
+            workspace.repo_id,
+            workspace.name,
             status.mode,
             snapshot.head_commit_sha.as_deref().unwrap_or("none"),
             snapshot.stale_count,
@@ -461,8 +487,7 @@ impl DesktopRuntime {
         let history = self
             .engine
             .list_chat_messages(HISTORY_WINDOW + 2)
-            .await
-            .unwrap_or_default();
+            .await?;
         for msg in history {
             if msg.id == exclude_message_id || msg.content.trim().is_empty() {
                 continue;
@@ -476,7 +501,7 @@ impl DesktopRuntime {
                 "content": msg.content,
             }));
         }
-        messages
+        Ok(messages)
     }
 
     async fn execute_copilot_tool(
@@ -512,8 +537,8 @@ impl DesktopRuntime {
                     .get("include_stale")
                     .and_then(Value::as_bool)
                     .unwrap_or(true);
-                ok_json(
-                    &self
+                result_json(
+                    self
                         .mcp
                         .handle_get_dag_snapshot(GetDagSnapshotArgs {
                             include_stale: Some(include_stale),
@@ -644,11 +669,10 @@ impl DesktopRuntime {
                 .await
                 .unwrap_or_else(|_| "HEAD".to_owned())
         } else {
-            self.engine
-                .dag_snapshot(true)
-                .await
-                .head_commit_sha
-                .unwrap_or_else(|| "HEAD".to_owned())
+            match self.engine.dag_snapshot(true).await {
+                Ok(snapshot) => snapshot.head_commit_sha.unwrap_or_else(|| "HEAD".to_owned()),
+                Err(error) => return err_outcome(error.to_string()),
+            }
         };
 
         let spec = TaskSpec {
@@ -675,7 +699,7 @@ impl DesktopRuntime {
                 if cancel.load(Ordering::Relaxed) {
                     break;
                 }
-                if !matches!(
+                if awaiting_clean_run_approval(&latest) || !matches!(
                     latest.state,
                     TaskState::Queued | TaskState::PreflightRunning
                 ) {
@@ -694,6 +718,14 @@ impl DesktopRuntime {
                 patch_id: Some(proposal.patch_id.clone()),
                 summary: proposal.summary.clone(),
                 diff_preview: proposal.diff_preview.clone(),
+                resolved: None,
+            })
+        } else if awaiting_clean_run_approval(&latest) {
+            Some(AgentApprovalCard {
+                task_id: latest.spec.task_id.to_string(),
+                patch_id: None,
+                summary: format!("Preflight passed. Approve to run {}.", latest.spec.command_preset),
+                diff_preview: String::new(),
                 resolved: None,
             })
         } else {
@@ -719,26 +751,10 @@ impl DesktopRuntime {
             return err_outcome("Both 'label' and 'rationale' are required".into());
         }
 
-        let snapshot = self.engine.dag_snapshot(true).await;
-        let latest_artifact_id = snapshot
-            .head_commit_sha
-            .as_deref()
-            .and_then(|sha| {
-                snapshot.nodes.iter().find_map(|node| match &node.payload {
-                    NodeKind::Artifact { git_commit_sha, .. } if git_commit_sha == sha => {
-                        Some(node.id.clone())
-                    }
-                    _ => None,
-                })
-            })
-            .or_else(|| {
-                snapshot
-                    .nodes
-                    .iter()
-                    .filter(|node| matches!(node.payload, NodeKind::Artifact { .. }))
-                    .max_by_key(|node| node.updated_at)
-                    .map(|node| node.id.clone())
-            });
+        let latest_artifact_id = match self.engine.head_artifact_id().await {
+            Ok(id) => id,
+            Err(error) => return err_outcome(error.to_string()),
+        };
 
         let now = Utc::now();
         let node_id = format!("decision:{}", Uuid::now_v7());
@@ -822,6 +838,13 @@ impl DesktopRuntime {
                 .map(|root| WorktreeSandbox::new(root, self.repo_data_dir.join("worktrees")))
         })
     }
+}
+
+fn awaiting_clean_run_approval(task: &TaskRecord) -> bool {
+    task.state == TaskState::PreflightRunning
+        && task.spec.require_approval
+        && task.active_proposal.is_none()
+        && task.preflight_summary.as_deref() == Some("Smoke preflight passed")
 }
 
 fn ok_json<T: serde::Serialize>(value: &T) -> ToolExecOutcome {

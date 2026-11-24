@@ -132,8 +132,9 @@ async fn rejects_disallowed_preset_params_and_overrides_allowed_flags() {
     let base_commit = init_python_repo(&repo).await;
     let sandbox = WorktreeSandbox::new(&repo, temp.join("worktrees"));
     let manifest = load_manifest(&repo).unwrap();
+    let task_id = Uuid::now_v7();
     let worktree = sandbox
-        .prepare_worktree(Uuid::now_v7(), &base_commit)
+        .prepare_worktree(task_id, &base_commit)
         .await
         .unwrap();
 
@@ -151,6 +152,12 @@ async fn rejects_disallowed_preset_params_and_overrides_allowed_flags() {
         .await
         .unwrap_err();
     assert!(matches!(error, RelayError::Internal(message) if message.contains("host relay.toml")));
+
+    let mut alternate_smoke = manifest.clone();
+    alternate_smoke.project.smoke_preset = "train_grid".into();
+    let error = sandbox.run_preflight(task_id, worktree.worktree_path(), worktree.branch_name(), &alternate_smoke)
+        .await.unwrap_err();
+    assert!(matches!(error, RelayError::Internal(message) if message.contains("smoke preset")));
 
     let overrides = BTreeMap::from([
         ("alpha".into(), "0.25".into()),
@@ -383,7 +390,8 @@ async fn sync_git_head_seeds_and_invalidates_evidence_on_new_commit() {
 
     fs::write(repo.join("README.md"), "v2\n").unwrap();
     git(&repo, &["add", "README.md"]).await;
-    git(&repo, &["commit", "-m", "Update forecast logic"]).await;
+    git(&repo, &["-c", "user.name=Relay Test", "-c", "user.email=relay-test@example.invalid",
+        "commit", "-m", "Update forecast logic"]).await;
     let second_sha = sandbox.head_commit_sha().await.unwrap();
 
     match sync_git_head_into_engine(&engine, &sandbox, "laptop").await.unwrap() {
@@ -393,7 +401,7 @@ async fn sync_git_head_seeds_and_invalidates_evidence_on_new_commit() {
         }
         other => panic!("expected Superseded, got {other:?}"),
     }
-    let snapshot = engine.dag_snapshot(true).await;
+    let snapshot = engine.dag_snapshot(true).await.unwrap();
     assert_eq!(snapshot.stale_count, 1);
     let second_node = snapshot
         .nodes
@@ -401,6 +409,51 @@ async fn sync_git_head_seeds_and_invalidates_evidence_on_new_commit() {
         .find(|n| n.id == format!("artifact:{second_sha}"))
         .unwrap();
     assert_eq!(second_node.label, "Update forecast logic");
+
+    // Visiting the same two commits again must leave four ordered snapshots.
+    let mut prior = second_node.id.clone();
+    for sha in [&first_sha, &second_sha] {
+        git(&repo, &["checkout", "--detach", sha]).await;
+        assert!(matches!(sync_git_head_into_engine(&engine, &sandbox, "laptop").await.unwrap(),
+            HeadSyncOutcome::Superseded { .. }));
+        let head_id = engine.head_artifact_id().await.unwrap().unwrap();
+        let snapshot = engine.dag_snapshot(true).await.unwrap();
+        assert_eq!(snapshot.head_commit_sha.as_ref(), Some(sha));
+        assert_ne!(head_id, format!("artifact:{sha}"));
+        assert!(snapshot.edges.iter().any(|edge| edge.kind == EdgeKind::Supersedes
+            && edge.from == head_id && edge.to == prior));
+        assert!(!snapshot.edges.iter().any(|edge| edge.kind == EdgeKind::Supersedes && edge.to == head_id));
+        prior = head_id;
+    }
+    assert_eq!(engine.dag_snapshot(true).await.unwrap().nodes.len(), 5);
+}
+
+#[tokio::test]
+async fn passive_head_polling_preserves_a_peer_snapshot_across_restarts() {
+    let temp = TempDir::new();
+    let repo = temp.join("paired-host");
+    init_repo(&repo).await;
+    fs::write(repo.join("README.md"), "local\n").unwrap();
+    let local_sha = create_initial_commit(&repo).await;
+    let db = temp.join("host.db");
+    let engine = RelayEngine::open("paired", &db, Some(repo.clone())).await.unwrap();
+    let sandbox = WorktreeSandbox::new(&repo, temp.join("worktrees"));
+    let mut peer = build_git_artifact_node(&sandbox, local_sha.clone(), "peer".into()).await.unwrap();
+    let NodeKind::Artifact { git_commit_sha, .. } = &mut peer.payload else { unreachable!() };
+    *git_commit_sha = "peer-commit".into();
+    peer.id = "peer-artifact".into();
+    engine.upsert_node_and_edges(peer, vec![]).await.unwrap();
+
+    // A fresh binding (or an older DB) has no local observation yet.
+    assert!(matches!(sync_git_head_into_engine(&engine, &sandbox, "host").await.unwrap(),
+        HeadSyncOutcome::Unchanged));
+    drop(engine);
+    let engine = RelayEngine::open("paired", &db, Some(repo)).await.unwrap();
+    assert!(matches!(sync_git_head_into_engine(&engine, &sandbox, "host").await.unwrap(),
+        HeadSyncOutcome::Unchanged));
+    assert_eq!(engine.head_commit_sha().await.unwrap().as_deref(), Some("peer-commit"));
+    assert!(matches!(sync_git_head_explicitly(&engine, &sandbox, "host").await.unwrap(),
+        HeadSyncOutcome::Superseded { commit_sha, .. } if commit_sha == local_sha));
 }
 
 #[tokio::test]
@@ -413,6 +466,9 @@ async fn read_repo_file_and_git_diff_enforce_repo_confinement() {
 
     let numbered = sandbox.read_repo_file("src/app.py", 4096).await.unwrap();
     assert!(numbered.contains("   1: import argparse"));
+    fs::write(repo.join("large.txt"), format!("first line\n{}", "模型".repeat(10_000))).unwrap();
+    assert_eq!(sandbox.read_repo_file("large.txt", 256).await.unwrap(), "   1: first line\n... [truncated]\n");
+    fs::remove_file(repo.join("large.txt")).unwrap();
     assert!(sandbox.read_repo_file("../outside.txt", 4096).await.is_err());
     assert!(sandbox.read_repo_file(".git/config", 4096).await.is_err());
     assert!(sandbox.read_repo_file(".env", 4096).await.is_err());
@@ -454,6 +510,8 @@ fn generates_valid_default_manifests_for_detected_project_types() {
     assert_eq!(rs_manifest.project.smoke_preset, "check");
     assert_eq!(rs_manifest.presets["check"].program, "cargo");
     assert_eq!(rs_manifest.presets["test"].program, "cargo");
+    assert_eq!(rs_manifest.presets["check"].timeout_secs, 900);
+    assert_eq!(rs_manifest.presets["test"].timeout_secs, 1800);
     assert!(write_default_manifest(&rs_dir).is_err());
 
     let js_bun_dir = temp.join("web-bun");
@@ -468,7 +526,8 @@ fn generates_valid_default_manifests_for_detected_project_types() {
     assert_eq!(bun_kind, "js-ts");
     let bun_manifest: RelayManifest = toml::from_str(&bun_toml).unwrap();
     assert_eq!(bun_manifest.presets["smoke"].program, "bun");
-    assert_eq!(bun_manifest.presets["smoke"].args, vec!["run", "lint"]);
+    assert_eq!(bun_manifest.presets["smoke"].args, vec!["--version"]);
+    assert_eq!(bun_manifest.presets["lint"].args, vec!["run", "lint"]);
     assert_eq!(bun_manifest.presets["build"].args, vec!["run", "build"]);
 
     let generic_dir = temp.join("misc");
@@ -477,4 +536,63 @@ fn generates_valid_default_manifests_for_detected_project_types() {
     assert_eq!(gen_kind, "generic");
     let gen_manifest: RelayManifest = toml::from_str(&gen_toml).unwrap();
     assert_eq!(gen_manifest.presets["smoke"].program, "git");
+}
+
+#[test]
+fn starter_creation_publishes_one_complete_manifest_and_preserves_existing_files() {
+    let temp = TempDir::new();
+    let repo = temp.join("实验仓库");
+    fs::create_dir(&repo).unwrap();
+    let expected = generate_default_manifest(&repo).unwrap().0;
+    let start = std::sync::Barrier::new(4);
+    std::thread::scope(|scope| {
+        let writers: Vec<_> = (0..4).map(|_| scope.spawn(|| {
+            start.wait();
+            write_default_manifest(&repo)
+        })).collect();
+        let successes = writers.into_iter().map(|worker| worker.join().unwrap()).filter(Result::is_ok).count();
+        assert_eq!(successes, 1);
+    });
+    assert_eq!(fs::read_to_string(repo.join("relay.toml")).unwrap(), expected);
+    assert_eq!(fs::read_dir(&repo).unwrap().count(), 1);
+    assert_ne!(slugify_repo_id("实验仓库"), slugify_repo_id("测评仓库"));
+    fs::write(repo.join("relay.toml"), "unfinished user configuration").unwrap();
+    assert!(write_default_manifest(&repo).is_err());
+    assert_eq!(fs::read_to_string(repo.join("relay.toml")).unwrap(), "unfinished user configuration");
+}
+
+#[tokio::test]
+async fn first_dispatch_can_use_a_starter_manifest_before_it_is_committed() {
+    use crate::contracts::{ApproveAndExecuteArgs, RunPreflightArgs, TaskSpec, TaskState};
+    use crate::mcp::RelayMcpServer;
+    use std::sync::Arc;
+
+    let temp = TempDir::new();
+    let repo = temp.join("new-project");
+    init_repo(&repo).await;
+    fs::write(repo.join("README.md"), "Project\n").unwrap();
+    let sha = create_initial_commit(&repo).await;
+    write_default_manifest(&repo).unwrap();
+    let sandbox = WorktreeSandbox::new(&repo, temp.join("worktrees"));
+    let engine = Arc::new(RelayEngine::in_memory("new-project", Some(repo.clone())).await.unwrap());
+    let server = RelayMcpServer::new(engine.clone(), Some(sandbox), None);
+    let id = Uuid::now_v7();
+    engine.submit_task(TaskSpec {
+        task_id: id,
+        repo_id: "new-project".into(),
+        base_commit_sha: sha,
+        command_preset: "smoke".into(),
+        params: BTreeMap::new(),
+        require_approval: false,
+        requested_by_device: "onboarding".into(),
+        user_note: None,
+    }).await.unwrap();
+    let preflight = server.handle_run_preflight(RunPreflightArgs { task_id: id.to_string() }).await.unwrap();
+    assert!(preflight.smoke_passed);
+    assert!(!preflight.worktree_path.join("relay.toml").exists());
+    server.handle_approve_and_execute(ApproveAndExecuteArgs {
+        task_id: id.to_string(), patch_id: None, approved_via_ui: None,
+    }, None).await.unwrap();
+    assert_eq!(engine.get_task(id).await.unwrap().unwrap().state, TaskState::Completed);
+    assert_eq!(git(&repo, &["status", "--short"]).await, "?? relay.toml");
 }

@@ -15,7 +15,6 @@ import {
   EyeOff,
   FilePlus2,
   FolderGit2,
-  Link2,
   Maximize2,
   Play,
   Plus,
@@ -47,7 +46,7 @@ interface DagCanvasProps {
   onOpenRecordDecision: () => void;
   onOpenDispatchTask: () => void;
   onOpenRepoSettings: () => void;
-  onOpenPairModal: () => void;
+  manifestError: string | null;
   onGenerateManifest: () => void;
 }
 
@@ -64,7 +63,7 @@ function DagCanvasInner({
   onOpenRecordDecision,
   onOpenDispatchTask,
   onOpenRepoSettings,
-  onOpenPairModal,
+  manifestError,
   onGenerateManifest,
 }: DagCanvasProps) {
   const { t } = useTranslation();
@@ -104,14 +103,14 @@ function DagCanvasInner({
 
   const staleCount = snapshot?.stale_count ?? 0;
   const needsManifestBanner = hasRepo && isGitRepo && !hasManifest && nodes.length > 0;
-  const showDock = hasRepo || nodes.length > 0;
+  const showDock = hasRepo || nodes.length > 0 || staleCount > 0;
 
   return (
     <div
       ref={containerRef}
       className="relative h-full w-full flex-1 overflow-hidden bg-[var(--relay-canvas)]"
     >
-      {(staleCount > 0 || needsManifestBanner) && (
+      {(staleCount > 0 || needsManifestBanner || manifestError) && (
         <div className="pointer-events-none absolute top-4 right-4 left-4 z-20 flex flex-col items-center gap-2">
           {staleCount > 0 && (
             <div className="pointer-events-auto inline-flex items-center gap-2 rounded-lg border border-destructive/30 bg-card/95 px-3 py-1.5 text-xs font-medium text-destructive shadow-sm backdrop-blur-md">
@@ -119,6 +118,14 @@ function DagCanvasInner({
               <span className="relay-text-trim leading-none">
                 {t("canvas.outdatedBanner", { count: staleCount })}
               </span>
+            </div>
+          )}
+          {manifestError && (
+            <div
+              role="alert"
+              className="rounded-lg border border-destructive/30 bg-card px-3 py-2 text-xs text-destructive"
+            >
+              {manifestError}
             </div>
           )}
           {needsManifestBanner && (
@@ -161,7 +168,7 @@ function DagCanvasInner({
         <Controls position="bottom-left" showInteractive={false} />
       </ReactFlow>
 
-      {nodes.length === 0 && (
+      {nodes.length === 0 && staleCount === 0 && (
         <div className="pointer-events-none absolute inset-0 flex items-center justify-center p-8">
           <div className="pointer-events-auto max-w-md rounded-lg border border-border bg-card p-6 text-center shadow-sm">
             {!hasRepo ? (
@@ -176,10 +183,6 @@ function DagCanvasInner({
                   <Button size="default" onClick={onOpenRepoSettings}>
                     <FolderGit2 data-icon="inline-start" />
                     <span className="relay-text-trim leading-none">{t("canvas.openRepoCta")}</span>
-                  </Button>
-                  <Button variant="outline" size="default" onClick={onOpenPairModal}>
-                    <Link2 data-icon="inline-start" />
-                    <span className="relay-text-trim leading-none">{t("canvas.pairHostCta")}</span>
                   </Button>
                 </div>
               </>

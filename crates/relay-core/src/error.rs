@@ -11,6 +11,9 @@ pub enum RelayError {
     #[error("proposal not found: {0}")]
     ProposalNotFound(String),
 
+    #[error("log blob {hash} for evidence {node_id} is missing")]
+    MissingEvidenceLog { node_id: String, hash: String },
+
     #[error("invalid command preset '{0}' (not declared in relay.toml)")]
     UnknownPreset(String),
 

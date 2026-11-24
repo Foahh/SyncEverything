@@ -12,6 +12,7 @@ import {
 import { Field, FieldDescription, FieldGroup, FieldLabel, FieldTitle } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { buildMcpSnippet, type McpClientId } from "@/lib/mcpConfig";
 import { cn } from "@/lib/utils";
 import {
   AlertCircle,
@@ -49,8 +50,6 @@ import {
 import { isTauriRuntime, relayApi } from "../../lib/relayApi";
 
 export type SettingsTab = "repo" | "llm" | "mcp";
-
-type McpClientId = "claude" | "cursor" | "codex";
 
 interface WorkspaceSettingsModalProps {
   isOpen: boolean;
@@ -91,37 +90,6 @@ function errorMessage(err: unknown, fallback: string): string {
   if (err instanceof Error && err.message) return err.message;
   if (typeof err === "string" && err.trim()) return err;
   return fallback;
-}
-
-function buildMcpSnippet(client: McpClientId, repoRoot: string | null): string {
-  const effectiveRoot = (repoRoot?.trim() || "/path/to/your/repo").replace(/[\\/]+$/, "");
-  const sep = effectiveRoot.includes("\\") ? "\\" : "/";
-  const dataDir = `${effectiveRoot}${sep}.relay`;
-
-  if (client === "codex") {
-    return [
-      "[mcp_servers.relay]",
-      'command = "relay-daemon"',
-      "args = [",
-      `  "--repo-root", ${JSON.stringify(effectiveRoot)},`,
-      `  "--data-dir", ${JSON.stringify(dataDir)},`,
-      '  "mcp-stdio",',
-      "]",
-    ].join("\n");
-  }
-
-  return JSON.stringify(
-    {
-      mcpServers: {
-        relay: {
-          command: "relay-daemon",
-          args: ["--repo-root", effectiveRoot, "--data-dir", dataDir, "mcp-stdio"],
-        },
-      },
-    },
-    null,
-    2,
-  );
 }
 
 function StatusBanner({ feedback }: { feedback: FeedbackState | null }) {
@@ -609,18 +577,23 @@ function LlmSettingsTab({ initial }: { initial: LlmSettingsView_Serialize }) {
   );
 }
 
-function McpConfigTab({ repoRoot }: { repoRoot: string | null }) {
+function McpConfigTab({ workspace }: { workspace?: WorkspaceInfo_Serialize }) {
   const { t } = useTranslation();
   const [client, setClient] = useState<McpClientId>("claude");
-  const [copied, setCopied] = useState(false);
+  const [feedback, setFeedback] = useState<{ snippet: string; ok: boolean } | null>(null);
 
   const selectedClient = MCP_CLIENTS.find((item) => item.id === client) ?? MCP_CLIENTS[0];
-  const snippet = buildMcpSnippet(client, repoRoot);
+  const snippet = buildMcpSnippet(client, workspace);
+  const copied = feedback?.snippet === snippet && feedback.ok;
 
   const handleCopy = async () => {
-    await navigator.clipboard.writeText(snippet);
-    setCopied(true);
-    window.setTimeout(() => setCopied(false), 1800);
+    if (!snippet) return;
+    try {
+      await navigator.clipboard.writeText(snippet);
+      setFeedback({ snippet, ok: true });
+    } catch {
+      setFeedback({ snippet, ok: false });
+    }
   };
 
   return (
@@ -636,10 +609,8 @@ function McpConfigTab({ repoRoot }: { repoRoot: string | null }) {
             <button
               key={item.id}
               type="button"
-              onClick={() => {
-                setClient(item.id);
-                setCopied(false);
-              }}
+              onClick={() => setClient(item.id)}
+              aria-pressed={active}
               className={cn(
                 "cursor-pointer rounded-lg border px-2.5 py-2 text-left transition-all",
                 active
@@ -677,11 +648,20 @@ function McpConfigTab({ repoRoot }: { repoRoot: string | null }) {
           lang="en"
           className="font-mono-tech max-h-48 overflow-auto rounded-md border border-border bg-muted/60 p-3 text-[11px] leading-relaxed text-foreground"
         >
-          {snippet}
+          {snippet ?? t("modals.workspace.mcpOpenRepo")}
         </pre>
       </div>
 
-      <Button type="button" size="lg" className="w-full" onClick={() => void handleCopy()}>
+      {feedback?.snippet === snippet && !feedback.ok && (
+        <StatusBanner feedback={{ ok: false, text: t("modals.workspace.mcpCopyFailed") }} />
+      )}
+      <Button
+        type="button"
+        size="lg"
+        className="w-full"
+        disabled={!snippet}
+        onClick={() => void handleCopy()}
+      >
         {copied ? <Check data-icon="inline-start" /> : <Copy data-icon="inline-start" />}
         <span className="relay-text-trim leading-none">
           {copied ? t("modals.workspace.mcpCopiedBtn") : t("modals.workspace.mcpCopyBtn")}
@@ -753,7 +733,7 @@ export function WorkspaceSettingsModal({
           </TabsContent>
 
           <TabsContent value="mcp">
-            <McpConfigTab repoRoot={workspace?.repo_root ?? null} />
+            <McpConfigTab workspace={workspace} />
           </TabsContent>
         </Tabs>
 

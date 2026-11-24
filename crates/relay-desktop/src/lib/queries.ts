@@ -1,7 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect } from "react";
 import type {
-  ApprovalDecision,
   GraphEdge,
   GraphNode,
   LlmSettingsUpdate_Deserialize,
@@ -147,6 +146,7 @@ export function useClearChatMessages() {
   return useMutation({
     mutationFn: () => relayApi.clearChatMessages(),
     onSuccess: () => {
+      queryClient.setQueryData(relayKeys.chat(), []);
       void queryClient.invalidateQueries({ queryKey: relayKeys.chat() });
     },
   });
@@ -176,9 +176,8 @@ export function useSubmitTask() {
 export function useResolvePatchApproval() {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: ({ taskId, decision }: { taskId: string; decision: ApprovalDecision }) =>
-      relayApi.resolvePatchApproval(taskId, decision),
-    onSuccess: () => {
+    mutationFn: relayApi.resolvePatchApproval,
+    onSettled: () => {
       void queryClient.invalidateQueries({ queryKey: relayKeys.all });
     },
   });

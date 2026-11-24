@@ -1,3 +1,4 @@
+import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -23,7 +24,11 @@ export interface RecordDecisionFormValues {
 interface RecordDecisionModalProps {
   isOpen: boolean;
   onOpenChange: (open: boolean) => void;
-  onSubmitDecision: (values: { label: string; rationale: string; constraints: string[] }) => void;
+  onSubmitDecision: (values: {
+    label: string;
+    rationale: string;
+    constraints: string[];
+  }) => Promise<void>;
   isSubmitting: boolean;
 }
 
@@ -38,6 +43,7 @@ export function RecordDecisionModal({
     register,
     handleSubmit,
     reset,
+    setError,
     formState: { isValid, errors },
   } = useForm<RecordDecisionFormValues>({
     mode: "onChange",
@@ -48,22 +54,31 @@ export function RecordDecisionModal({
     },
   });
 
-  const onSubmit = handleSubmit((data) => {
+  const onSubmit = handleSubmit(async (data) => {
     const constraints = data.constraintsRaw
       .split(",")
       .map((s) => s.trim())
       .filter(Boolean);
-    onSubmitDecision({
-      label: data.label.trim(),
-      rationale: data.rationale.trim(),
-      constraints,
-    });
-    reset();
-    onOpenChange(false);
+    try {
+      await onSubmitDecision({
+        label: data.label.trim(),
+        rationale: data.rationale.trim(),
+        constraints,
+      });
+      reset();
+      onOpenChange(false);
+    } catch (error) {
+      setError("root", { message: String(error) });
+    }
   });
 
   return (
-    <Dialog open={isOpen} onOpenChange={onOpenChange}>
+    <Dialog
+      open={isOpen}
+      onOpenChange={(open) => {
+        if (!isSubmitting) onOpenChange(open);
+      }}
+    >
       <DialogContent className="sm:max-w-lg">
         <DialogHeader>
           <div className="flex items-center gap-2.5">
@@ -88,7 +103,7 @@ export function RecordDecisionModal({
                 id="note-label"
                 aria-invalid={!!errors.label}
                 placeholder={t("modals.note.titlePlaceholder")}
-                {...register("label", { required: true, minLength: 2 })}
+                {...register("label", { validate: (value) => value.trim().length >= 2 })}
               />
             </Field>
 
@@ -102,7 +117,7 @@ export function RecordDecisionModal({
                 rows={3}
                 aria-invalid={!!errors.rationale}
                 placeholder={t("modals.note.whyPlaceholder")}
-                {...register("rationale", { required: true, minLength: 3 })}
+                {...register("rationale", { validate: (value) => value.trim().length >= 3 })}
               />
             </Field>
 
@@ -116,8 +131,19 @@ export function RecordDecisionModal({
             </Field>
           </FieldGroup>
 
+          {errors.root?.message && (
+            <Alert variant="destructive">
+              <AlertDescription>{errors.root.message}</AlertDescription>
+            </Alert>
+          )}
           <DialogFooter>
-            <Button type="button" variant="outline" size="lg" onClick={() => onOpenChange(false)}>
+            <Button
+              type="button"
+              variant="outline"
+              size="lg"
+              disabled={isSubmitting}
+              onClick={() => onOpenChange(false)}
+            >
               <span className="relay-text-trim leading-none">{t("modals.note.cancel")}</span>
             </Button>
             <Button type="submit" size="lg" disabled={!isValid || isSubmitting}>

@@ -57,6 +57,7 @@ pub struct WorkspaceInfo {
     pub repo_id: String,
     pub name: String,
     pub repo_root: Option<String>,
+    pub mcp_data_dir: Option<String>,
     pub is_git_repo: bool,
     pub has_manifest: bool,
     pub smoke_preset: String,
@@ -103,6 +104,15 @@ impl RuntimeManager {
         let validated =
             validate_user_repo(&PathBuf::from(repo_path.trim())).map_err(|error| error.to_string())?;
         let _guard = self.lifecycle.lock().await;
+        let mut current = self.current.write().await;
+        if let Some(active) = current.as_ref() && active.matches_workspace(&validated) {
+            return Ok(active.workspace_info());
+        }
+        let shares_storage = current.as_ref().is_some_and(|runtime| runtime.shares_storage(&validated));
+        if shares_storage && let Some(previous) = current.take() {
+            // iroh-blobs holds an exclusive lock until the old router finishes shutting down.
+            previous.shutdown().await;
+        }
         let next = DesktopRuntime::open(app.clone(), Some(validated.clone()))
             .await
             .map_err(|error| error.to_string())?;
@@ -110,7 +120,8 @@ impl RuntimeManager {
             tracing::warn!(%error, "Unable to persist selected workspace repository");
         }
         let info = next.workspace_info();
-        let previous = self.current.write().await.replace(next);
+        let previous = current.replace(next);
+        drop(current);
         if let Some(previous) = previous {
             previous.shutdown().await;
         }
@@ -276,7 +287,7 @@ async fn get_dag_snapshot(
     include_stale: bool,
 ) -> Result<DagSnapshot, String> {
     let runtime = state.get_or_init(&app).await?;
-    Ok(runtime.engine.dag_snapshot(include_stale).await)
+    runtime.engine.dag_snapshot(include_stale).await.map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -330,12 +341,13 @@ async fn resolve_patch_approval(
     app: AppHandle,
     state: State<'_, RuntimeManager>,
     task_id: Uuid,
+    patch_id: Option<String>,
     decision: ApprovalDecision,
 ) -> Result<TaskRecord, String> {
     state
         .get_or_init(&app)
         .await?
-        .resolve_approval(task_id, decision)
+        .resolve_approval(task_id, patch_id, decision)
         .await
         .map_err(|error| error.to_string())
 }

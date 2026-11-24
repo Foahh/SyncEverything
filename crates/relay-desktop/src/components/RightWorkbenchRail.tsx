@@ -1,14 +1,15 @@
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { FileSearch, Sparkles, SquarePen, X } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import type {
   AgentChatMessage_Serialize,
-  ApprovalDecision,
   GraphNode,
   LlmSettingsView_Serialize,
   TaskRecord_Serialize,
 } from "../bindings";
+import type { ApprovalInput } from "../lib/relayApi";
 import { AgentCopilotPanel } from "./AgentCopilotPanel";
 import { InspectorPanelBody } from "./InspectorDrawer";
 
@@ -23,8 +24,9 @@ interface RightWorkbenchRailProps {
   inspectorMode: "node" | "fix";
   selectedNode: GraphNode | null;
   pendingFixTask: TaskRecord_Serialize | null;
-  onResolveApproval: (taskId: string, decision: ApprovalDecision, fromTab: RightRailTab) => void;
+  onResolveApproval: (approval: ApprovalInput, fromTab: RightRailTab) => void;
   isResolvingApproval: boolean;
+  approvalError: string | null;
   // Copilot props
   messages: AgentChatMessage_Serialize[];
   isStreaming: boolean;
@@ -48,6 +50,7 @@ export function RightWorkbenchRail({
   pendingFixTask,
   onResolveApproval,
   isResolvingApproval,
+  approvalError,
   messages,
   isStreaming,
   streamingMessageId,
@@ -63,7 +66,7 @@ export function RightWorkbenchRail({
 
   if (!isOpen) return null;
 
-  const hasPendingFix = pendingFixTask?.active_proposal != null;
+  const hasPendingFix = pendingFixTask != null;
 
   return (
     <aside className="z-20 flex h-full w-[400px] shrink-0 flex-col border-l border-border bg-card text-card-foreground shadow-xl xl:w-[420px]">
@@ -119,6 +122,13 @@ export function RightWorkbenchRail({
         </div>
       </div>
 
+      {approvalError && (
+        <Alert variant="destructive">
+          <AlertTitle>{t("detail.approvalError")}</AlertTitle>
+          <AlertDescription>{approvalError}</AlertDescription>
+        </Alert>
+      )}
+
       {activeTab === "agent" ? (
         <AgentCopilotPanel
           messages={messages}
@@ -128,7 +138,7 @@ export function RightWorkbenchRail({
           llmSettings={llmSettings}
           onSendMessage={onSendMessage}
           onCancelTurn={onCancelTurn}
-          onResolveApproval={(taskId, decision) => onResolveApproval(taskId, decision, "agent")}
+          onResolveApproval={(approval) => onResolveApproval(approval, "agent")}
           isResolvingApproval={isResolvingApproval}
           onOpenLlmSettings={onOpenLlmSettings}
         />
@@ -137,7 +147,7 @@ export function RightWorkbenchRail({
           mode={inspectorMode}
           selectedNode={selectedNode}
           pendingFixTask={pendingFixTask}
-          onResolveApproval={(taskId, decision) => onResolveApproval(taskId, decision, "inspector")}
+          onResolveApproval={(approval) => onResolveApproval(approval, "inspector")}
           isResolvingApproval={isResolvingApproval}
         />
       )}

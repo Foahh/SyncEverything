@@ -12,6 +12,7 @@ use crate::contracts::{
 use crate::engine::RelayEngine;
 use crate::error::{RelayError, RelayResult};
 use chrono::Utc;
+use std::io::{ErrorKind, Write};
 use std::path::{Component, Path, PathBuf};
 use std::process::{Output, Stdio};
 use tokio::io::AsyncReadExt;
@@ -42,7 +43,7 @@ pub fn generate_default_manifest(repo_root: &Path) -> RelayResult<(String, Strin
     let name_lit = toml_string_literal(&dir_name);
 
     let (smoke_preset, detected_kind, presets_body) = if repo_root.join("pyproject.toml").is_file() {
-        let pyproject_raw = std::fs::read_to_string(repo_root.join("pyproject.toml")).unwrap_or_default();
+        let pyproject_raw = std::fs::read_to_string(repo_root.join("pyproject.toml"))?;
         let has_pytest = repo_root.join("tests").is_dir()
             || pyproject_raw.to_ascii_lowercase().contains("pytest");
         let second_preset = if has_pytest {
@@ -83,13 +84,13 @@ pub fn generate_default_manifest(repo_root: &Path) -> RelayResult<(String, Strin
             "description = \"Compile-check the Cargo workspace\"\n",
             "program = \"cargo\"\n",
             "args = [\"check\"]\n",
-            "timeout_secs = 300\n",
+            "timeout_secs = 900\n",
             "allowed_params = []\n\n",
             "[presets.test]\n",
             "description = \"Run Cargo tests\"\n",
             "program = \"cargo\"\n",
             "args = [\"test\"]\n",
-            "timeout_secs = 300\n",
+            "timeout_secs = 1800\n",
             "allowed_params = []\n",
         )
         .to_owned();
@@ -104,49 +105,37 @@ pub fn generate_default_manifest(repo_root: &Path) -> RelayResult<(String, Strin
         } else {
             "npm"
         };
-        let scripts = std::fs::read_to_string(repo_root.join("package.json"))
-            .ok()
-            .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
-            .and_then(|val| val.get("scripts").cloned())
-            .and_then(|val| val.as_object().cloned())
-            .unwrap_or_default();
-        let smoke_args = if scripts.contains_key("lint") {
-            "[\"run\", \"lint\"]"
-        } else if scripts.contains_key("typecheck") {
-            "[\"run\", \"typecheck\"]"
-        } else {
-            "[\"--version\"]"
-        };
+        let package: serde_json::Value = serde_json::from_slice(&std::fs::read(repo_root.join("package.json"))?)?;
+        let scripts = package.get("scripts").and_then(serde_json::Value::as_object);
+        let pm_lit = toml_string_literal(pm);
+        // A new worktree does not contain the main checkout's node_modules. User scripts
+        // that need dependencies must prepare them inside that worktree.
         let mut body = format!(
             "[presets.smoke]\n\
-             description = \"Quick project sanity check\"\n\
+             description = \"Verify the project package manager is available\"\n\
              program = {pm_lit}\n\
-             args = {smoke_args}\n\
+             args = [\"--version\"]\n\
              timeout_secs = 120\n\
-             allowed_params = []\n",
-            pm_lit = toml_string_literal(pm),
+             allowed_params = []\n"
         );
-        if scripts.contains_key("test") {
-            body.push_str(&format!(
-                "\n[presets.test]\n\
-                 description = \"Run project tests\"\n\
-                 program = {pm_lit}\n\
-                 args = [\"run\", \"test\"]\n\
-                 timeout_secs = 300\n\
-                 allowed_params = []\n",
-                pm_lit = toml_string_literal(pm),
-            ));
-        }
-        if scripts.contains_key("build") {
-            body.push_str(&format!(
-                "\n[presets.build]\n\
-                 description = \"Build the project\"\n\
-                 program = {pm_lit}\n\
-                 args = [\"run\", \"build\"]\n\
-                 timeout_secs = 300\n\
-                 allowed_params = []\n",
-                pm_lit = toml_string_literal(pm),
-            ));
+        for (name, description) in [
+            ("lint", "Run project lint checks"),
+            ("typecheck", "Run project type checks"),
+            ("test", "Run project tests"),
+            ("build", "Build the project"),
+        ] {
+            if scripts.and_then(|items| items.get(name)).and_then(serde_json::Value::as_str)
+                .is_some_and(|command| !command.trim().is_empty())
+            {
+                body.push_str(&format!(
+                    "\n[presets.{name}]\n\
+                     description = \"{description}\"\n\
+                     program = {pm_lit}\n\
+                     args = [\"run\", \"{name}\"]\n\
+                     timeout_secs = 300\n\
+                     allowed_params = []\n"
+                ));
+            }
         }
         ("smoke", "js-ts", body)
     } else {
@@ -174,17 +163,22 @@ pub fn generate_default_manifest(repo_root: &Path) -> RelayResult<(String, Strin
 /// Returns the detected project kind (`python-uv`, `rust-cargo`, `js-ts`, or `generic`).
 pub fn write_default_manifest(repo_root: &Path) -> RelayResult<String> {
     let target = repo_root.join("relay.toml");
-    if target.exists() {
-        return Err(RelayError::Internal(
-            "relay.toml already exists in this repository".into(),
-        ));
-    }
     let (content, kind) = generate_default_manifest(repo_root)?;
-    std::fs::write(&target, content)?;
+    let mut candidate = tempfile::NamedTempFile::new_in(repo_root)?;
+    candidate.write_all(content.as_bytes())?;
+    candidate.as_file().sync_all()?;
+    candidate.persist_noclobber(target).map_err(|error| {
+        if error.error.kind() == ErrorKind::AlreadyExists {
+            RelayError::Internal("relay.toml already exists in this repository".into())
+        } else {
+            error.error.into()
+        }
+    })?;
     Ok(kind)
 }
 
-fn slugify_repo_id(raw: &str) -> String {
+/// Derive the same starter repository ID during onboarding and manifest generation.
+pub fn slugify_repo_id(raw: &str) -> String {
     let mut slug = String::new();
     let mut prev_dash = false;
     for ch in raw.chars() {
@@ -197,8 +191,10 @@ fn slugify_repo_id(raw: &str) -> String {
         }
     }
     let trimmed = slug.trim_matches('-');
-    if trimmed.is_empty() {
-        "workspace".to_owned()
+    if trimmed.is_empty() || !raw.is_ascii() {
+        let prefix = if trimmed.is_empty() { "workspace" } else { trimmed };
+        let digest = blake3::hash(raw.as_bytes()).to_hex();
+        format!("{prefix}-{}", &digest.as_str()[..12])
     } else {
         trimmed.to_owned()
     }
@@ -244,6 +240,15 @@ pub struct WorktreeSandbox {
 }
 
 impl WorktreeSandbox {
+    pub(crate) fn task_manifest(&self, worktree: &Path) -> RelayResult<RelayManifest> {
+        match std::fs::symlink_metadata(worktree.join("relay.toml")) {
+            Ok(_) => load_manifest(worktree),
+            // A freshly generated manifest may not yet be present in the task's base commit.
+            Err(error) if error.kind() == ErrorKind::NotFound => load_manifest(self.repo_root()),
+            Err(error) => Err(error.into()),
+        }
+    }
+
     pub fn new(repo_root: impl Into<PathBuf>, worktrees_base: impl Into<PathBuf>) -> Self {
         Self {
             repo_root: repo_root.into(),
@@ -302,7 +307,8 @@ impl WorktreeSandbox {
         Ok(sha.to_owned())
     }
 
-    async fn resolve_commit(&self, rev: &str) -> RelayResult<String> {
+    /// Resolve a revision once so a queued task can be pinned to its immutable Git object.
+    pub async fn resolve_commit(&self, rev: &str) -> RelayResult<String> {
         let output = git_output(git_command(&self.repo_root).args([
             "rev-parse",
             "--verify",
@@ -405,47 +411,18 @@ impl WorktreeSandbox {
                 "read_repo_file requires a repository-relative path".into(),
             ));
         }
-        let mut has_normal = false;
-        for component in rel.components() {
-            match component {
-                Component::Normal(part) => {
-                    has_normal = true;
-                    let name = part.to_string_lossy().to_ascii_lowercase();
-                    if matches!(name.as_str(), ".git" | ".relay" | ".relay-desktop")
-                        || name.starts_with(".env")
-                        || name.ends_with(".db")
-                        || name.ends_with(".db-wal")
-                        || name.ends_with(".db-shm")
-                        || name.ends_with(".pem")
-                        || name.ends_with(".key")
-                    {
-                        return Err(RelayError::Internal(format!(
-                            "access to protected path '{trimmed}' is blocked"
-                        )));
-                    }
-                }
-                Component::CurDir => {}
-                Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
-                    return Err(RelayError::Internal(format!(
-                        "path traversal outside repository is blocked: '{trimmed}'"
-                    )));
-                }
-            }
-        }
-        if !has_normal {
-            return Err(RelayError::Internal("invalid repository file path".into()));
-        }
-
+        validate_repo_read_path(rel, trimmed)?;
         let canonical_root = std::fs::canonicalize(&self.repo_root)?;
         let candidate = self.repo_root.join(rel);
         let canonical_file = std::fs::canonicalize(&candidate).map_err(|err| {
             RelayError::Internal(format!("could not open '{trimmed}': {err}"))
         })?;
-        if !canonical_file.starts_with(&canonical_root) {
-            return Err(RelayError::Internal(format!(
+        let resolved = canonical_file.strip_prefix(&canonical_root).map_err(|_| {
+            RelayError::Internal(format!(
                 "path '{trimmed}' resolves outside the active repository"
-            )));
-        }
+            ))
+        })?;
+        validate_repo_read_path(resolved, trimmed)?;
         let metadata = tokio::fs::metadata(&canonical_file).await?;
         if !metadata.is_file() {
             return Err(RelayError::Internal(format!(
@@ -453,19 +430,25 @@ impl WorktreeSandbox {
             )));
         }
 
-        let bytes = tokio::fs::read(&canonical_file).await?;
+        let cap = max_bytes.max(256);
+        let limit = cap.saturating_add(1).max(4096);
+        let file = tokio::fs::File::open(&canonical_file).await?;
+        let mut bytes = Vec::new();
+        file.take(limit as u64).read_to_end(&mut bytes).await?;
         if bytes.iter().take(4096).any(|b| *b == 0) {
             return Err(RelayError::Internal(format!(
                 "'{trimmed}' appears to be a binary file"
             )));
         }
-        let text = String::from_utf8(bytes).map_err(|_| {
-            RelayError::Internal(format!("'{trimmed}' is not valid UTF-8 text"))
-        })?;
-
-        let cap = max_bytes.max(256);
+        let mut truncated = (bytes.len() as u64) < metadata.len();
+        let text = match std::str::from_utf8(&bytes) {
+            Ok(text) => text,
+            Err(error) if truncated && error.error_len().is_none() => {
+                std::str::from_utf8(&bytes[..error.valid_up_to()]).expect("validated UTF-8 prefix")
+            }
+            Err(_) => return Err(RelayError::Internal(format!("'{trimmed}' is not valid UTF-8 text"))),
+        };
         let mut formatted = String::new();
-        let mut truncated = false;
         for (idx, line) in text.lines().enumerate() {
             let entry = format!("{:>4}: {}\n", idx + 1, line);
             if formatted.len() + entry.len() > cap {
@@ -574,17 +557,18 @@ impl WorktreeSandbox {
         task_id: TaskId,
         handle: &WorktreeHandle,
         base_commit_sha: &str,
-    ) -> RelayResult<()> {
+    ) -> RelayResult<String> {
         let path = handle.worktree_path();
         self.validate_task_worktree(task_id, path, handle.branch_name()).await?;
         let actual =
             git_output(git_command(path).args(["rev-parse", "--verify", "HEAD"])).await?;
-        if output_text(&actual.stdout) != self.resolve_commit(base_commit_sha).await? {
+        let sha = output_text(&actual.stdout);
+        if sha != self.resolve_commit(base_commit_sha).await? {
             return Err(RelayError::Git(
                 "task worktree no longer points to its base commit".into(),
             ));
         }
-        Ok(())
+        Ok(sha)
     }
 
     pub(crate) fn task_worktree(&self, task_id: TaskId) -> RelayResult<(PathBuf, String)> {
@@ -678,6 +662,40 @@ impl WorktreeHandle {
             .await;
         Ok(())
     }
+}
+
+fn validate_repo_read_path(path: &Path, trimmed: &str) -> RelayResult<()> {
+    let mut has_normal = false;
+    for component in path.components() {
+        match component {
+            Component::Normal(part) => {
+                has_normal = true;
+                let name = part.to_string_lossy().to_ascii_lowercase();
+                if matches!(name.as_str(), ".git" | ".relay" | ".relay-desktop")
+                    || name.starts_with(".env")
+                    || name.ends_with(".db")
+                    || name.ends_with(".db-wal")
+                    || name.ends_with(".db-shm")
+                    || name.ends_with(".pem")
+                    || name.ends_with(".key")
+                {
+                    return Err(RelayError::Internal(format!(
+                        "access to protected path '{trimmed}' is blocked"
+                    )));
+                }
+            }
+            Component::CurDir => {}
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
+                return Err(RelayError::Internal(format!(
+                    "path traversal outside repository is blocked: '{trimmed}'"
+                )));
+            }
+        }
+    }
+    if !has_normal {
+        return Err(RelayError::Internal("invalid repository file path".into()));
+    }
+    Ok(())
 }
 
 fn is_within_checkout(path: &Path, root: &Path) -> RelayResult<bool> {
@@ -804,50 +822,33 @@ pub async fn sync_git_head_into_engine(
     sandbox: &WorktreeSandbox,
     device_origin: impl Into<String>,
 ) -> RelayResult<HeadSyncOutcome> {
+    sync_checkout(engine, sandbox, device_origin.into(), false).await
+}
+
+/// An explicit sync-head command selects the physical checkout even if a peer updated the DAG.
+pub async fn sync_git_head_explicitly(
+    engine: &RelayEngine,
+    sandbox: &WorktreeSandbox,
+    device_origin: impl Into<String>,
+) -> RelayResult<HeadSyncOutcome> {
+    sync_checkout(engine, sandbox, device_origin.into(), true).await
+}
+
+async fn sync_checkout(
+    engine: &RelayEngine,
+    sandbox: &WorktreeSandbox,
+    device_origin: String,
+    explicit: bool,
+) -> RelayResult<HeadSyncOutcome> {
+    let checkout = tokio::fs::canonicalize(sandbox.repo_root()).await?;
+    let prior = engine.observed_git_head(&checkout).await?;
     let head_sha = sandbox.head_commit_sha().await?;
-    let snapshot = engine.dag_snapshot(true).await;
-    if snapshot.head_commit_sha.as_deref() == Some(head_sha.as_str()) {
+    if !explicit && prior.as_deref() == Some(head_sha.as_str()) {
         return Ok(HeadSyncOutcome::Unchanged);
     }
 
-    // Find the current active artifact (prefer the node matching head_commit_sha, else newest artifact).
-    let previous_artifact_id = snapshot
-        .head_commit_sha
-        .as_deref()
-        .and_then(|sha| {
-            snapshot.nodes.iter().find_map(|node| match &node.payload {
-                NodeKind::Artifact { git_commit_sha, .. } if git_commit_sha == sha => {
-                    Some(node.id.clone())
-                }
-                _ => None,
-            })
-        })
-        .or_else(|| {
-            snapshot
-                .nodes
-                .iter()
-                .filter(|node| matches!(node.payload, NodeKind::Artifact { .. }))
-                .max_by_key(|node| node.updated_at)
-                .map(|node| node.id.clone())
-        });
-
-    let artifact = build_git_artifact_node(sandbox, head_sha.clone(), device_origin.into()).await?;
-    let short_sha: String = head_sha.chars().take(7).collect();
-    if let Some(old_id) = previous_artifact_id
-        && old_id != artifact.id
-    {
-        let reason = format!("Git commit {short_sha}: {}", artifact.label);
-        let report = engine.supersede_artifact(&old_id, artifact, reason).await?;
-        Ok(HeadSyncOutcome::Superseded {
-            commit_sha: head_sha,
-            report,
-        })
-    } else {
-        engine.upsert_node_and_edges(artifact, Vec::new()).await?;
-        Ok(HeadSyncOutcome::Seeded {
-            commit_sha: head_sha,
-        })
-    }
+    let artifact = build_git_artifact_node(sandbox, head_sha, device_origin).await?;
+    engine.observe_git_artifact(&checkout, artifact, prior.as_deref(), explicit).await
 }
 
 #[cfg(test)]

@@ -4,7 +4,8 @@ import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { AlertCircle, CheckCircle2, ChevronRight, ShieldCheck, X } from "lucide-react";
 import { useTranslation } from "react-i18next";
-import type { ApprovalDecision, GraphNode, JsonValue, TaskRecord_Serialize } from "../bindings";
+import type { GraphNode, JsonValue, TaskRecord_Serialize } from "../bindings";
+import type { ApprovalInput } from "../lib/relayApi";
 
 type ActiveProposal = NonNullable<TaskRecord_Serialize["active_proposal"]>;
 
@@ -12,7 +13,7 @@ interface InspectorDrawerProps {
   mode: "closed" | "node" | "fix";
   selectedNode: GraphNode | null;
   pendingFixTask: TaskRecord_Serialize | null;
-  onResolveApproval: (taskId: string, decision: ApprovalDecision) => void;
+  onResolveApproval: (approval: ApprovalInput) => void;
   isResolvingApproval: boolean;
   onClose: () => void;
 }
@@ -248,7 +249,7 @@ export function InspectorPanelBody({
   const { t } = useTranslation();
 
   const proposal = pendingFixTask?.active_proposal ?? null;
-  const isFixMode = mode === "fix" && proposal != null && pendingFixTask != null;
+  const isFixMode = mode === "fix" && pendingFixTask != null;
 
   if (!isFixMode && !selectedNode) {
     return (
@@ -263,7 +264,9 @@ export function InspectorPanelBody({
     <div className="flex min-h-0 flex-1 flex-col">
       <div className="border-b border-border px-4 py-2.5">
         <div className="text-[11px] font-medium text-muted-foreground">
-          {isFixMode ? t("detail.fixTitle") : t(`canvas.kind.${selectedNode!.payload.kind}`)}
+          {isFixMode
+            ? t(proposal ? "detail.fixTitle" : "sidebar.reviewRun")
+            : t(`canvas.kind.${selectedNode!.payload.kind}`)}
         </div>
         <h3 className="truncate text-sm font-semibold text-foreground">
           {isFixMode ? pendingFixTask.spec.command_preset : selectedNode!.label}
@@ -272,7 +275,11 @@ export function InspectorPanelBody({
 
       <div className="flex flex-1 flex-col gap-4 overflow-y-auto p-4">
         {isFixMode ? (
-          <FixProposalBody proposal={proposal} />
+          proposal ? (
+            <FixProposalBody proposal={proposal} />
+          ) : (
+            <p>{t("detail.cleanRun")}</p>
+          )
         ) : (
           selectedNode && (
             <>
@@ -302,7 +309,13 @@ export function InspectorPanelBody({
             size="lg"
             className="flex-1"
             disabled={isResolvingApproval}
-            onClick={() => onResolveApproval(pendingFixTask.spec.task_id, "rejected")}
+            onClick={() =>
+              onResolveApproval({
+                taskId: pendingFixTask.spec.task_id,
+                patchId: proposal?.patch_id ?? null,
+                decision: "rejected",
+              })
+            }
           >
             <span className="relay-text-trim leading-none">{t("detail.dismissFix")}</span>
           </Button>
@@ -311,10 +324,18 @@ export function InspectorPanelBody({
             size="lg"
             className="flex-1"
             disabled={isResolvingApproval}
-            onClick={() => onResolveApproval(pendingFixTask.spec.task_id, "approved")}
+            onClick={() =>
+              onResolveApproval({
+                taskId: pendingFixTask.spec.task_id,
+                patchId: proposal?.patch_id ?? null,
+                decision: "approved",
+              })
+            }
           >
             <CheckCircle2 data-icon="inline-start" />
-            <span className="relay-text-trim leading-none">{t("detail.applyAndRun")}</span>
+            <span className="relay-text-trim leading-none">
+              {t(proposal ? "detail.applyAndRun" : "detail.approveRun")}
+            </span>
           </Button>
         </div>
       )}
@@ -335,7 +356,7 @@ export function InspectorDrawer({
   if (mode === "closed") return null;
 
   const proposal = pendingFixTask?.active_proposal ?? null;
-  const isFixMode = mode === "fix" && proposal != null && pendingFixTask != null;
+  const isFixMode = mode === "fix" && pendingFixTask != null;
 
   if (!isFixMode && !selectedNode) return null;
 
@@ -344,7 +365,9 @@ export function InspectorDrawer({
       <div className="flex items-center justify-between gap-2 border-b border-border px-4 py-3">
         <div className="min-w-0">
           <div className="text-[11px] font-medium text-muted-foreground">
-            {isFixMode ? t("detail.fixTitle") : t(`canvas.kind.${selectedNode!.payload.kind}`)}
+            {isFixMode
+              ? t(proposal ? "detail.fixTitle" : "sidebar.reviewRun")
+              : t(`canvas.kind.${selectedNode!.payload.kind}`)}
           </div>
           <h3 className="truncate text-sm font-semibold text-foreground">
             {isFixMode ? pendingFixTask.spec.command_preset : selectedNode!.label}

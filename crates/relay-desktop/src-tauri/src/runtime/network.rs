@@ -17,7 +17,7 @@ pub(super) struct Network {
     pub(super) local: Arc<RelayNode>,
     pub(super) loopback_host: Option<Arc<RelayNode>>,
     pub(super) remote: Option<EndpointAddr>,
-    pub(super) last_remote_dag: Option<DagSnapshot>,
+    pub(super) last_pushed_commit: Option<String>,
 }
 
 pub(super) type NodeEvents = mpsc::UnboundedReceiver<RelayNodeEvent>;
@@ -53,47 +53,39 @@ impl Network {
                 local,
                 loopback_host: Some(host),
                 remote: None,
-                last_remote_dag: None,
+                last_pushed_commit: None,
             };
             network.sync_loopback_head(engine.repo_id()).await;
             return Ok((network, vec![host_events, client_events]));
         }
 
-        let (online_dir, offline_dir, sandbox) = match mode {
-            RuntimeMode::Host => ("host", "host-lan", sandbox),
-            _ => ("client", "client-lan", None),
+        let (store_dir, sandbox) = match mode {
+            RuntimeMode::Host => ("host", sandbox),
+            _ => ("client", None),
         };
         let standard = start_node(
             data_dir,
-            online_dir,
+            store_dir,
             engine,
             sandbox.clone(),
             NetworkProfile::StandardN0,
         )
         .await;
-        let online = match standard {
+        let (local, events) = match standard {
             Ok((node, events)) => {
                 if time::timeout(RELAY_READY_TIMEOUT, node.endpoint().online())
                     .await
-                    .is_ok()
+                    .is_err()
                 {
-                    Some((node, events))
-                } else {
-                    shutdown_node(&node).await;
-                    None
+                    tracing::debug!("Relay discovery timed out; keeping the endpoint available on LAN");
                 }
+                (node, events)
             }
             Err(error) => {
                 tracing::debug!(%error, "Standard iroh profile unavailable");
-                None
-            }
-        };
-        let (local, events) = match online {
-            Some(started) => started,
-            None => {
                 start_node(
                     data_dir,
-                    offline_dir,
+                    store_dir,
                     engine,
                     sandbox,
                     NetworkProfile::LanOnly,
@@ -107,7 +99,7 @@ impl Network {
                 local,
                 loopback_host: None,
                 remote: None,
-                last_remote_dag: None,
+                last_pushed_commit: None,
             },
             vec![events],
         ))

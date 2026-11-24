@@ -14,16 +14,45 @@ import { Textarea } from "@/components/ui/textarea";
 import { AlertCircle, Check, CheckCircle2, Copy, Link2, Sparkles } from "lucide-react";
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
-import { useConnectPeerTicket, useGetPairingTicket } from "../../lib/queries";
+import { useConnectPeerTicket, useGetPairingTicket, useSwitchRuntimeMode } from "../../lib/queries";
+
+import type { RuntimeMode } from "../../bindings";
 
 interface PairDeviceModalProps {
+  mode: RuntimeMode;
   isOpen: boolean;
   onOpenChange: (open: boolean) => void;
 }
 
-export function PairDeviceModal({ isOpen, onOpenChange }: PairDeviceModalProps) {
+function PairingRolePicker() {
   const { t } = useTranslation();
-  const [tab, setTab] = useState<"share" | "connect">("share");
+  const switchMode = useSwitchRuntimeMode();
+  return (
+    <div className="flex flex-col gap-3">
+      <p className="text-sm text-muted-foreground">{t("modals.pair.chooseRole")}</p>
+      <div className="flex gap-2">
+        {(["host", "client"] as const).map((role) => (
+          <Button
+            key={role}
+            disabled={switchMode.isPending}
+            onClick={() => switchMode.mutate(role)}
+          >
+            {t(`sidebar.mode.${role}`)}
+          </Button>
+        ))}
+      </div>
+      {switchMode.error && (
+        <Alert variant="destructive">
+          <AlertDescription>{String(switchMode.error)}</AlertDescription>
+        </Alert>
+      )}
+    </div>
+  );
+}
+
+export function PairDeviceModal({ isOpen, onOpenChange, mode }: PairDeviceModalProps) {
+  const { t } = useTranslation();
+  const [tab, setTab] = useState<"share" | "connect">(mode === "client" ? "connect" : "share");
   const [ticket, setTicket] = useState<string>("");
   const [copied, setCopied] = useState(false);
   const [remoteInput, setRemoteInput] = useState("");
@@ -35,15 +64,23 @@ export function PairDeviceModal({ isOpen, onOpenChange }: PairDeviceModalProps) 
   const handleGenerate = () => {
     setCopied(false);
     getTicket.mutate(undefined, {
-      onSuccess: (generated) => setTicket(generated),
+      onSuccess: (generated) => {
+        setTicket(generated);
+        setFeedback(null);
+      },
+      onError: (error) => setFeedback({ ok: false, text: String(error) }),
     });
   };
 
   const handleCopy = async () => {
     if (!ticket) return;
-    await navigator.clipboard.writeText(ticket);
-    setCopied(true);
-    window.setTimeout(() => setCopied(false), 1800);
+    try {
+      await navigator.clipboard.writeText(ticket);
+      setCopied(true);
+      setFeedback(null);
+    } catch {
+      setFeedback({ ok: false, text: t("modals.pair.copyFailed") });
+    }
   };
 
   const handleConnect = () => {
@@ -82,117 +119,122 @@ export function PairDeviceModal({ isOpen, onOpenChange }: PairDeviceModalProps) 
           </div>
         </DialogHeader>
 
-        <Tabs
-          value={tab}
-          onValueChange={(value) => setTab(value === "connect" ? "connect" : "share")}
-          className="gap-3"
-        >
-          <TabsList className="grid w-full grid-cols-2">
-            <TabsTrigger value="share">
-              <span className="relay-text-trim leading-none">{t("modals.pair.shareTab")}</span>
-            </TabsTrigger>
-            <TabsTrigger value="connect">
-              <span className="relay-text-trim leading-none">{t("modals.pair.connectTab")}</span>
-            </TabsTrigger>
-          </TabsList>
+        {mode === "local_dual_sandbox" ? (
+          <PairingRolePicker />
+        ) : (
+          <Tabs
+            value={tab}
+            onValueChange={(value) => setTab(value === "connect" ? "connect" : "share")}
+            className="gap-3"
+          >
+            <TabsList className="grid w-full grid-cols-2">
+              <TabsTrigger value="share">
+                <span className="relay-text-trim leading-none">{t("modals.pair.shareTab")}</span>
+              </TabsTrigger>
+              <TabsTrigger value="connect">
+                <span className="relay-text-trim leading-none">{t("modals.pair.connectTab")}</span>
+              </TabsTrigger>
+            </TabsList>
 
-          <TabsContent value="share" className="flex flex-col gap-3">
-            <p className="text-xs leading-relaxed text-muted-foreground">
-              {t("modals.pair.shareDesc")}
-            </p>
+            <TabsContent value="share" className="flex flex-col gap-3">
+              <p className="text-xs leading-relaxed text-muted-foreground">
+                {t("modals.pair.shareDesc")}
+              </p>
 
-            {ticket ? (
-              <div className="flex flex-col gap-2">
-                <pre className="font-mono-tech max-h-40 overflow-auto rounded-md border border-border bg-muted/60 p-3 text-[11px] leading-relaxed text-foreground">
-                  {ticket}
-                </pre>
-                <div className="flex gap-2">
-                  <Button size="lg" className="flex-1" onClick={() => void handleCopy()}>
-                    {copied ? (
-                      <Check data-icon="inline-start" />
-                    ) : (
-                      <Copy data-icon="inline-start" />
-                    )}
-                    <span className="relay-text-trim leading-none">
-                      {copied ? t("modals.pair.copiedBtn") : t("modals.pair.copyBtn")}
-                    </span>
-                  </Button>
-                  <Button
-                    size="lg"
-                    variant="outline"
-                    disabled={getTicket.isPending}
-                    onClick={handleGenerate}
-                  >
-                    <span className="relay-text-trim leading-none">
-                      {t("modals.pair.generateBtn")}
-                    </span>
-                  </Button>
+              {ticket ? (
+                <div className="flex flex-col gap-2">
+                  <pre className="font-mono-tech max-h-40 overflow-auto rounded-md border border-border bg-muted/60 p-3 text-[11px] leading-relaxed text-foreground">
+                    {ticket}
+                  </pre>
+                  <div className="flex gap-2">
+                    <Button size="lg" className="flex-1" onClick={() => void handleCopy()}>
+                      {copied ? (
+                        <Check data-icon="inline-start" />
+                      ) : (
+                        <Copy data-icon="inline-start" />
+                      )}
+                      <span className="relay-text-trim leading-none">
+                        {copied ? t("modals.pair.copiedBtn") : t("modals.pair.copyBtn")}
+                      </span>
+                    </Button>
+                    <Button
+                      size="lg"
+                      variant="outline"
+                      disabled={getTicket.isPending}
+                      onClick={handleGenerate}
+                    >
+                      <span className="relay-text-trim leading-none">
+                        {t("modals.pair.generateBtn")}
+                      </span>
+                    </Button>
+                  </div>
                 </div>
-              </div>
-            ) : (
+              ) : (
+                <Button
+                  size="lg"
+                  className="w-full"
+                  disabled={getTicket.isPending}
+                  onClick={handleGenerate}
+                >
+                  <Sparkles data-icon="inline-start" />
+                  <span className="relay-text-trim leading-none">
+                    {t("modals.pair.generateBtn")}
+                  </span>
+                </Button>
+              )}
+            </TabsContent>
+
+            <TabsContent value="connect" className="flex flex-col gap-3">
+              <FieldGroup>
+                <Field>
+                  <FieldLabel htmlFor="pair-code-input">{t("modals.pair.pasteLabel")}</FieldLabel>
+                  <Textarea
+                    id="pair-code-input"
+                    rows={4}
+                    value={remoteInput}
+                    onChange={(e) => setRemoteInput(e.target.value)}
+                    placeholder={t("modals.pair.pastePlaceholder")}
+                    autoCorrect="off"
+                    autoCapitalize="none"
+                    spellCheck={false}
+                    className="font-mono-tech text-[11.5px]"
+                  />
+                </Field>
+              </FieldGroup>
+
               <Button
                 size="lg"
                 className="w-full"
-                disabled={getTicket.isPending}
-                onClick={handleGenerate}
+                disabled={!remoteInput.trim() || connectPeer.isPending}
+                onClick={handleConnect}
               >
-                <Sparkles data-icon="inline-start" />
-                <span className="relay-text-trim leading-none">{t("modals.pair.generateBtn")}</span>
+                <Link2 data-icon="inline-start" />
+                <span className="relay-text-trim leading-none">{t("modals.pair.connectBtn")}</span>
               </Button>
+            </TabsContent>
+          </Tabs>
+        )}
+        {feedback && (
+          <Alert
+            variant={feedback.ok ? "default" : "destructive"}
+            className={
+              feedback.ok
+                ? "border-emerald-500/25 bg-[var(--relay-fresh-soft)] text-emerald-800 dark:text-emerald-200"
+                : "border-destructive/30 bg-[var(--relay-stale-soft)]"
+            }
+          >
+            {feedback.ok ? (
+              <CheckCircle2 className="text-emerald-600 dark:text-emerald-400" />
+            ) : (
+              <AlertCircle />
             )}
-          </TabsContent>
-
-          <TabsContent value="connect" className="flex flex-col gap-3">
-            <FieldGroup>
-              <Field>
-                <FieldLabel htmlFor="pair-code-input">{t("modals.pair.pasteLabel")}</FieldLabel>
-                <Textarea
-                  id="pair-code-input"
-                  rows={4}
-                  value={remoteInput}
-                  onChange={(e) => setRemoteInput(e.target.value)}
-                  placeholder={t("modals.pair.pastePlaceholder")}
-                  autoCorrect="off"
-                  autoCapitalize="none"
-                  spellCheck={false}
-                  className="font-mono-tech text-[11.5px]"
-                />
-              </Field>
-            </FieldGroup>
-
-            {feedback && (
-              <Alert
-                variant={feedback.ok ? "default" : "destructive"}
-                className={
-                  feedback.ok
-                    ? "border-emerald-500/25 bg-[var(--relay-fresh-soft)] text-emerald-800 dark:text-emerald-200"
-                    : "border-destructive/30 bg-[var(--relay-stale-soft)]"
-                }
-              >
-                {feedback.ok ? (
-                  <CheckCircle2 className="text-emerald-600 dark:text-emerald-400" />
-                ) : (
-                  <AlertCircle />
-                )}
-                <AlertDescription
-                  className={feedback.ok ? "text-emerald-800 dark:text-emerald-200" : undefined}
-                >
-                  {feedback.text}
-                </AlertDescription>
-              </Alert>
-            )}
-
-            <Button
-              size="lg"
-              className="w-full"
-              disabled={!remoteInput.trim() || connectPeer.isPending}
-              onClick={handleConnect}
+            <AlertDescription
+              className={feedback.ok ? "text-emerald-800 dark:text-emerald-200" : undefined}
             >
-              <Link2 data-icon="inline-start" />
-              <span className="relay-text-trim leading-none">{t("modals.pair.connectBtn")}</span>
-            </Button>
-          </TabsContent>
-        </Tabs>
+              {feedback.text}
+            </AlertDescription>
+          </Alert>
+        )}
 
         <DialogFooter>
           <Button variant="outline" size="lg" onClick={() => onOpenChange(false)}>

@@ -2,10 +2,11 @@ use crate::contracts::{
     DagSnapshot, EdgeKind, Freshness, GraphEdge, GraphNode, NodeId, NodeKind, StalePropagationReport,
 };
 use crate::error::{RelayError, RelayResult};
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use petgraph::Direction;
+use petgraph::algo::{has_path_connecting, toposort};
 use petgraph::stable_graph::{EdgeIndex, NodeIndex, StableDiGraph};
-use petgraph::visit::EdgeRef;
+use petgraph::visit::{EdgeRef, IntoEdgeReferences};
 use std::collections::{HashMap, HashSet, VecDeque};
 
 /// In-memory Decision-Evidence DAG backed by `petgraph::StableDiGraph`.
@@ -44,14 +45,49 @@ impl DagEngine {
     }
 
     pub fn add_edge(&mut self, edge: GraphEdge) -> RelayResult<()> {
-        self.write_edge(edge, false)
+        if !self.edge_id_to_idx.contains_key(&edge.id) {
+            self.check_connection(&edge)?;
+        }
+        self.restore_edge(edge)
     }
 
-    pub(crate) fn upsert_edge(&mut self, edge: GraphEdge) -> RelayResult<()> {
+    pub(crate) fn restore_edge(&mut self, edge: GraphEdge) -> RelayResult<()> {
+        self.write_edge(edge, false).map(|_| ())
+    }
+
+    pub(crate) fn upsert_edge(&mut self, edge: GraphEdge) -> RelayResult<bool> {
         self.write_edge(edge, true)
     }
 
-    fn write_edge(&mut self, edge: GraphEdge, replace: bool) -> RelayResult<()> {
+    fn check_connection(&self, edge: &GraphEdge) -> RelayResult<()> {
+        if let (Some(&from), Some(&to)) = (self.id_to_idx.get(&edge.from), self.id_to_idx.get(&edge.to))
+            && has_path_connecting(&self.graph, to, from, None)
+        {
+            return Err(RelayError::Internal(format!("edge {} would create a DAG cycle", edge.id)));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn validate_edge_changes(&self, previous: &Self) -> RelayResult<()> {
+        // Check the final batch, since replacing two edges can temporarily form a cycle.
+        if toposort(&self.graph, None).is_ok() {
+            return Ok(());
+        }
+        // Older versions accepted cycles. Allow unrelated edits and exact replay while
+        // rejecting each new connection that participates in a cycle.
+        for edge in self.graph.edge_weights() {
+            let unchanged = previous.edge_id_to_idx.get(&edge.id).is_some_and(|&idx| {
+                let old = &previous.graph[idx];
+                old.from == edge.from && old.to == edge.to
+            });
+            if !unchanged {
+                self.check_connection(edge)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn write_edge(&mut self, edge: GraphEdge, replace: bool) -> RelayResult<bool> {
         let from = *self
             .id_to_idx
             .get(&edge.from)
@@ -63,14 +99,14 @@ impl DagEngine {
 
         if let Some(&idx) = self.edge_id_to_idx.get(&edge.id) {
             if !replace || self.graph[idx] == edge {
-                return Ok(());
+                return Ok(false);
             }
             let _ = self.graph.remove_edge(idx);
         }
         let id = edge.id.clone();
         let idx = self.graph.add_edge(from, to, edge);
         self.edge_id_to_idx.insert(id, idx);
-        Ok(())
+        Ok(true)
     }
 
     pub(crate) fn refresh_head_commit(&mut self) {
@@ -82,38 +118,37 @@ impl DagEngine {
                 let NodeKind::Artifact { git_commit_sha, .. } = &node.payload else {
                     return None;
                 };
-                let superseded = self
-                    .graph
-                    .edges_directed(idx, Direction::Incoming)
-                    .any(|edge| {
-                        edge.weight().kind == EdgeKind::Supersedes
-                            && matches!(self.graph[edge.source()].payload, NodeKind::Artifact { .. })
-                    });
-                Some((
-                    !superseded,
-                    node.updated_at,
-                    node.created_at,
-                    &node.id,
-                    git_commit_sha,
-                ))
+                Some((self.artifact_rank(idx), git_commit_sha))
             })
             .max()
-            .map(|(_, _, _, _, sha)| sha.clone());
+            .map(|(_, sha)| sha.clone());
     }
 
     pub(crate) fn head_commit_sha(&self) -> Option<&str> {
         self.head_commit_sha.as_deref()
     }
 
+    fn artifact_rank(&self, idx: NodeIndex) -> (bool, DateTime<Utc>, DateTime<Utc>, &str) {
+        let node = &self.graph[idx];
+        let superseded = self.graph.edges_directed(idx, Direction::Incoming).any(|edge| {
+            edge.weight().kind == EdgeKind::Supersedes
+                && matches!(self.graph[edge.source()].payload, NodeKind::Artifact { .. })
+        });
+        (!superseded, node.updated_at, node.created_at, &node.id)
+    }
+
     pub(crate) fn artifact_id_for_commit(&self, sha: &str) -> Option<&str> {
         self.graph
-            .node_weights()
-            .filter(|node| {
-                matches!(&node.payload, NodeKind::Artifact { git_commit_sha, .. } if git_commit_sha == sha)
+            .node_indices()
+            .filter_map(|idx| {
+                let node = &self.graph[idx];
+                if !matches!(&node.payload, NodeKind::Artifact { git_commit_sha, .. } if git_commit_sha == sha) {
+                    return None;
+                }
+                Some(self.artifact_rank(idx))
             })
-            .map(|node| (node.updated_at, node.created_at, node.id.as_str()))
             .max()
-            .map(|(_, _, id)| id)
+            .map(|(_, _, _, id)| id)
     }
 
     pub(crate) fn artifact_commit(&self, node_id: &str) -> RelayResult<&str> {
@@ -151,42 +186,75 @@ impl DagEngine {
             .id_to_idx
             .get(start)
             .ok_or_else(|| RelayError::NodeNotFound(start.into()))?;
-        let mut visited = HashSet::from([start_idx]);
-        // A superseding artifact has its own evidence, even if it is reachable from the old one.
-        if let Some(&cause_idx) = self.id_to_idx.get(cause) {
-            visited.insert(cause_idx);
-        }
-        let mut queue = VecDeque::from([start_idx]);
-        let now = Utc::now();
-        let mut invalidated_evidence_ids = Vec::new();
-
-        while let Some(idx) = queue.pop_front() {
-            queue.extend(
-                self.graph
-                    .neighbors(idx)
-                    .filter(|neighbor| visited.insert(*neighbor)),
-            );
-            let node = &mut self.graph[idx];
-            if idx != start_idx
-                && matches!(node.payload, NodeKind::Evidence { .. })
-                && !matches!(node.freshness, Freshness::Stale { .. })
-            {
-                node.freshness = Freshness::Stale {
-                    caused_by: cause.into(),
-                    reason: reason.clone(),
-                    marked_at: now,
-                };
-                node.updated_at = node.updated_at.max(now);
-                invalidated_evidence_ids.push(node.id.clone());
-            }
-        }
-
-        invalidated_evidence_ids.sort_unstable();
+        let cause_idx = *self.id_to_idx.get(cause)
+            .ok_or_else(|| RelayError::NodeNotFound(cause.into()))?;
+        let invalidated_evidence_ids = self.invalidate_from(&[(start_idx, cause_idx, reason.clone())], Some(Utc::now()));
         Ok(StalePropagationReport {
             trigger_node_id: cause.into(),
             invalidated_evidence_ids,
             reason,
         })
+    }
+
+    /// Account for evidence or dependencies received after their artifact was superseded.
+    pub(crate) fn reconcile_superseded_evidence(&mut self) -> Vec<String> {
+        let mut sources: Vec<_> = self.graph.edge_references()
+            .filter(|edge| edge.weight().kind == EdgeKind::Supersedes)
+            .map(|edge| (
+                edge.target(),
+                edge.source(),
+                format!("Artifact {} superseded by {}", edge.weight().to, edge.weight().from),
+            ))
+            .collect();
+        sources.sort_unstable_by(|a, b| a.2.cmp(&b.2));
+        self.invalidate_from(&sources, None)
+    }
+
+    fn invalidate_from(
+        &mut self,
+        sources: &[(NodeIndex, NodeIndex, String)],
+        marked_at: Option<DateTime<Utc>>,
+    ) -> Vec<String> {
+        let mut visited = HashSet::new();
+        let mut queue = VecDeque::new();
+        for (source, (start, _, _)) in sources.iter().enumerate() {
+            if visited.insert(*start) {
+                queue.push_back((*start, source));
+            }
+        }
+        let mut invalidated_evidence_ids = Vec::new();
+
+        while let Some((idx, source)) = queue.pop_front() {
+            let (start, cause, reason) = &sources[source];
+            queue.extend(
+                self.graph
+                    .neighbors(idx)
+                    .filter(|neighbor| neighbor != cause && visited.insert(*neighbor))
+                    .map(|neighbor| (neighbor, source)),
+            );
+            let cause_id = &self.graph[*cause].id;
+            if idx == *start
+                || !matches!(self.graph[idx].payload, NodeKind::Evidence { .. })
+                || matches!(self.graph[idx].freshness, Freshness::Stale { .. })
+            {
+                continue;
+            }
+            // A reconciliation can run in independent readers. Persisted inputs must
+            // yield the same provenance without incorporating the reader's wall clock.
+            let timestamp = marked_at.unwrap_or_else(|| self.graph[*cause].updated_at.max(self.graph[idx].updated_at));
+            let freshness = Freshness::Stale {
+                caused_by: cause_id.clone(),
+                reason: reason.clone(),
+                marked_at: timestamp,
+            };
+            let node = &mut self.graph[idx];
+            node.freshness = freshness;
+            node.updated_at = node.updated_at.max(timestamp);
+            invalidated_evidence_ids.push(node.id.clone());
+        }
+
+        invalidated_evidence_ids.sort_unstable();
+        invalidated_evidence_ids
     }
 
     /// Guard used by Agent/MCP layers before citing an Evidence node.
@@ -222,8 +290,12 @@ impl DagEngine {
                 "superseding node {new_id} must be a distinct artifact",
             )));
         }
+        let edge = supersedes_edge(old_artifact_id, &new_id);
+        if !self.edge_id_to_idx.get(&edge.id).is_some_and(|&idx| self.graph[idx] == edge) {
+            self.check_connection(&edge)?;
+        }
         self.upsert_node(new_artifact);
-        self.upsert_edge(supersedes_edge(old_artifact_id, &new_id))?;
+        self.upsert_edge(edge)?;
         self.refresh_head_commit();
         self.invalidate_evidence(old_artifact_id, &new_id, reason.into())
     }

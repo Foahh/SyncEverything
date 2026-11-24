@@ -1,0 +1,6 @@
+# Match oxfmt's LF output on Windows checkouts as well as Unix.
+*.ts text eol=lf
+*.tsx text eol=lf
+*.json text eol=lf
+*.css text eol=lf
+*.html text eol=lf

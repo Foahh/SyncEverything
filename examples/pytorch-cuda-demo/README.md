@@ -1,8 +1,8 @@
 # PyTorch CUDA Demo (`SyncEverything` / `Relay`)
 
-Lightweight, deterministic 5-second PyTorch training & evaluation repository designed for cross-device live demos (e.g. laptop Client -> Windows/Linux GPU Workstation Host over `iroh` P2P LAN).
+Lightweight, seeded PyTorch training and evaluation for demos over a direct LAN connection between a laptop and a workstation.
 
-- Zero external downloads: synthesizes a 4-class spiral classification dataset in memory using a fixed `--seed`.
+- Generates the 4-class spiral dataset in memory from a fixed `--seed`. Initial setup downloads the PyTorch dependencies.
 - Automatic accelerator fallback: picks **CUDA -> Apple MPS -> CPU** unless overridden via `--device`.
 - Emits structured JSON metrics (`val_acc`, `val_loss`, `device`, `device_name`, `samples_per_sec`, `elapsed_ms`) captured into the Decision-Evidence DAG.
 
@@ -11,30 +11,29 @@ Lightweight, deterministic 5-second PyTorch training & evaluation repository des
 | Preset | Purpose | Allowed Params |
 |---|---|---|
 | `smoke` | 1-step forward/backward & accelerator check | `device` |
-| `train` | 40-epoch 3-layer GELU MLP training run (~1-4s) | `epochs`, `lr`, `hidden`, `batch_size`, `samples`, `seed`, `device` |
+| `train` | 40-epoch 3-layer GELU MLP training run | `epochs`, `lr`, `hidden`, `batch_size`, `samples`, `seed`, `device` |
 | `eval` | Fast 15-epoch validation sweep | `epochs`, `lr`, `hidden`, `batch_size`, `samples`, `seed`, `device` |
 
 ## Quick Two-Machine LAN Setup
 
-1. Copy this directory into its own standalone Git repository on both machines (or clone from your repo):
+1. On the Host, copy the three project files to a new directory and initialize Git. While online, use `uv sync` to populate the cache and create `uv.lock`. For CUDA, use an index that provides PyTorch wheels for the Host's platform and CUDA version. [PyTorch installation options](https://pytorch.org/get-started/locally/)
 
 ```powershell
-mkdir -p ~/pytorch-cuda-demo
-cp examples/pytorch-cuda-demo/* ~/pytorch-cuda-demo/
-cd ~/pytorch-cuda-demo
+New-Item -ItemType Directory -Path ~/pytorch-cuda-demo
+Copy-Item examples/pytorch-cuda-demo/train.py,examples/pytorch-cuda-demo/pyproject.toml,examples/pytorch-cuda-demo/relay.toml ~/pytorch-cuda-demo
+Set-Location ~/pytorch-cuda-demo
 git init -b main
-git add .
+uv sync
+uv run --locked --offline python train.py --smoke
+git add train.py pyproject.toml relay.toml uv.lock
 git commit -m "init pytorch cuda demo"
 ```
 
-2. On the GPU Workstation (Host), prepare the `uv` environment while online (recommended for CUDA wheels) and then run completely offline on campus/hotspot LAN:
+2. Clone this same commit on the laptop. With both machines on the same LAN, start the daemon on the Host with the same uv cache and index settings used during setup. Relay creates a separate environment in each task worktree, so this cache supplies the dependencies when WAN access is unavailable. [uv lockfile and environments](https://docs.astral.sh/uv/concepts/projects/sync/)
 
 ```powershell
-# Optional: pre-warm CUDA PyTorch wheel in uv cache before disconnecting WAN
-uv sync
-
-# Start headless Host in pure LAN mode (no internet relay required)
+$env:UV_OFFLINE = "1"
 relay-daemon --repo-root . serve --lan-only
 ```
 
-3. Open **SyncEverything** Desktop on your laptop, open your local copy of `pytorch-cuda-demo`, paste the pairing ticket in **Pair Device**, and dispatch `train`. When you commit a hyperparameter or code edit on the laptop, SyncEverything pushes the Git bundle to the Host and automatically marks prior GPU `Result` nodes as `Outdated`.
+3. Open **SyncEverything** Desktop on the laptop, open the demo repository, paste the pairing ticket in **Pair Device**, and dispatch `train`. To demonstrate invalidation, commit a change to `train.py` on the laptop. SyncEverything pushes the commit to the Host and marks the prior `Result` as `Outdated`.
