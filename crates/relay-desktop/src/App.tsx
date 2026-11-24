@@ -1,5 +1,7 @@
 import { useMemo, useState } from "react";
+import { useTranslation } from "react-i18next";
 import type { GraphNode, TaskRecord_Serialize } from "./bindings";
+import { formatErrorMessage } from "./lib/formatError";
 import { findCommitArtifact, needsTaskApproval, type ApprovalInput } from "./lib/relayApi";
 import { DagCanvas } from "./components/DagCanvas";
 import { LeftRail } from "./components/LeftRail";
@@ -35,6 +37,7 @@ import {
 
 export default function App() {
   useRelayEventSync();
+  const { t } = useTranslation();
   const { theme, toggleTheme } = useRelayTheme();
 
   const [includeStale, setIncludeStale] = useState(true);
@@ -48,6 +51,7 @@ export default function App() {
   const [pairModalOpen, setPairModalOpen] = useState(false);
   const [settingsModalOpen, setSettingsModalOpen] = useState(false);
   const [settingsTab, setSettingsTab] = useState<SettingsTab>("repo");
+  const [settingsNotice, setSettingsNotice] = useState<string | null>(null);
 
   const { data: status } = useRuntimeStatus();
   const { data: workspace } = useWorkspaceInfo();
@@ -170,13 +174,19 @@ export default function App() {
   };
 
   const handleOpenSettings = (tab: SettingsTab) => {
+    setSettingsNotice(null);
     setSettingsTab(tab);
     setSettingsModalOpen(true);
   };
 
   const openPairing = () => {
-    if (workspace?.repo_root) setPairModalOpen(true);
-    else handleOpenSettings("repo");
+    if (workspace?.repo_root) {
+      setPairModalOpen(true);
+    } else {
+      setSettingsNotice(t("modals.workspace.pairRequiresRepoHint"));
+      setSettingsTab("repo");
+      setSettingsModalOpen(true);
+    }
   };
 
   const handleResolveApproval = (approval: ApprovalInput, fromTab: RightRailTab) => {
@@ -245,7 +255,8 @@ export default function App() {
           onOpenRecordDecision={() => setDecisionModalOpen(true)}
           onOpenDispatchTask={() => setTaskModalOpen(true)}
           onOpenRepoSettings={() => handleOpenSettings("repo")}
-          manifestError={initManifest.error ? String(initManifest.error) : null}
+          manifestError={initManifest.error ? formatErrorMessage(initManifest.error, t) : null}
+          onDismissManifestError={() => initManifest.reset()}
           onGenerateManifest={() => initManifest.mutate(workspace?.repo_root)}
         />
 
@@ -262,7 +273,10 @@ export default function App() {
           pendingFixTask={pendingFixTask}
           onResolveApproval={handleResolveApproval}
           isResolvingApproval={resolveApproval.isPending}
-          approvalError={resolveApproval.error == null ? null : String(resolveApproval.error)}
+          approvalError={
+            resolveApproval.error == null ? null : formatErrorMessage(resolveApproval.error, t)
+          }
+          onDismissApprovalError={() => resolveApproval.reset()}
           messages={copilot.messages}
           isStreaming={copilot.isStreaming}
           streamingMessageId={copilot.streamingMessageId}
@@ -302,9 +316,13 @@ export default function App() {
 
       <WorkspaceSettingsModal
         isOpen={settingsModalOpen}
-        onOpenChange={setSettingsModalOpen}
+        onOpenChange={(open) => {
+          setSettingsModalOpen(open);
+          if (!open) setSettingsNotice(null);
+        }}
         activeTab={settingsTab}
         onTabChange={setSettingsTab}
+        repoNotice={workspace?.repo_root ? null : settingsNotice}
       />
     </div>
   );

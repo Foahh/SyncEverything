@@ -12,6 +12,8 @@ import {
   requireCurrentApproval,
 } from "../src/lib/relayApi";
 
+import i18n from "../src/i18n";
+import { extractCleanRunPreset, formatErrorMessage } from "../src/lib/formatError";
 import { buildMcpSnippet } from "../src/lib/mcpConfig";
 
 const testSpec: TaskSpec_Deserialize = {
@@ -154,4 +156,41 @@ test("onboarding starts empty and preserves independent preview repositories", a
   expect((await relayApi.openWorkspaceRepo(path)).presets).toEqual(workspace.presets);
   expect((await relayApi.listTasks()).map((task) => task.spec.task_id)).toEqual([testSpec.task_id]);
   resetBrowserPreviewState();
+});
+
+test("formatErrorMessage maps known backend errors, strips Error prefix, and falls back on empty", () => {
+  const tZh = i18n.getFixedT("zh-CN");
+  const tEn = i18n.getFixedT("en");
+
+  expect(formatErrorMessage("Open a Git repository before running a task.", tZh)).toBe(
+    tZh("errors.openRepoBeforeTask"),
+  );
+  expect(
+    formatErrorMessage(
+      "Error: git command failed: Create the first Git commit before running a task.",
+      tZh,
+    ),
+  ).toBe(tZh("errors.createFirstCommit"));
+  expect(
+    formatErrorMessage(new Error("transport error: Choose a device role before pairing"), tEn),
+  ).toBe(tEn("errors.chooseRoleBeforePairing"));
+  expect(
+    formatErrorMessage("internal error: relay.toml already exists in this repository", tZh),
+  ).toBe(tZh("errors.manifestAlreadyExists"));
+
+  expect(formatErrorMessage(new Error("Error: Network timeout on 192.168.1.10"), tZh)).toBe(
+    "Network timeout on 192.168.1.10",
+  );
+  expect(formatErrorMessage("   ", tZh, "自定义兜底")).toBe("自定义兜底");
+  expect(formatErrorMessage("", tZh)).toBe(tZh("errors.generic"));
+  expect(formatErrorMessage(null, tEn)).toBe(tEn("errors.generic"));
+});
+
+test("extractCleanRunPreset parses bare presets, legacy summaries, and empty strings", () => {
+  expect(extractCleanRunPreset("train")).toBe("train");
+  expect(extractCleanRunPreset("  train_grid  ")).toBe("train_grid");
+  expect(extractCleanRunPreset("Preflight passed. Approve to run train.")).toBe("train");
+  expect(extractCleanRunPreset("Preflight passed. Approve to run check")).toBe("check");
+  expect(extractCleanRunPreset("   ")).toBeNull();
+  expect(extractCleanRunPreset("")).toBeNull();
 });

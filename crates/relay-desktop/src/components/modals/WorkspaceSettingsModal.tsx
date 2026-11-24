@@ -25,13 +25,14 @@ import {
   FilePlus2,
   FolderGit2,
   FolderOpen,
+  Info,
   RefreshCw,
   SlidersHorizontal,
   Sparkles,
   Terminal,
   Trash2,
 } from "lucide-react";
-import { useState, type FormEvent } from "react";
+import { useEffect, useState, type FormEvent } from "react";
 import { useTranslation } from "react-i18next";
 import type {
   InferenceTier,
@@ -39,6 +40,7 @@ import type {
   LlmSettingsView_Serialize,
   WorkspaceInfo_Serialize,
 } from "../../bindings";
+import { formatErrorMessage } from "../../lib/formatError";
 import {
   useInitWorkspaceManifest,
   useLlmSettings,
@@ -56,6 +58,7 @@ interface WorkspaceSettingsModalProps {
   onOpenChange: (open: boolean) => void;
   activeTab: SettingsTab;
   onTabChange: (tab: SettingsTab) => void;
+  repoNotice?: string | null;
 }
 
 interface FeedbackState {
@@ -86,12 +89,6 @@ const MCP_CLIENTS: Array<{ id: McpClientId; label: string; configPath: string }>
   { id: "codex", label: "Codex CLI", configPath: "~/.codex/config.toml" },
 ];
 
-function errorMessage(err: unknown, fallback: string): string {
-  if (err instanceof Error && err.message) return err.message;
-  if (typeof err === "string" && err.trim()) return err;
-  return fallback;
-}
-
 function StatusBanner({ feedback }: { feedback: FeedbackState | null }) {
   if (!feedback) return null;
   return (
@@ -119,7 +116,13 @@ function StatusBanner({ feedback }: { feedback: FeedbackState | null }) {
   );
 }
 
-function RepositorySettingsTab({ workspace }: { workspace: WorkspaceInfo_Serialize | undefined }) {
+function RepositorySettingsTab({
+  workspace,
+  repoNotice,
+}: {
+  workspace: WorkspaceInfo_Serialize | undefined;
+  repoNotice?: string | null;
+}) {
   const { t } = useTranslation();
   const [repoPath, setRepoPath] = useState(workspace?.repo_root ?? "");
   const [isPicking, setIsPicking] = useState(false);
@@ -139,7 +142,7 @@ function RepositorySettingsTab({ workspace }: { workspace: WorkspaceInfo_Seriali
         setRepoPath(selected);
       }
     } catch (err) {
-      setFeedback({ ok: false, text: errorMessage(err, "Unable to open folder dialog.") });
+      setFeedback({ ok: false, text: formatErrorMessage(err, t, "Unable to open folder dialog.") });
     } finally {
       setIsPicking(false);
     }
@@ -156,7 +159,7 @@ function RepositorySettingsTab({ workspace }: { workspace: WorkspaceInfo_Seriali
         setFeedback({ ok: true, text: t("modals.workspace.repoOpened") });
       },
       onError: (err) => {
-        setFeedback({ ok: false, text: errorMessage(err, "Could not open repository.") });
+        setFeedback({ ok: false, text: formatErrorMessage(err, t, "Could not open repository.") });
       },
     });
   };
@@ -168,7 +171,10 @@ function RepositorySettingsTab({ workspace }: { workspace: WorkspaceInfo_Seriali
         setFeedback({ ok: true, text: t("modals.workspace.manifestGenerated") });
       },
       onError: (err) => {
-        setFeedback({ ok: false, text: errorMessage(err, "Could not generate relay.toml.") });
+        setFeedback({
+          ok: false,
+          text: formatErrorMessage(err, t, "Could not generate relay.toml."),
+        });
       },
     });
   };
@@ -183,7 +189,7 @@ function RepositorySettingsTab({ workspace }: { workspace: WorkspaceInfo_Seriali
         });
       },
       onError: (err) => {
-        setFeedback({ ok: false, text: errorMessage(err, "Git sync failed.") });
+        setFeedback({ ok: false, text: formatErrorMessage(err, t, "Git sync failed.") });
       },
     });
   };
@@ -193,6 +199,12 @@ function RepositorySettingsTab({ workspace }: { workspace: WorkspaceInfo_Seriali
 
   return (
     <div className="flex flex-col gap-4">
+      {repoNotice && !workspace?.repo_root && (
+        <Alert className="border-primary/25 bg-primary/8 text-foreground">
+          <Info className="text-primary" />
+          <AlertDescription className="text-foreground">{repoNotice}</AlertDescription>
+        </Alert>
+      )}
       <div className="flex flex-col gap-2.5 rounded-lg border border-border bg-muted/40 p-3">
         <div className="flex items-center justify-between gap-2">
           <div className="flex min-w-0 items-center gap-2">
@@ -397,7 +409,7 @@ function LlmSettingsTab({ initial }: { initial: LlmSettingsView_Serialize }) {
         setFeedback({ ok: true, text: t("modals.workspace.savedSuccess") });
       },
       onError: (err) => {
-        setFeedback({ ok: false, text: errorMessage(err, "Unable to save AI settings.") });
+        setFeedback({ ok: false, text: formatErrorMessage(err, t, "Unable to save AI settings.") });
       },
     });
   };
@@ -409,7 +421,7 @@ function LlmSettingsTab({ initial }: { initial: LlmSettingsView_Serialize }) {
       const probe = await relayApi.testLlmConnection(buildUpdate());
       setFeedback({ ok: probe.ok, text: probe.message });
     } catch (err) {
-      setFeedback({ ok: false, text: errorMessage(err, "Connection probe failed.") });
+      setFeedback({ ok: false, text: formatErrorMessage(err, t, "Connection probe failed.") });
     } finally {
       setIsTesting(false);
     }
@@ -586,6 +598,14 @@ function McpConfigTab({ workspace }: { workspace?: WorkspaceInfo_Serialize }) {
   const snippet = buildMcpSnippet(client, workspace);
   const copied = feedback?.snippet === snippet && feedback.ok;
 
+  useEffect(() => {
+    if (!feedback?.ok) return;
+    const id = window.setTimeout(() => {
+      setFeedback((current) => (current?.ok ? null : current));
+    }, 1800);
+    return () => window.clearTimeout(id);
+  }, [feedback]);
+
   const handleCopy = async () => {
     if (!snippet) return;
     try {
@@ -680,6 +700,7 @@ export function WorkspaceSettingsModal({
   onOpenChange,
   activeTab,
   onTabChange,
+  repoNotice,
 }: WorkspaceSettingsModalProps) {
   const { t } = useTranslation();
   const { data: workspace } = useWorkspaceInfo();
@@ -720,7 +741,11 @@ export function WorkspaceSettingsModal({
           </TabsList>
 
           <TabsContent value="repo">
-            <RepositorySettingsTab key={workspace?.repo_root ?? "no-repo"} workspace={workspace} />
+            <RepositorySettingsTab
+              key={workspace?.repo_root ?? "no-repo"}
+              workspace={workspace}
+              repoNotice={repoNotice}
+            />
           </TabsContent>
 
           <TabsContent value="llm">

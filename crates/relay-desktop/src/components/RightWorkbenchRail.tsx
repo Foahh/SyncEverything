@@ -1,7 +1,7 @@
-import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
+import { Alert, AlertAction, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { FileSearch, Sparkles, SquarePen, X } from "lucide-react";
+import { AlertCircle, FileSearch, Sparkles, SquarePen, X } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import type {
   AgentChatMessage_Serialize,
@@ -27,6 +27,7 @@ interface RightWorkbenchRailProps {
   onResolveApproval: (approval: ApprovalInput, fromTab: RightRailTab) => void;
   isResolvingApproval: boolean;
   approvalError: string | null;
+  onDismissApprovalError?: () => void;
   // Copilot props
   messages: AgentChatMessage_Serialize[];
   isStreaming: boolean;
@@ -51,6 +52,7 @@ export function RightWorkbenchRail({
   onResolveApproval,
   isResolvingApproval,
   approvalError,
+  onDismissApprovalError,
   messages,
   isStreaming,
   streamingMessageId,
@@ -123,10 +125,29 @@ export function RightWorkbenchRail({
       </div>
 
       {approvalError && (
-        <Alert variant="destructive">
-          <AlertTitle>{t("detail.approvalError")}</AlertTitle>
-          <AlertDescription>{approvalError}</AlertDescription>
-        </Alert>
+        <div className="px-4 pt-3">
+          <Alert
+            variant="destructive"
+            className="border-destructive/30 bg-[var(--relay-stale-soft)]"
+          >
+            <AlertCircle />
+            <AlertTitle>{t("detail.approvalError")}</AlertTitle>
+            <AlertDescription>{approvalError}</AlertDescription>
+            {onDismissApprovalError && (
+              <AlertAction>
+                <Button
+                  type="button"
+                  size="icon-xs"
+                  variant="ghost"
+                  aria-label={t("detail.close")}
+                  onClick={onDismissApprovalError}
+                >
+                  <X />
+                </Button>
+              </AlertAction>
+            )}
+          </Alert>
+        </div>
       )}
 
       {activeTab === "agent" ? (

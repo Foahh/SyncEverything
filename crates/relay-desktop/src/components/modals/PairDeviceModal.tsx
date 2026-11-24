@@ -11,12 +11,12 @@ import {
 import { Field, FieldGroup, FieldLabel } from "@/components/ui/field";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
-import { AlertCircle, Check, CheckCircle2, Copy, Link2, Sparkles } from "lucide-react";
-import { useState } from "react";
+import { AlertCircle, Check, CheckCircle2, Copy, Cpu, Laptop, Link2, Sparkles } from "lucide-react";
+import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { useConnectPeerTicket, useGetPairingTicket, useSwitchRuntimeMode } from "../../lib/queries";
-
 import type { RuntimeMode } from "../../bindings";
+import { formatErrorMessage } from "../../lib/formatError";
+import { useConnectPeerTicket, useGetPairingTicket, useSwitchRuntimeMode } from "../../lib/queries";
 
 interface PairDeviceModalProps {
   mode: RuntimeMode;
@@ -24,26 +24,44 @@ interface PairDeviceModalProps {
   onOpenChange: (open: boolean) => void;
 }
 
+const ROLE_CARDS: ReadonlyArray<{
+  role: "host" | "client";
+  icon: typeof Cpu;
+  descKey: "modals.pair.roleHostDesc" | "modals.pair.roleClientDesc";
+}> = [
+  { role: "host", icon: Cpu, descKey: "modals.pair.roleHostDesc" },
+  { role: "client", icon: Laptop, descKey: "modals.pair.roleClientDesc" },
+];
+
 function PairingRolePicker() {
   const { t } = useTranslation();
   const switchMode = useSwitchRuntimeMode();
   return (
     <div className="flex flex-col gap-3">
-      <p className="text-sm text-muted-foreground">{t("modals.pair.chooseRole")}</p>
-      <div className="flex gap-2">
-        {(["host", "client"] as const).map((role) => (
-          <Button
+      <p className="text-xs leading-relaxed text-muted-foreground">{t("modals.pair.chooseRole")}</p>
+      <div className="grid grid-cols-2 gap-2.5">
+        {ROLE_CARDS.map(({ role, icon: Icon, descKey }) => (
+          <button
             key={role}
+            type="button"
             disabled={switchMode.isPending}
             onClick={() => switchMode.mutate(role)}
+            className="flex cursor-pointer flex-col gap-1.5 rounded-lg border border-border bg-muted/40 p-3 text-left transition-all hover:border-primary/40 hover:bg-primary/5 disabled:pointer-events-none disabled:opacity-50"
           >
-            {t(`sidebar.mode.${role}`)}
-          </Button>
+            <div className="flex items-center gap-2 text-xs font-semibold text-foreground">
+              <span className="flex size-6 shrink-0 items-center justify-center rounded-md bg-primary/10 text-primary">
+                <Icon className="size-3.5" />
+              </span>
+              <span className="relay-text-trim leading-none">{t(`sidebar.mode.${role}`)}</span>
+            </div>
+            <p className="text-xs leading-relaxed text-muted-foreground">{t(descKey)}</p>
+          </button>
         ))}
       </div>
       {switchMode.error && (
-        <Alert variant="destructive">
-          <AlertDescription>{String(switchMode.error)}</AlertDescription>
+        <Alert variant="destructive" className="border-destructive/30 bg-[var(--relay-stale-soft)]">
+          <AlertCircle />
+          <AlertDescription>{formatErrorMessage(switchMode.error, t)}</AlertDescription>
         </Alert>
       )}
     </div>
@@ -61,6 +79,12 @@ export function PairDeviceModal({ isOpen, onOpenChange, mode }: PairDeviceModalP
   const getTicket = useGetPairingTicket();
   const connectPeer = useConnectPeerTicket();
 
+  useEffect(() => {
+    if (!copied) return;
+    const id = window.setTimeout(() => setCopied(false), 1800);
+    return () => window.clearTimeout(id);
+  }, [copied]);
+
   const handleGenerate = () => {
     setCopied(false);
     getTicket.mutate(undefined, {
@@ -68,7 +92,7 @@ export function PairDeviceModal({ isOpen, onOpenChange, mode }: PairDeviceModalP
         setTicket(generated);
         setFeedback(null);
       },
-      onError: (error) => setFeedback({ ok: false, text: String(error) }),
+      onError: (error) => setFeedback({ ok: false, text: formatErrorMessage(error, t) }),
     });
   };
 
@@ -93,13 +117,10 @@ export function PairDeviceModal({ isOpen, onOpenChange, mode }: PairDeviceModalP
         setRemoteInput("");
       },
       onError: (err) => {
-        const detail =
-          err instanceof Error && err.message
-            ? err.message
-            : typeof err === "string" && err
-              ? err
-              : t("modals.pair.invalidCode");
-        setFeedback({ ok: false, text: detail });
+        setFeedback({
+          ok: false,
+          text: formatErrorMessage(err, t, t("modals.pair.invalidCode")),
+        });
       },
     });
   };

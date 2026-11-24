@@ -13,10 +13,11 @@ import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
-import { FolderGit2, Play } from "lucide-react";
+import { AlertCircle, FolderGit2, Play } from "lucide-react";
 import { useState, type FormEvent } from "react";
 import { useTranslation } from "react-i18next";
 import type { PresetInfo } from "../../bindings";
+import { formatErrorMessage } from "../../lib/formatError";
 
 export interface DispatchTaskFormValues {
   taskId: string;
@@ -66,7 +67,7 @@ function DispatchTaskForm({
   const [selectedName, setSelectedName] = useState(preferred.name);
   const [params, setParams] = useState<Record<string, string>>(() => initialParamsFor(preferred));
   const [userNote, setUserNote] = useState("");
-  const [requireApproval, setRequireApproval] = useState(true);
+  const [requireApproval, setRequireApproval] = useState(false);
 
   const selectedPreset = presets.find((item) => item.name === selectedName) ?? preferred;
 
@@ -95,7 +96,7 @@ function DispatchTaskForm({
       });
       onCancel();
     } catch (error) {
-      setSubmitError(String(error));
+      setSubmitError(formatErrorMessage(error, t));
     }
   };
 
@@ -200,7 +201,8 @@ function DispatchTaskForm({
       </FieldGroup>
 
       {submitError && (
-        <Alert variant="destructive">
+        <Alert variant="destructive" className="border-destructive/30 bg-[var(--relay-stale-soft)]">
+          <AlertCircle />
           <AlertDescription>{submitError}</AlertDescription>
         </Alert>
       )}

@@ -11,9 +11,10 @@ import {
 import { Field, FieldGroup, FieldLabel } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
-import { StickyNote } from "lucide-react";
+import { AlertCircle, StickyNote } from "lucide-react";
 import { useForm } from "react-hook-form";
 import { useTranslation } from "react-i18next";
+import { formatErrorMessage } from "../../lib/formatError";
 
 export interface RecordDecisionFormValues {
   label: string;
@@ -68,7 +69,7 @@ export function RecordDecisionModal({
       reset();
       onOpenChange(false);
     } catch (error) {
-      setError("root", { message: String(error) });
+      setError("root", { message: formatErrorMessage(error, t) });
     }
   });
 
@@ -132,7 +133,11 @@ export function RecordDecisionModal({
           </FieldGroup>
 
           {errors.root?.message && (
-            <Alert variant="destructive">
+            <Alert
+              variant="destructive"
+              className="border-destructive/30 bg-[var(--relay-stale-soft)]"
+            >
+              <AlertCircle />
               <AlertDescription>{errors.root.message}</AlertDescription>
             </Alert>
           )}
