@@ -38,6 +38,7 @@ import {
   useSwitchWorkspace,
   useTaskLog,
   useTasks,
+  useTrustedPeers,
   useUpsertDagNode,
   useWorkspaceInfo,
 } from "./lib/queries";
@@ -68,6 +69,7 @@ export default function App() {
   const { data: llmSettings } = useLlmSettings();
   const { data: dag } = useDagSnapshot(includeStale);
   const { data: tasks = [] } = useTasks();
+  const { data: trustedPeers = [] } = useTrustedPeers();
   const copilot = useCopilotChat();
   const { logsByTask, clearTaskLogs } = useTaskLogStream();
 
@@ -289,6 +291,7 @@ export default function App() {
       <main className="flex min-h-0 flex-1 overflow-hidden">
         <LeftRail
           status={status}
+          trustedPeers={trustedPeers}
           tasks={tasks}
           selectedTaskId={inspectorMode === "task" ? selectedTaskId : null}
           cancellingTaskId={cancelTask.isPending ? (cancelTask.variables ?? null) : null}
@@ -389,6 +392,7 @@ export default function App() {
       <PairDeviceModal
         key={`${workspace?.repo_root}:${status?.mode}`}
         mode={status?.mode ?? "local_dual_sandbox"}
+        status={status}
         isOpen={pairModalOpen}
         onOpenChange={setPairModalOpen}
       />

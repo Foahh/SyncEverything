@@ -3,7 +3,10 @@ use relay_core::contracts::{DagSnapshot, RuntimeMode, WireRequest, WireResponse}
 use relay_core::engine::RelayEngine;
 use relay_core::error::{RelayError, RelayResult};
 use relay_core::sandbox::WorktreeSandbox;
-use relay_core::sync::{NetworkProfile, RelayNode, RelayNodeConfig, RelayNodeEvent};
+use relay_core::sync::{
+    AutoReconnectConfig, AutoReconnectHandle, NetworkProfile, ReconnectedPeer, RelayNode,
+    RelayNodeConfig, RelayNodeEvent, spawn_auto_reconnect,
+};
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
@@ -18,9 +21,11 @@ pub(super) struct Network {
     pub(super) loopback_host: Option<Arc<RelayNode>>,
     pub(super) remote: Option<EndpointAddr>,
     pub(super) last_pushed_commit: Option<String>,
+    pub(super) auto_reconnect: Option<AutoReconnectHandle>,
 }
 
 pub(super) type NodeEvents = mpsc::UnboundedReceiver<RelayNodeEvent>;
+pub(super) type ReconnectEvents = mpsc::UnboundedReceiver<ReconnectedPeer>;
 
 impl Network {
     pub(super) async fn start(
@@ -28,7 +33,7 @@ impl Network {
         data_dir: &Path,
         engine: &Arc<RelayEngine>,
         sandbox: Option<WorktreeSandbox>,
-    ) -> RelayResult<(Self, Vec<NodeEvents>)> {
+    ) -> RelayResult<(Self, Vec<NodeEvents>, Option<ReconnectEvents>)> {
         if mode == RuntimeMode::LocalDualSandbox {
             let profile = NetworkProfile::LocalOnly;
             let (host, host_events) =
@@ -54,9 +59,10 @@ impl Network {
                 loopback_host: Some(host),
                 remote: None,
                 last_pushed_commit: None,
+                auto_reconnect: None,
             };
             network.sync_loopback_head(engine.repo_id()).await;
-            return Ok((network, vec![host_events, client_events]));
+            return Ok((network, vec![host_events, client_events], None));
         }
 
         let (store_dir, sandbox) = match mode {
@@ -93,6 +99,17 @@ impl Network {
                 .await?
             }
         };
+        if let Err(error) = local.preload_trusted_peer_addrs().await {
+            tracing::warn!(%error, "Unable to preload trusted peer addresses");
+        }
+        let (auto_reconnect, reconnect_rx) = spawn_auto_reconnect(
+            local.clone(),
+            engine.clone(),
+            AutoReconnectConfig {
+                sender_device: local.id().to_string(),
+                ..Default::default()
+            },
+        );
         Ok((
             Self {
                 mode,
@@ -100,9 +117,17 @@ impl Network {
                 loopback_host: None,
                 remote: None,
                 last_pushed_commit: None,
+                auto_reconnect: Some(auto_reconnect),
             },
             vec![events],
+            Some(reconnect_rx),
         ))
+    }
+
+    pub(super) fn cancel_auto_reconnect(&mut self) {
+        if let Some(handle) = self.auto_reconnect.take() {
+            handle.cancel();
+        }
     }
 
     pub(super) fn executor_node(&self) -> &Arc<RelayNode> {
@@ -117,7 +142,8 @@ impl Network {
         }
     }
 
-    pub(super) async fn shutdown(self) {
+    pub(super) async fn shutdown(mut self) {
+        self.cancel_auto_reconnect();
         if let Some(host) = self.loopback_host {
             tokio::join!(shutdown_node(&self.local), shutdown_node(&host));
         } else {

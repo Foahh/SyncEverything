@@ -1,11 +1,16 @@
 mod peer;
+mod reconnect;
 mod rpc;
 
+pub use reconnect::{
+    AutoReconnectConfig, AutoReconnectHandle, ReconnectedPeer, spawn_auto_reconnect,
+};
 pub use rpc::RelayRpcHandler;
 
 use crate::contracts::{
-    ApprovalDecision, DagDelta, DagSnapshot, GitSyncBundleMeta, PeerStatus, RELAY_RPC_ALPN,
-    TaskId, TaskRecord, TaskSpec, WireRequest, WireResponse,
+    ApprovalDecision, DagDelta, DagSnapshot, GitSyncBundleMeta, PeerRole, PeerStatus,
+    RELAY_RPC_ALPN, RuntimeMode, TaskId, TaskRecord, TaskSpec, TrustedPeerRecord, WireRequest,
+    WireResponse,
 };
 use crate::engine::RelayEngine;
 use crate::error::{RelayError, RelayResult};
@@ -13,17 +18,17 @@ use crate::sandbox::{WorktreeSandbox, compute_env_fingerprint};
 use chrono::Utc;
 use iroh::endpoint::{Connection, NetReportConfig, PortmapperConfig, presets};
 use iroh::protocol::Router;
-use iroh::{Endpoint, EndpointAddr, EndpointId, RelayMode};
+use iroh::{Endpoint, EndpointAddr, EndpointId, RelayMode, SecretKey};
 use iroh_blobs::store::fs::FsStore;
 use iroh_blobs::{BlobsProtocol, Hash};
 use peer::PeerState;
-use rpc::{encode_frame, read_frame, write_frame};
+use rpc::{RevocationGuardedBlobs, encode_frame, read_frame, write_frame};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
-use tracing::info;
+use tracing::{info, warn};
 use uuid::Uuid;
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -112,10 +117,15 @@ impl RelayNode {
     ) -> RelayResult<Self> {
         let blob_dir = std::path::absolute(blob_dir)?;
         tokio::fs::create_dir_all(&blob_dir).await?;
+        let secret_key = load_or_create_secret_key(&blob_dir).await?;
         let endpoint = match config.profile {
-            NetworkProfile::StandardN0 => Endpoint::bind(presets::N0).await,
+            NetworkProfile::StandardN0 => Endpoint::builder(presets::N0)
+                .secret_key(secret_key)
+                .bind()
+                .await,
             NetworkProfile::LanOnly | NetworkProfile::LocalOnly => {
                 let mut builder = Endpoint::builder(presets::Minimal)
+                    .secret_key(secret_key)
                     .relay_mode(RelayMode::Disabled)
                     .portmapper_config(PortmapperConfig::Disabled)
                     .net_report_config(NetReportConfig::minimal());
@@ -131,7 +141,7 @@ impl RelayNode {
         }
         .map_err(transport_error)?;
         let store = FsStore::load(&blob_dir).await.map_err(transport_error)?;
-        let blobs = BlobsProtocol::new(&store, None);
+        let blobs = RevocationGuardedBlobs::new(BlobsProtocol::new(&store, None), engine.clone());
         let shared = Arc::new(NodeState {
             endpoint: endpoint.clone(),
             store,
@@ -197,6 +207,27 @@ impl RelayNode {
         self.shared.peer().register(addr);
     }
 
+    /// Close active inbound/outbound QUIC connections for `peer_id` and clear its selection.
+    pub fn disconnect_peer(&self, peer_id: EndpointId) {
+        self.shared.peer().disconnect(peer_id);
+    }
+
+    /// Register stored addresses for all active (non-revoked) trusted peers.
+    pub async fn preload_trusted_peer_addrs(&self) -> RelayResult<u32> {
+        let local_id = self.id().to_string();
+        let mut count = 0u32;
+        for peer in self.shared.engine.list_trusted_peers().await? {
+            if peer.is_revoked() || peer.node_id == local_id {
+                continue;
+            }
+            if let Ok(addr) = parse_pairing_ticket(&peer.ticket_or_addrs) {
+                self.register_peer_addr(addr);
+                count = count.saturating_add(1);
+            }
+        }
+        Ok(count)
+    }
+
     pub async fn shutdown(self) -> RelayResult<()> {
         self.shutdown_shared().await
     }
@@ -217,35 +248,48 @@ impl RelayNode {
             let peer = self.shared.peer();
             (peer.addr(remote_id), peer.outbound(remote_id))
         };
-        let conn = match cached {
-            Some(conn) => conn,
-            None => self.shared.connect(addr, RELAY_RPC_ALPN).await?,
+        let (conn, response, started) = if let Some(cached_conn) = cached {
+            let started = Instant::now();
+            match exchange_rpc(&cached_conn, &encoded).await {
+                Ok(response) => (cached_conn, Ok(response), started),
+                Err(_) => {
+                    // Cached QUIC connection may have been closed remotely; retry once on a fresh dial.
+                    self.shared.peer().forget_outbound(&cached_conn);
+                    let fresh = self.shared.connect(addr, RELAY_RPC_ALPN).await?;
+                    let started = Instant::now();
+                    let response = exchange_rpc(&fresh, &encoded).await;
+                    (fresh, response, started)
+                }
+            }
+        } else {
+            let fresh = self.shared.connect(addr, RELAY_RPC_ALPN).await?;
+            let started = Instant::now();
+            let response = exchange_rpc(&fresh, &encoded).await;
+            (fresh, response, started)
         };
-        let started = Instant::now();
-        let response = tokio::time::timeout(RPC_TIMEOUT, async {
-            let (mut send, mut recv) = conn.open_bi().await.map_err(transport_error)?;
-            write_frame(&mut send, &encoded).await?;
-            read_frame(&mut recv).await
-        })
-        .await
-        .unwrap_or_else(|_| Err(RelayError::Transport("Relay RPC timed out".into())));
 
         let mut peer = self.shared.peer();
         match response {
             Ok(response) => {
-                let commit = match (&request, &response) {
-                    (
-                        WireRequest::SyncDagDelta { .. } | WireRequest::FetchDagSnapshot { .. },
-                        WireResponse::DagSnapshot(snapshot),
-                    ) => {
-                        snapshot.head_commit_sha.as_deref()
-                    }
-                    (WireRequest::PushSyncBundle { meta, .. }, WireResponse::Ack { .. }) => {
-                        Some(meta.base_commit_sha.as_str())
-                    }
-                    _ => None,
-                };
-                peer.record_outbound(conn, started.elapsed(), commit);
+                if matches!(
+                    &response,
+                    WireResponse::Error { code, .. } if code == "PEER_REVOKED" || code == "unpaired_peer"
+                ) {
+                    peer.forget_outbound(&conn);
+                    conn.close(1u32.into(), b"rejected");
+                } else {
+                    let commit = match (&request, &response) {
+                        (
+                            WireRequest::SyncDagDelta { .. } | WireRequest::FetchDagSnapshot { .. },
+                            WireResponse::DagSnapshot(snapshot),
+                        ) => snapshot.head_commit_sha.as_deref(),
+                        (WireRequest::PushSyncBundle { meta, .. }, WireResponse::Ack { .. }) => {
+                            Some(meta.base_commit_sha.as_str())
+                        }
+                        _ => None,
+                    };
+                    peer.record_outbound(conn, started.elapsed(), commit);
+                }
                 Ok(response)
             }
             Err(err) => {
@@ -255,7 +299,7 @@ impl RelayNode {
         }
     }
 
-    /// Return the remote node's status from its Pong.
+    /// Return the remote node's status from its Pong and persist the peer if not in sandbox mode.
     pub async fn ping_peer(
         &self,
         peer_addr: EndpointAddr,
@@ -265,8 +309,27 @@ impl RelayNode {
             sender_device: sender_device.to_owned(),
             sent_at: Utc::now(),
         };
-        match self.send_rpc(peer_addr, request).await? {
-            WireResponse::Pong { status, .. } => Ok(status),
+        match self.send_rpc(peer_addr.clone(), request).await? {
+            WireResponse::Pong { status, .. } => {
+                if self.shared.engine.observed_runtime_mode() != RuntimeMode::LocalDualSandbox {
+                    let remote_id = peer_addr.id.to_string();
+                    let role = peer_role_from_mode(status.mode);
+                    let now = Utc::now();
+                    let record = TrustedPeerRecord {
+                        node_id: remote_id.clone(),
+                        label: default_peer_label(&remote_id, role),
+                        role,
+                        ticket_or_addrs: serde_json::to_string(&peer_addr).unwrap_or_default(),
+                        paired_at: now,
+                        last_seen_at: now,
+                        revoked_at: None,
+                    };
+                    if let Err(error) = self.shared.engine.upsert_trusted_peer(&record).await {
+                        warn!(node_id = %remote_id, %error, "Unable to persist trusted peer after ping");
+                    }
+                }
+                Ok(status)
+            }
             response => Err(unexpected_response(response, "pong")),
         }
     }
@@ -569,6 +632,54 @@ pub fn parse_pairing_ticket(raw: &str) -> RelayResult<EndpointAddr> {
         "pairing ticket must be a valid iroh EndpointAddr JSON or daemon output containing 'addr'"
             .into(),
     ))
+}
+
+async fn load_or_create_secret_key(blob_dir: &Path) -> RelayResult<SecretKey> {
+    let key_path = blob_dir.join("node.key");
+    match tokio::fs::read(&key_path).await {
+        Ok(bytes) => {
+            let raw: [u8; 32] = bytes.try_into().map_err(|_| {
+                RelayError::Transport(format!(
+                    "invalid node secret key length at {}",
+                    key_path.display()
+                ))
+            })?;
+            Ok(SecretKey::from_bytes(&raw))
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            let key = SecretKey::generate();
+            tokio::fs::write(&key_path, key.to_bytes()).await?;
+            Ok(key)
+        }
+        Err(err) => Err(err.into()),
+    }
+}
+
+pub(crate) fn peer_role_from_mode(mode: RuntimeMode) -> PeerRole {
+    match mode {
+        RuntimeMode::Host => PeerRole::Host,
+        RuntimeMode::Client => PeerRole::Client,
+        RuntimeMode::LocalDualSandbox => PeerRole::Peer,
+    }
+}
+
+pub(crate) fn default_peer_label(node_id: &str, role: PeerRole) -> String {
+    let short: String = node_id.chars().take(8).collect();
+    match role {
+        PeerRole::Host => format!("Workstation {short}"),
+        PeerRole::Client => format!("Laptop {short}"),
+        PeerRole::Peer => format!("Device {short}"),
+    }
+}
+
+async fn exchange_rpc(conn: &Connection, encoded: &[u8]) -> RelayResult<WireResponse> {
+    tokio::time::timeout(RPC_TIMEOUT, async {
+        let (mut send, mut recv) = conn.open_bi().await.map_err(transport_error)?;
+        write_frame(&mut send, encoded).await?;
+        read_frame(&mut recv).await
+    })
+    .await
+    .unwrap_or_else(|_| Err(RelayError::Transport("Relay RPC timed out".into())))
 }
 
 fn transport_error(error: impl std::fmt::Display) -> RelayError {

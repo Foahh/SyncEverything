@@ -619,3 +619,381 @@ async fn wire_cancel_task_cancels_queued_and_running_tasks_over_local_only_peer_
     host.shutdown().await.unwrap();
     client.shutdown().await.unwrap();
 }
+
+#[tokio::test]
+async fn host_revocation_gate_blocks_all_rpcs_and_blobs_from_revoked_peer() {
+    let temp = TempDir::new();
+    let host_engine = Arc::new(RelayEngine::in_memory(REPO, None).await.unwrap());
+    let (events, _changes) = mpsc::unbounded_channel();
+    let host = RelayNode::start_with_events(
+        &temp.join("revoke-host"),
+        host_engine.clone(),
+        RelayNodeConfig {
+            profile: NetworkProfile::LocalOnly,
+            sandbox: None,
+        },
+        events,
+    )
+    .await
+    .unwrap();
+    let (client, client_engine) = start_local(&temp, "revoke-client", None).await;
+    client_engine
+        .set_runtime_mode(RuntimeMode::Client)
+        .await
+        .unwrap();
+
+    // 1. Pair client with host and confirm both sides persist trusted_peers
+    host.open_pairing_window(Duration::from_secs(30));
+    let pong = client.ping_peer(host.addr(), "test-laptop").await.unwrap();
+    assert!(pong.connected);
+
+    let host_peers = host_engine.list_trusted_peers().await.unwrap();
+    assert_eq!(host_peers.len(), 1);
+    assert_eq!(host_peers[0].node_id, client.id().to_string());
+    assert_eq!(host_peers[0].label, "test-laptop");
+    assert_eq!(host_peers[0].role, PeerRole::Client);
+    assert!(!host_peers[0].is_revoked());
+
+    let client_peers = client_engine.list_trusted_peers().await.unwrap();
+    assert_eq!(client_peers.len(), 1);
+    assert_eq!(client_peers[0].node_id, host.id().to_string());
+    assert_eq!(client_peers[0].role, PeerRole::Host);
+
+    // 2. Verify RPCs succeed while trusted
+    let spec_before = TaskSpec {
+        task_id: Uuid::now_v7(),
+        repo_id: REPO.into(),
+        base_commit_sha: COMMIT.into(),
+        command_preset: "smoke".into(),
+        params: BTreeMap::new(),
+        require_approval: true,
+        requested_by_device: "test-laptop".into(),
+        user_note: None,
+    };
+    client
+        .submit_remote_task(host.addr(), spec_before)
+        .await
+        .unwrap();
+    assert_eq!(host_engine.list_tasks().await.unwrap().len(), 1);
+
+    let log_text = "verified log content\n";
+    host.publish_evidence_log(log_text).await.unwrap();
+    let log_hash: Hash = blake3::hash(log_text.as_bytes()).to_hex().to_string().parse().unwrap();
+
+    // 3. Revoke client on the host and disconnect live QUIC handles
+    let revoked = host_engine
+        .revoke_trusted_peer(&client.id().to_string())
+        .await
+        .unwrap();
+    assert!(revoked.is_revoked());
+    host.disconnect_peer(client.id());
+
+    // Even if a new pairing window is opened, revocation gate MUST still block
+    host.open_pairing_window(Duration::from_secs(30));
+
+    // 4. Every WireRequest from the revoked peer must be immediately rejected with PEER_REVOKED
+    let ping_reply = client
+        .send_rpc(
+            host.addr(),
+            WireRequest::Ping {
+                sender_device: "test-laptop".into(),
+                sent_at: Utc::now(),
+            },
+        )
+        .await
+        .unwrap();
+    assert!(
+        matches!(&ping_reply, WireResponse::Error { code, .. } if code == "PEER_REVOKED"),
+        "expected PEER_REVOKED for Ping, got {ping_reply:?}"
+    );
+    assert!(!client.peer_status().connected);
+
+    let dag_reply = client
+        .send_rpc(
+            host.addr(),
+            WireRequest::FetchDagSnapshot {
+                repo_id: REPO.into(),
+            },
+        )
+        .await
+        .unwrap();
+    assert!(
+        matches!(&dag_reply, WireResponse::Error { code, .. } if code == "PEER_REVOKED"),
+        "expected PEER_REVOKED for FetchDagSnapshot, got {dag_reply:?}"
+    );
+
+    let spec_after = TaskSpec {
+        task_id: Uuid::now_v7(),
+        repo_id: REPO.into(),
+        base_commit_sha: COMMIT.into(),
+        command_preset: "smoke".into(),
+        params: BTreeMap::new(),
+        require_approval: false,
+        requested_by_device: "test-laptop".into(),
+        user_note: Some("should be blocked".into()),
+    };
+    let task_reply = client
+        .send_rpc(host.addr(), WireRequest::SubmitTask { spec: spec_after })
+        .await
+        .unwrap();
+    assert!(
+        matches!(&task_reply, WireResponse::Error { code, .. } if code == "PEER_REVOKED"),
+        "expected PEER_REVOKED for SubmitTask, got {task_reply:?}"
+    );
+    // Confirm SubmitTask was never executed
+    assert_eq!(host_engine.list_tasks().await.unwrap().len(), 1);
+
+    // Confirm blob transfer is also blocked for revoked peers
+    assert!(client.pull_blob_from(host.addr(), log_hash).await.is_err());
+
+    host.shutdown().await.unwrap();
+    client.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn restarted_interactive_host_accepts_persisted_trusted_client_without_pairing_window() {
+    let temp = TempDir::new();
+    let host_db = temp.join("host.db");
+    let client_db = temp.join("client.db");
+    let host_blobs = temp.join("host-blobs");
+    let client_blobs = temp.join("client-blobs");
+
+    let (host_id, client_id) = {
+        let host_engine = Arc::new(RelayEngine::open(REPO, &host_db, None).await.unwrap());
+        let client_engine = Arc::new(RelayEngine::open(REPO, &client_db, None).await.unwrap());
+        client_engine
+            .set_runtime_mode(RuntimeMode::Client)
+            .await
+            .unwrap();
+        let (events, _rx) = mpsc::unbounded_channel();
+        let host = RelayNode::start_with_events(
+            &host_blobs,
+            host_engine,
+            RelayNodeConfig {
+                profile: NetworkProfile::LocalOnly,
+                sandbox: None,
+            },
+            events,
+        )
+        .await
+        .unwrap();
+        let client = RelayNode::start_with_engine(
+            &client_blobs,
+            client_engine,
+            None,
+            NetworkProfile::LocalOnly,
+        )
+        .await
+        .unwrap();
+
+        host.open_pairing_window(Duration::from_secs(30));
+        client.ping_peer(host.addr(), "laptop-1").await.unwrap();
+        let ids = (host.id(), client.id());
+        host.shutdown().await.unwrap();
+        client.shutdown().await.unwrap();
+        ids
+    };
+
+    // Restart both nodes from persisted state; do NOT open a pairing window
+    let host_engine = Arc::new(RelayEngine::open(REPO, &host_db, None).await.unwrap());
+    let client_engine = Arc::new(RelayEngine::open(REPO, &client_db, None).await.unwrap());
+    let (events, mut changes) = mpsc::unbounded_channel();
+    let host = RelayNode::start_with_events(
+        &host_blobs,
+        host_engine,
+        RelayNodeConfig {
+            profile: NetworkProfile::LocalOnly,
+            sandbox: None,
+        },
+        events,
+    )
+    .await
+    .unwrap();
+    let client = RelayNode::start_with_engine(
+        &client_blobs,
+        client_engine,
+        None,
+        NetworkProfile::LocalOnly,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(host.id(), host_id);
+    assert_eq!(client.id(), client_id);
+
+    let pong = client.ping_peer(host.addr(), "laptop-1").await.unwrap();
+    assert!(pong.connected);
+    assert!(matches!(changes.try_recv().unwrap(), RelayNodeEvent::PeerPaired));
+
+    host.shutdown().await.unwrap();
+    client.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn startup_auto_reconnect_recovers_after_offline_and_flushes_outbox() {
+    let temp = TempDir::new();
+    let host_db = temp.join("auto-host.db");
+    let client_db = temp.join("auto-client.db");
+    let host_blobs = temp.join("auto-host-blobs");
+    let client_blobs = temp.join("auto-client-blobs");
+
+    let client_engine = Arc::new(RelayEngine::open(REPO, &client_db, None).await.unwrap());
+    client_engine
+        .set_runtime_mode(RuntimeMode::Client)
+        .await
+        .unwrap();
+    let client = Arc::new(
+        RelayNode::start_with_engine(
+            &client_blobs,
+            client_engine.clone(),
+            None,
+            NetworkProfile::LocalOnly,
+        )
+        .await
+        .unwrap(),
+    );
+
+    // Seed an unreachable peer address + pending outbox item on the client
+    let unreachable_id = iroh::SecretKey::generate().public();
+    let unreachable_addr = EndpointAddr::new(unreachable_id)
+        .with_ip_addr("127.0.0.1:1".parse().unwrap());
+    let now = Utc::now();
+    client_engine
+        .upsert_trusted_peer(&TrustedPeerRecord {
+            node_id: unreachable_id.to_string(),
+            label: "Offline Host".into(),
+            role: PeerRole::Host,
+            ticket_or_addrs: serde_json::to_string(&unreachable_addr).unwrap(),
+            paired_at: now,
+            last_seen_at: now,
+            revoked_at: None,
+        })
+        .await
+        .unwrap();
+
+    let delta = dag_delta(COMMIT);
+    client_engine
+        .enqueue_outbox(&serde_json::to_value(WireRequest::SyncDagDelta { delta: delta.clone() }).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(client.peer_status().pending_outbox_count, 1);
+
+    // Start background auto-reconnect: must NOT block startup and must degrade gracefully to Offline
+    let (handle, mut reconnected_rx) = spawn_auto_reconnect(
+        client.clone(),
+        client_engine.clone(),
+        AutoReconnectConfig {
+            initial_backoff: Duration::from_millis(50),
+            max_backoff: Duration::from_millis(150),
+            attempt_timeout: Duration::from_millis(200),
+            sender_device: "auto-laptop".into(),
+            max_attempts: None,
+        },
+    );
+    tokio::time::sleep(Duration::from_millis(80)).await;
+    assert!(!client.peer_status().connected);
+    assert_eq!(client.peer_status().transport_path, TransportPath::Offline);
+    assert_eq!(client.peer_status().pending_outbox_count, 1);
+
+    // Bring a trusted host online and record its live address in client SQLite
+    let host_engine = Arc::new(RelayEngine::open(REPO, &host_db, None).await.unwrap());
+    host_engine
+        .upsert_trusted_peer(&TrustedPeerRecord {
+            node_id: client.id().to_string(),
+            label: "auto-laptop".into(),
+            role: PeerRole::Client,
+            ticket_or_addrs: serde_json::to_string(&client.addr()).unwrap(),
+            paired_at: now,
+            last_seen_at: now,
+            revoked_at: None,
+        })
+        .await
+        .unwrap();
+    let (host_events, _host_rx) = mpsc::unbounded_channel();
+    let host = RelayNode::start_with_events(
+        &host_blobs,
+        host_engine.clone(),
+        RelayNodeConfig {
+            profile: NetworkProfile::LocalOnly,
+            sandbox: None,
+        },
+        host_events,
+    )
+    .await
+    .unwrap();
+    let later = Utc::now();
+    client_engine
+        .upsert_trusted_peer(&TrustedPeerRecord {
+            node_id: host.id().to_string(),
+            label: "Online Workstation".into(),
+            role: PeerRole::Host,
+            ticket_or_addrs: serde_json::to_string(&host.addr()).unwrap(),
+            paired_at: later,
+            last_seen_at: later,
+            revoked_at: None,
+        })
+        .await
+        .unwrap();
+
+    let reconnected = tokio::time::timeout(Duration::from_secs(5), reconnected_rx.recv())
+        .await
+        .expect("auto-reconnect timed out")
+        .expect("auto-reconnect channel closed");
+    assert_eq!(reconnected.record.node_id, host.id().to_string());
+    assert_eq!(reconnected.flushed_outbox, 1);
+    assert!(client.peer_status().connected);
+    assert_eq!(client.peer_status().pending_outbox_count, 0);
+    assert_delta(&host_engine.dag_snapshot(true).await.unwrap(), &delta, COMMIT);
+
+    handle.cancel();
+    client.shutdown_shared().await.unwrap();
+    host.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn startup_auto_reconnect_skips_revoked_peers_and_supports_cancellation() {
+    let temp = TempDir::new();
+    let (host, _) = start_local(&temp, "skip-revoked-host", None).await;
+    let (client, client_engine) = start_local(&temp, "skip-revoked-client", None).await;
+    let client = Arc::new(client);
+    client_engine
+        .set_runtime_mode(RuntimeMode::Client)
+        .await
+        .unwrap();
+
+    let now = Utc::now();
+    client_engine
+        .upsert_trusted_peer(&TrustedPeerRecord {
+            node_id: host.id().to_string(),
+            label: "Revoked Host".into(),
+            role: PeerRole::Host,
+            ticket_or_addrs: serde_json::to_string(&host.addr()).unwrap(),
+            paired_at: now,
+            last_seen_at: now,
+            revoked_at: Some(now),
+        })
+        .await
+        .unwrap();
+
+    let (handle, mut reconnected_rx) = spawn_auto_reconnect(
+        client.clone(),
+        client_engine.clone(),
+        AutoReconnectConfig {
+            initial_backoff: Duration::from_millis(25),
+            max_backoff: Duration::from_millis(100),
+            attempt_timeout: Duration::from_millis(200),
+            sender_device: "client".into(),
+            max_attempts: Some(3),
+        },
+    );
+    // Should exit quickly without connecting because the only stored peer is revoked
+    let recv = tokio::time::timeout(Duration::from_secs(2), reconnected_rx.recv())
+        .await
+        .unwrap();
+    assert!(recv.is_none());
+    assert!(!client.peer_status().connected);
+    handle.cancel();
+
+    client.shutdown_shared().await.unwrap();
+    host.shutdown().await.unwrap();
+}

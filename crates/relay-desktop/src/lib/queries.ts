@@ -21,6 +21,7 @@ export const relayKeys = {
   taskLog: (taskId: string) => [...relayKeys.all, "taskLog", taskId] as const,
   handoffs: () => [...relayKeys.all, "handoffs"] as const,
   chat: () => [...relayKeys.all, "chat"] as const,
+  trustedPeers: () => [...relayKeys.all, "trustedPeers"] as const,
 };
 
 export function useRelayEventSync() {
@@ -279,6 +280,54 @@ export function useConnectPeerTicket() {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: (ticketJson: string) => relayApi.connectPeerTicket(ticketJson),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: relayKeys.all });
+    },
+  });
+}
+
+export function useTrustedPeers() {
+  return useQuery({
+    queryKey: relayKeys.trustedPeers(),
+    queryFn: () => relayApi.listTrustedPeers(),
+  });
+}
+
+export function useRenameTrustedPeer() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ nodeId, label }: { nodeId: string; label: string }) =>
+      relayApi.renameTrustedPeer(nodeId, label),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: relayKeys.trustedPeers() });
+    },
+  });
+}
+
+export function useReconnectTrustedPeer() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (nodeId: string) => relayApi.reconnectTrustedPeer(nodeId),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: relayKeys.all });
+    },
+  });
+}
+
+export function useRevokeTrustedPeer() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (nodeId: string) => relayApi.revokeTrustedPeer(nodeId),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: relayKeys.all });
+    },
+  });
+}
+
+export function useRemoveTrustedPeer() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (nodeId: string) => relayApi.removeTrustedPeer(nodeId),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: relayKeys.all });
     },

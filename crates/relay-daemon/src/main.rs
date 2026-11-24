@@ -11,7 +11,10 @@ use relay_core::sandbox::{
     HeadSyncOutcome, WorktreeSandbox, generate_manifest_for_repo, load_manifest,
     sync_git_head_explicitly, sync_git_head_into_engine, write_manifest_for_repo_with_options,
 };
-use relay_core::sync::{NetworkProfile, RelayNode, RelayNodeConfig, RelayNodeEvent};
+use relay_core::sync::{
+    AutoReconnectConfig, NetworkProfile, RelayNode, RelayNodeConfig, RelayNodeEvent,
+    spawn_auto_reconnect,
+};
 use rmcp::ServiceExt;
 use rmcp::transport::streamable_http_server::{
     StreamableHttpServerConfig, StreamableHttpService, session::local::LocalSessionManager,
@@ -329,6 +332,29 @@ async fn main() -> Result<()> {
                 pairing_window_secs
             });
             node.open_pairing_window(window);
+            if let Err(error) = node.preload_trusted_peer_addrs().await {
+                warn!(%error, "Unable to preload trusted peer addresses");
+            }
+            let (reconnect_handle, mut reconnect_rx) = spawn_auto_reconnect(
+                node.clone(),
+                engine.clone(),
+                AutoReconnectConfig {
+                    sender_device: node.id().to_string(),
+                    ..Default::default()
+                },
+            );
+            let reconnect_node = node.clone();
+            let reconnect_task = tokio::spawn(async move {
+                while let Some(reconnected) = reconnect_rx.recv().await {
+                    reconnect_node.set_remote_peer(reconnected.addr);
+                    info!(
+                        node_id = %reconnected.record.node_id,
+                        label = %reconnected.record.label,
+                        flushed_outbox = reconnected.flushed_outbox,
+                        "Reconnected to trusted peer"
+                    );
+                }
+            });
 
             if let Some(sb) = &sandbox {
                 match sync_git_head_into_engine(&engine, sb, node.id().to_string()).await {
@@ -375,6 +401,8 @@ async fn main() -> Result<()> {
             });
 
             let http_result = serve_mcp_http(listener, server).await;
+            reconnect_handle.cancel();
+            reconnect_task.abort();
             events_task.abort();
             if let Some(task) = git_task {
                 task.abort();

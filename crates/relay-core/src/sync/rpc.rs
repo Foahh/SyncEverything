@@ -1,16 +1,58 @@
-use super::{NodeState, RPC_TIMEOUT, RelayNodeEvent, TempBundle, transport_error};
-use crate::contracts::{GitSyncBundleMeta, WireRequest, WireResponse};
+use super::{
+    NodeState, RPC_TIMEOUT, RelayNodeEvent, TempBundle, default_peer_label, transport_error,
+};
+use crate::contracts::{
+    GitSyncBundleMeta, PeerRole, RuntimeMode, TrustedPeerRecord, WireRequest, WireResponse,
+};
+use crate::engine::RelayEngine;
 use crate::error::{RelayError, RelayResult};
 use crate::sandbox::WorktreeSandbox;
 use chrono::Utc;
 use iroh::endpoint::{Connection, RecvStream, SendStream};
 use iroh::protocol::{AcceptError, ProtocolHandler};
-use iroh_blobs::Hash;
+use iroh_blobs::{BlobsProtocol, Hash};
 use serde::{Serialize, de::DeserializeOwned};
 use std::sync::Arc;
-use tracing::debug;
+use tracing::{debug, warn};
 
 const MAX_PAYLOAD: usize = 16 * 1024 * 1024;
+
+/// Wrapper around `BlobsProtocol` that enforces the host revocation gate before accepting blob transfers.
+#[derive(Debug, Clone)]
+pub(super) struct RevocationGuardedBlobs {
+    blobs: BlobsProtocol,
+    engine: Arc<RelayEngine>,
+}
+
+impl RevocationGuardedBlobs {
+    pub(super) fn new(blobs: BlobsProtocol, engine: Arc<RelayEngine>) -> Self {
+        Self { blobs, engine }
+    }
+}
+
+impl ProtocolHandler for RevocationGuardedBlobs {
+    async fn accept(&self, conn: Connection) -> Result<(), AcceptError> {
+        let remote_node_id = conn.remote_id().to_string();
+        match self.engine.is_peer_revoked(&remote_node_id).await {
+            Ok(true) => {
+                warn!(node_id = %remote_node_id, "Rejected blob connection from revoked peer");
+                conn.close(1u32.into(), b"PEER_REVOKED");
+                return Ok(());
+            }
+            Err(err) => {
+                warn!(
+                    node_id = %remote_node_id,
+                    %err,
+                    "Unable to verify peer revocation status for blob transfer; rejecting"
+                );
+                conn.close(1u32.into(), b"PEER_REVOKED");
+                return Ok(());
+            }
+            Ok(false) => {}
+        }
+        self.blobs.accept(conn).await
+    }
+}
 
 /// QUIC RPC handler mounted alongside the blob protocol.
 #[derive(Debug, Clone)]
@@ -56,21 +98,80 @@ impl RelayRpcHandler {
 
     async fn handle(&self, conn: &Connection, request: WireRequest) -> RelayResult<WireResponse> {
         let id = conn.remote_id();
+        let remote_node_id = id.to_string();
         let engine = &self.node.engine;
+
+        // Mandatory revocation gate: check remote authenticated NodeId BEFORE dispatching any RPC.
+        if engine.is_peer_revoked(&remote_node_id).await? {
+            warn!(node_id = %remote_node_id, "Rejected RPC from revoked peer");
+            return Ok(error_response(
+                "PEER_REVOKED",
+                format!("peer {remote_node_id} has been revoked by this host"),
+            ));
+        }
+
+        let is_trusted_in_db = engine
+            .get_trusted_peer(&remote_node_id)
+            .await?
+            .is_some_and(|peer| !peer.is_revoked());
+        let mut newly_paired = false;
         {
             let mut peer = self.node.peer();
             if self.node.events.is_some() && !peer.is_selected(id) {
-                if matches!(&request, WireRequest::Ping { .. }) && peer.accept_pairing(id) {
-                    self.notify(RelayNodeEvent::PeerPaired);
+                if is_trusted_in_db {
+                    peer.select(id);
+                    newly_paired = true;
+                } else if matches!(&request, WireRequest::Ping { .. }) && peer.accept_pairing(id) {
+                    newly_paired = true;
                 } else {
                     return Ok(error_response("unpaired_peer", "peer is not paired".into()));
                 }
             }
             peer.record_inbound(conn);
         }
+
+        if !matches!(&request, WireRequest::Ping { .. }) {
+            if engine.observed_runtime_mode() != RuntimeMode::LocalDualSandbox && is_trusted_in_db {
+                let _ = engine.touch_trusted_peer_seen(&remote_node_id).await;
+            }
+            if newly_paired {
+                self.notify(RelayNodeEvent::PeerPaired);
+            }
+        }
+
         match request {
             WireRequest::Ping { sender_device, .. } => {
                 debug!(node_id = %id, %sender_device, "Received Relay ping");
+                if engine.observed_runtime_mode() != RuntimeMode::LocalDualSandbox {
+                    let role = match engine.observed_runtime_mode() {
+                        RuntimeMode::Host => PeerRole::Client,
+                        RuntimeMode::Client => PeerRole::Host,
+                        RuntimeMode::LocalDualSandbox => PeerRole::Peer,
+                    };
+                    let trimmed_sender = sender_device.trim();
+                    let label = if !trimmed_sender.is_empty() && trimmed_sender != remote_node_id {
+                        trimmed_sender.to_owned()
+                    } else {
+                        default_peer_label(&remote_node_id, role)
+                    };
+                    let addr = self.node.peer().addr(id).with_addrs(
+                        conn.paths().iter().map(|path| path.remote_addr().to_owned()),
+                    );
+                    let now = Utc::now();
+                    let record = TrustedPeerRecord {
+                        node_id: remote_node_id.clone(),
+                        label,
+                        role,
+                        ticket_or_addrs: serde_json::to_string(&addr).unwrap_or_default(),
+                        paired_at: now,
+                        last_seen_at: now,
+                        revoked_at: None,
+                    };
+                    engine.upsert_trusted_peer(&record).await?;
+                }
+                if newly_paired {
+                    self.notify(RelayNodeEvent::PeerPaired);
+                }
                 let status =
                     self.node
                         .peer()

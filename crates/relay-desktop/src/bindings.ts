@@ -30,6 +30,11 @@ export const commands = {
 	upsertDagNode: (node: GraphNode, edges: GraphEdge[], options?: InvokeOptions) => __TAURI_INVOKE<DagSnapshot_Serialize>("upsert_dag_node", { node, edges }, options),
 	getPairingTicket: (options?: InvokeOptions) => __TAURI_INVOKE<string>("get_pairing_ticket", undefined, options),
 	connectPeerTicket: (ticketJson: string, options?: InvokeOptions) => __TAURI_INVOKE<PeerStatus_Serialize>("connect_peer_ticket", { ticketJson }, options),
+	listTrustedPeers: (options?: InvokeOptions) => __TAURI_INVOKE<TrustedPeerRecord_Serialize[]>("list_trusted_peers", undefined, options),
+	renameTrustedPeer: (nodeId: string, label: string, options?: InvokeOptions) => __TAURI_INVOKE<TrustedPeerRecord_Serialize>("rename_trusted_peer", { nodeId, label }, options),
+	reconnectTrustedPeer: (nodeId: string, options?: InvokeOptions) => __TAURI_INVOKE<PeerStatus_Serialize>("reconnect_trusted_peer", { nodeId }, options),
+	revokeTrustedPeer: (nodeId: string, options?: InvokeOptions) => __TAURI_INVOKE<TrustedPeerRecord_Serialize>("revoke_trusted_peer", { nodeId }, options),
+	removeTrustedPeer: (nodeId: string, options?: InvokeOptions) => __TAURI_INVOKE<null>("remove_trusted_peer", { nodeId }, options),
 	listChatMessages: (limit: number | null, options?: InvokeOptions) => __TAURI_INVOKE<AgentChatMessage_Serialize[]>("list_chat_messages", { limit }, options),
 	sendChatMessage: (prompt: string, options?: InvokeOptions) => __TAURI_INVOKE<AgentChatMessage_Serialize>("send_chat_message", { prompt }, options),
 	cancelChatTurn: (options?: InvokeOptions) => __TAURI_INVOKE<boolean>("cancel_chat_turn", undefined, options),
@@ -277,6 +282,9 @@ export type PatchProposal = {
 	created_at: string,
 };
 
+/**  Role of a persisted trusted peer device. */
+export type PeerRole = "host" | "client" | "peer";
+
 export type PeerStatus = PeerStatus_Serialize | PeerStatus_Deserialize;
 
 export type PeerStatus_Deserialize = {
@@ -474,6 +482,31 @@ export type TaskState = "queued" | "preflight_running" | "self_healing_proposed"
 export type ToolTraceStatus = "running" | "done" | "error";
 
 export type TransportPath = "direct_lan" | "relay" | "loopback" | "offline";
+
+/**  Persistent trusted peer entry stored in SQLite and exported to desktop UI via Specta. */
+export type TrustedPeerRecord = TrustedPeerRecord_Serialize | TrustedPeerRecord_Deserialize;
+
+/**  Persistent trusted peer entry stored in SQLite and exported to desktop UI via Specta. */
+export type TrustedPeerRecord_Deserialize = {
+	node_id: string,
+	label: string,
+	role: PeerRole,
+	ticket_or_addrs: string,
+	paired_at: string,
+	last_seen_at: string,
+	revoked_at?: string | null,
+};
+
+/**  Persistent trusted peer entry stored in SQLite and exported to desktop UI via Specta. */
+export type TrustedPeerRecord_Serialize = {
+	node_id: string,
+	label: string,
+	role: PeerRole,
+	ticket_or_addrs: string,
+	paired_at: string,
+	last_seen_at: string,
+	revoked_at: string | null,
+};
 
 export type WorkspaceInfo = WorkspaceInfo_Serialize | WorkspaceInfo_Deserialize;
 

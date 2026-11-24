@@ -1,7 +1,7 @@
 use crate::agent::{AgentApprovalCard, AgentChatMessage, AgentChatRole, AgentToolTrace};
 use crate::contracts::{
-    EdgeKind, Freshness, GraphEdge, GraphNode, HandoffSummary, NodeKind, PatchProposal, RuntimeMode,
-    TaskId, TaskRecord, TaskSpec, TaskState,
+    EdgeKind, Freshness, GraphEdge, GraphNode, HandoffSummary, NodeKind, PatchProposal, PeerRole,
+    RuntimeMode, TaskId, TaskRecord, TaskSpec, TaskState, TrustedPeerRecord,
 };
 use crate::error::{RelayError, RelayResult};
 use chrono::{DateTime, SecondsFormat, Utc};
@@ -99,12 +99,23 @@ CREATE TABLE IF NOT EXISTS chat_messages (
     created_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS trusted_peers (
+    node_id TEXT PRIMARY KEY NOT NULL,
+    label TEXT NOT NULL,
+    role TEXT NOT NULL,
+    ticket_or_addrs TEXT NOT NULL,
+    paired_at TEXT NOT NULL,
+    last_seen_at TEXT NOT NULL,
+    revoked_at TEXT
+);
+
 CREATE INDEX IF NOT EXISTS dag_nodes_repo ON dag_nodes (repo_id);
 CREATE INDEX IF NOT EXISTS dag_edges_repo ON dag_edges (repo_id);
 CREATE INDEX IF NOT EXISTS tasks_repo_created ON tasks (repo_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS handoffs_repo_created ON handoffs (repo_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS sync_outbox_pending ON sync_outbox (repo_id, seq) WHERE delivered = 0;
 CREATE INDEX IF NOT EXISTS chat_messages_repo_created ON chat_messages (repo_id, created_at ASC);
+CREATE INDEX IF NOT EXISTS trusted_peers_active_seen ON trusted_peers (revoked_at, last_seen_at DESC);
 
 -- A persisted counter works across pooled connections, processes, and direct SQLite imports.
 CREATE TABLE IF NOT EXISTS dag_revision (id INTEGER PRIMARY KEY CHECK (id = 1), value INTEGER NOT NULL);
@@ -574,6 +585,147 @@ impl RelayStore {
         tx.commit().await?;
         Ok(updated)
     }
+
+    /// Insert or update a trusted peer record.
+    ///
+    /// Preserves `paired_at`, existing non-empty custom labels, and existing revocation state
+    /// (never silently unrevokes a revoked peer).
+    pub async fn upsert_trusted_peer(
+        &self,
+        peer: &TrustedPeerRecord,
+    ) -> RelayResult<TrustedPeerRecord> {
+        let node_id = peer.node_id.trim();
+        if node_id.is_empty() {
+            return Err(RelayError::Internal("peer node_id cannot be empty".into()));
+        }
+        let label = peer.label.trim();
+        let effective_label = if label.is_empty() { node_id } else { label };
+        let mut tx = self.begin_write().await?;
+        sqlx::query(
+            "INSERT INTO trusted_peers (node_id, label, role, ticket_or_addrs, paired_at, last_seen_at, revoked_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?)
+             ON CONFLICT (node_id) DO UPDATE SET
+                 label = CASE
+                     WHEN trusted_peers.revoked_at IS NOT NULL THEN trusted_peers.label
+                     WHEN trusted_peers.label != '' THEN trusted_peers.label
+                     ELSE excluded.label
+                 END,
+                 role = CASE
+                     WHEN trusted_peers.revoked_at IS NOT NULL THEN trusted_peers.role
+                     WHEN excluded.role != 'peer' THEN excluded.role
+                     ELSE trusted_peers.role
+                 END,
+                 ticket_or_addrs = CASE
+                     WHEN trusted_peers.revoked_at IS NOT NULL THEN trusted_peers.ticket_or_addrs
+                     WHEN excluded.ticket_or_addrs != '' THEN excluded.ticket_or_addrs
+                     ELSE trusted_peers.ticket_or_addrs
+                 END,
+                 last_seen_at = CASE
+                     WHEN trusted_peers.revoked_at IS NOT NULL THEN trusted_peers.last_seen_at
+                     WHEN excluded.last_seen_at > trusted_peers.last_seen_at THEN excluded.last_seen_at
+                     ELSE trusted_peers.last_seen_at
+                 END,
+                 revoked_at = COALESCE(trusted_peers.revoked_at, excluded.revoked_at)",
+        )
+        .bind(node_id)
+        .bind(effective_label)
+        .bind(peer.role.as_str())
+        .bind(&peer.ticket_or_addrs)
+        .bind(timestamp(peer.paired_at))
+        .bind(timestamp(peer.last_seen_at))
+        .bind(peer.revoked_at.map(timestamp))
+        .execute(&mut *tx)
+        .await?;
+        let stored = fetch_trusted_peer(&mut tx, node_id)
+            .await?
+            .ok_or_else(|| RelayError::PeerNotFound(node_id.to_owned()))?;
+        tx.commit().await?;
+        Ok(stored)
+    }
+
+    pub async fn list_trusted_peers(&self) -> RelayResult<Vec<TrustedPeerRecord>> {
+        let rows = sqlx::query_as::<_, TrustedPeerRow>(TRUSTED_PEER_SELECT_ALL)
+            .fetch_all(&self.pool)
+            .await?;
+        Ok(rows.into_iter().map(trusted_peer_record).collect())
+    }
+
+    pub async fn get_trusted_peer(&self, node_id: &str) -> RelayResult<Option<TrustedPeerRecord>> {
+        fetch_trusted_peer(&mut *self.pool.acquire().await?, node_id).await
+    }
+
+    pub async fn is_peer_revoked(&self, node_id: &str) -> RelayResult<bool> {
+        let revoked: i64 = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM trusted_peers WHERE node_id = ? AND revoked_at IS NOT NULL)",
+        )
+        .bind(node_id)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(revoked != 0)
+    }
+
+    pub async fn touch_trusted_peer_seen(&self, node_id: &str) -> RelayResult<bool> {
+        let result = sqlx::query(
+            "UPDATE trusted_peers SET last_seen_at = ? WHERE node_id = ? AND revoked_at IS NULL",
+        )
+        .bind(timestamp(Utc::now()))
+        .bind(node_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() != 0)
+    }
+
+    pub async fn rename_trusted_peer(
+        &self,
+        node_id: &str,
+        label: &str,
+    ) -> RelayResult<TrustedPeerRecord> {
+        let trimmed = label.trim();
+        if trimmed.is_empty() {
+            return Err(RelayError::Internal("device label cannot be empty".into()));
+        }
+        let mut tx = self.begin_write().await?;
+        let result = sqlx::query("UPDATE trusted_peers SET label = ? WHERE node_id = ?")
+            .bind(trimmed)
+            .bind(node_id)
+            .execute(&mut *tx)
+            .await?;
+        if result.rows_affected() == 0 {
+            return Err(RelayError::PeerNotFound(node_id.to_owned()));
+        }
+        let updated = fetch_trusted_peer(&mut tx, node_id)
+            .await?
+            .ok_or_else(|| RelayError::PeerNotFound(node_id.to_owned()))?;
+        tx.commit().await?;
+        Ok(updated)
+    }
+
+    pub async fn revoke_trusted_peer(&self, node_id: &str) -> RelayResult<TrustedPeerRecord> {
+        let mut tx = self.begin_write().await?;
+        let result = sqlx::query(
+            "UPDATE trusted_peers SET revoked_at = COALESCE(revoked_at, ?) WHERE node_id = ?",
+        )
+        .bind(timestamp(Utc::now()))
+        .bind(node_id)
+        .execute(&mut *tx)
+        .await?;
+        if result.rows_affected() == 0 {
+            return Err(RelayError::PeerNotFound(node_id.to_owned()));
+        }
+        let updated = fetch_trusted_peer(&mut tx, node_id)
+            .await?
+            .ok_or_else(|| RelayError::PeerNotFound(node_id.to_owned()))?;
+        tx.commit().await?;
+        Ok(updated)
+    }
+
+    pub async fn remove_trusted_peer(&self, node_id: &str) -> RelayResult<bool> {
+        let result = sqlx::query("DELETE FROM trusted_peers WHERE node_id = ?")
+            .bind(node_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(result.rows_affected() != 0)
+    }
 }
 
 pub(crate) async fn write_node(
@@ -866,6 +1018,50 @@ pub(crate) async fn fetch_task_log_ref(
     .await?)
 }
 
+type TrustedPeerRow = (
+    String,
+    String,
+    String,
+    String,
+    DateTime<Utc>,
+    DateTime<Utc>,
+    Option<DateTime<Utc>>,
+);
+
+const TRUSTED_PEER_SELECT_BY_ID: &str =
+    "SELECT node_id, label, role, ticket_or_addrs, paired_at, last_seen_at, revoked_at
+     FROM trusted_peers WHERE node_id = ?";
+
+const TRUSTED_PEER_SELECT_ALL: &str =
+    "SELECT node_id, label, role, ticket_or_addrs, paired_at, last_seen_at, revoked_at
+     FROM trusted_peers
+     ORDER BY (revoked_at IS NOT NULL) ASC, last_seen_at DESC, node_id ASC";
+
+fn trusted_peer_record(
+    (node_id, label, role, ticket_or_addrs, paired_at, last_seen_at, revoked_at): TrustedPeerRow,
+) -> TrustedPeerRecord {
+    TrustedPeerRecord {
+        node_id,
+        label,
+        role: PeerRole::from_db_str(&role),
+        ticket_or_addrs,
+        paired_at,
+        last_seen_at,
+        revoked_at,
+    }
+}
+
+async fn fetch_trusted_peer(
+    conn: &mut SqliteConnection,
+    node_id: &str,
+) -> RelayResult<Option<TrustedPeerRecord>> {
+    let row = sqlx::query_as::<_, TrustedPeerRow>(TRUSTED_PEER_SELECT_BY_ID)
+        .bind(node_id)
+        .fetch_optional(conn)
+        .await?;
+    Ok(row.map(trusted_peer_record))
+}
+
 fn timestamp(value: DateTime<Utc>) -> String {
     value.to_rfc3339_opts(SecondsFormat::Nanos, true)
 }
@@ -873,6 +1069,20 @@ fn timestamp(value: DateTime<Utc>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::Duration as ChronoDuration;
+
+    fn sample_peer(node_id: &str, label: &str, role: PeerRole, seen_offset_secs: i64) -> TrustedPeerRecord {
+        let base = Utc::now() + ChronoDuration::seconds(seen_offset_secs);
+        TrustedPeerRecord {
+            node_id: node_id.into(),
+            label: label.into(),
+            role,
+            ticket_or_addrs: format!(r#"{{"id":"{node_id}","addrs":["127.0.0.1:7608"]}}"#),
+            paired_at: base - ChronoDuration::minutes(10),
+            last_seen_at: base,
+            revoked_at: None,
+        }
+    }
 
     #[tokio::test]
     async fn initializes_sqlite_schema_in_memory() {
@@ -882,5 +1092,115 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(row.0, 0);
+        let peers = store.list_trusted_peers().await.unwrap();
+        assert!(peers.is_empty());
+    }
+
+    #[tokio::test]
+    async fn trusted_peers_crud_rename_revoke_and_remove() {
+        let store = RelayStore::connect_in_memory().await.unwrap();
+        let peer_a = sample_peer("node-alpha", "Lab Workstation", PeerRole::Host, 0);
+        let peer_b = sample_peer("node-beta", "Travel Laptop", PeerRole::Client, 30);
+
+        let inserted_a = store.upsert_trusted_peer(&peer_a).await.unwrap();
+        assert_eq!(inserted_a.node_id, "node-alpha");
+        assert_eq!(inserted_a.label, "Lab Workstation");
+        assert_eq!(inserted_a.role, PeerRole::Host);
+        assert!(!inserted_a.is_revoked());
+        assert!(!store.is_peer_revoked("node-alpha").await.unwrap());
+        assert!(!store.is_peer_revoked("unknown-node").await.unwrap());
+
+        store.upsert_trusted_peer(&peer_b).await.unwrap();
+
+        // Active peers ordered by last_seen_at DESC (peer_b is newer than peer_a)
+        let listed = store.list_trusted_peers().await.unwrap();
+        assert_eq!(listed.len(), 2);
+        assert_eq!(listed[0].node_id, "node-beta");
+        assert_eq!(listed[1].node_id, "node-alpha");
+
+        // Rename updates label and rejects empty labels
+        assert!(store.rename_trusted_peer("node-alpha", "   ").await.is_err());
+        assert!(matches!(
+            store.rename_trusted_peer("missing", "Name").await,
+            Err(RelayError::PeerNotFound(_))
+        ));
+        let renamed = store
+            .rename_trusted_peer("node-alpha", "  GPU Tower 4090  ")
+            .await
+            .unwrap();
+        assert_eq!(renamed.label, "GPU Tower 4090");
+
+        // Subsequent upsert preserves custom label and original paired_at, updates ticket and last_seen_at
+        let mut refreshed_a = peer_a.clone();
+        refreshed_a.label = "Generic Fallback".into();
+        refreshed_a.ticket_or_addrs = r#"{"id":"node-alpha","addrs":["10.0.0.8:9999"]}"#.into();
+        refreshed_a.paired_at = Utc::now() + ChronoDuration::hours(1);
+        refreshed_a.last_seen_at = Utc::now() + ChronoDuration::seconds(90);
+        let stored_a = store.upsert_trusted_peer(&refreshed_a).await.unwrap();
+        assert_eq!(stored_a.label, "GPU Tower 4090");
+        assert_eq!(stored_a.paired_at, peer_a.paired_at);
+        assert_eq!(stored_a.ticket_or_addrs, refreshed_a.ticket_or_addrs);
+        assert_eq!(stored_a.last_seen_at, refreshed_a.last_seen_at);
+
+        // Touch updates last_seen_at for active peer
+        assert!(store.touch_trusted_peer_seen("node-beta").await.unwrap());
+
+        // Revoke marks revoked_at, moves peer after active peers, and is idempotent
+        let revoked_b = store.revoke_trusted_peer("node-beta").await.unwrap();
+        assert!(revoked_b.is_revoked());
+        assert!(store.is_peer_revoked("node-beta").await.unwrap());
+        let revoked_b_again = store.revoke_trusted_peer("node-beta").await.unwrap();
+        assert_eq!(revoked_b_again.revoked_at, revoked_b.revoked_at);
+
+        // Upsert and touch MUST NOT silently unrevoke or mutate a revoked peer
+        let mut attempt_unrevoke = peer_b.clone();
+        attempt_unrevoke.revoked_at = None;
+        attempt_unrevoke.label = "Sneaky Label".into();
+        let still_revoked = store.upsert_trusted_peer(&attempt_unrevoke).await.unwrap();
+        assert_eq!(still_revoked.revoked_at, revoked_b.revoked_at);
+        assert_eq!(still_revoked.label, "Travel Laptop");
+        assert!(store.is_peer_revoked("node-beta").await.unwrap());
+        assert!(!store.touch_trusted_peer_seen("node-beta").await.unwrap());
+
+        // Ordering puts active peers first, revoked peers after
+        let listed = store.list_trusted_peers().await.unwrap();
+        assert_eq!(listed[0].node_id, "node-alpha");
+        assert_eq!(listed[1].node_id, "node-beta");
+
+        // Remove hard deletes the record
+        assert!(store.remove_trusted_peer("node-beta").await.unwrap());
+        assert!(!store.remove_trusted_peer("node-beta").await.unwrap());
+        assert!(store.get_trusted_peer("node-beta").await.unwrap().is_none());
+        assert!(!store.is_peer_revoked("node-beta").await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn trusted_peers_persist_across_sqlite_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("relay.db");
+
+        let active = sample_peer("node-host-1", "Office Workstation", PeerRole::Host, 10);
+        let revoked = sample_peer("node-client-2", "Old Laptop", PeerRole::Client, 5);
+
+        {
+            let store = RelayStore::connect(&db_path).await.unwrap();
+            store.upsert_trusted_peer(&active).await.unwrap();
+            store.upsert_trusted_peer(&revoked).await.unwrap();
+            store.revoke_trusted_peer(&revoked.node_id).await.unwrap();
+        }
+
+        let reopened = RelayStore::connect(&db_path).await.unwrap();
+        let peers = reopened.list_trusted_peers().await.unwrap();
+        assert_eq!(peers.len(), 2);
+        assert_eq!(peers[0].node_id, active.node_id);
+        assert_eq!(peers[0].label, "Office Workstation");
+        assert_eq!(peers[0].role, PeerRole::Host);
+        assert!(!peers[0].is_revoked());
+
+        assert_eq!(peers[1].node_id, revoked.node_id);
+        assert_eq!(peers[1].label, "Old Laptop");
+        assert_eq!(peers[1].role, PeerRole::Client);
+        assert!(peers[1].is_revoked());
+        assert!(reopened.is_peer_revoked(&revoked.node_id).await.unwrap());
     }
 }

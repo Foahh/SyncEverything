@@ -17,12 +17,18 @@ import {
 } from "lucide-react";
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
-import type { PeerStatus_Serialize, RuntimeMode, TaskRecord_Serialize } from "../bindings";
+import type {
+  PeerStatus_Serialize,
+  RuntimeMode,
+  TaskRecord_Serialize,
+  TrustedPeerRecord_Serialize,
+} from "../bindings";
 import { isTauriRuntime, needsTaskApproval } from "../lib/relayApi";
 import { isTaskCancellable, isTaskRunning, taskStateBadgeProps } from "../lib/taskLogStream";
 
 interface LeftRailProps {
   status: PeerStatus_Serialize | undefined;
+  trustedPeers: TrustedPeerRecord_Serialize[];
   tasks: TaskRecord_Serialize[];
   selectedTaskId: string | null;
   cancellingTaskId: string | null;
@@ -42,6 +48,7 @@ const RUNTIME_MODES: RuntimeMode[] = ["client", "host", "local_dual_sandbox"];
 
 export function LeftRail({
   status,
+  trustedPeers,
   tasks,
   selectedTaskId,
   cancellingTaskId,
@@ -62,6 +69,12 @@ export function LeftRail({
   const activeMode: RuntimeMode = status?.mode ?? "local_dual_sandbox";
   const isConnected = status?.connected ?? false;
   const pendingOutbox = status?.pending_outbox_count ?? 0;
+  const activePeer = status?.remote_node_id
+    ? trustedPeers.find(
+        (peer) => peer.node_id === status.remote_node_id && peer.revoked_at === null,
+      )
+    : undefined;
+  const activeTrustedCount = trustedPeers.filter((peer) => peer.revoked_at === null).length;
 
   return (
     <aside className="flex h-full w-[268px] shrink-0 flex-col border-r border-border bg-sidebar text-sidebar-foreground">
@@ -83,7 +96,11 @@ export function LeftRail({
                 </div>
                 <div className="min-w-0">
                   <div className="truncate text-xs font-semibold text-foreground">
-                    {isConnected ? t("sidebar.connectedTo") : t("sidebar.waitingPeer")}
+                    {isConnected
+                      ? (activePeer?.label ?? t("sidebar.connectedTo"))
+                      : activeTrustedCount > 0
+                        ? t("sidebar.trustedCount", { count: activeTrustedCount })
+                        : t("sidebar.waitingPeer")}
                   </div>
                   <div className="text-[11px] text-muted-foreground">
                     {t(`sidebar.mode.${activeMode}`)}
@@ -103,7 +120,9 @@ export function LeftRail({
 
             <Button variant="outline" size="default" className="w-full" onClick={onOpenPairModal}>
               <Link2 data-icon="inline-start" />
-              <span className="relay-text-trim leading-none">{t("topbar.pairDevice")}</span>
+              <span className="relay-text-trim leading-none">
+                {trustedPeers.length > 0 ? t("sidebar.manageDevices") : t("topbar.pairDevice")}
+              </span>
             </Button>
           </div>
         </section>

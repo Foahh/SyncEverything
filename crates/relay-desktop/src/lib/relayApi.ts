@@ -13,6 +13,7 @@ import {
   type LlmProbeResult,
   type LlmSettingsUpdate_Deserialize,
   type LlmSettingsView_Serialize,
+  type PeerRole,
   type PeerStatus_Serialize,
   type ProjectMcpConfigPreview_Serialize,
   type ProjectMcpConfigRequest_Deserialize,
@@ -25,6 +26,7 @@ import {
   type TaskLogStreamEvent,
   type TaskRecord_Serialize,
   type TaskSpec_Deserialize,
+  type TrustedPeerRecord_Serialize,
   type WorkspaceInfo_Serialize,
 } from "../bindings";
 import {
@@ -96,6 +98,7 @@ interface MockWorkspaceState {
   handoffs: HandoffSummary[];
   chatMessages: AgentChatMessage_Serialize[];
   projectMcpFiles: Record<string, string>;
+  trustedPeers: TrustedPeerRecord_Serialize[];
 }
 
 function createInitialMockState(): MockWorkspaceState {
@@ -147,7 +150,43 @@ function createInitialMockState(): MockWorkspaceState {
     handoffs: [],
     chatMessages: [],
     projectMcpFiles: {},
+    trustedPeers: [],
   };
+}
+
+function sortTrustedPeers(peers: TrustedPeerRecord_Serialize[]): TrustedPeerRecord_Serialize[] {
+  return [...peers].sort((a, b) => {
+    const revokedOrder = Number(a.revoked_at !== null) - Number(b.revoked_at !== null);
+    if (revokedOrder !== 0) return revokedOrder;
+    const seenOrder = b.last_seen_at.localeCompare(a.last_seen_at);
+    if (seenOrder !== 0) return seenOrder;
+    return a.node_id.localeCompare(b.node_id);
+  });
+}
+
+function parseMockTicketNodeId(ticketJson: string): string {
+  const parsed = JSON.parse(ticketJson) as {
+    id?: string;
+    addr?: { id?: string };
+    pairing_ticket?: string | { id?: string };
+  };
+  if (typeof parsed.id === "string" && parsed.id.trim()) {
+    return parsed.id.trim();
+  }
+  if (parsed.addr && typeof parsed.addr.id === "string" && parsed.addr.id.trim()) {
+    return parsed.addr.id.trim();
+  }
+  if (typeof parsed.pairing_ticket === "string") {
+    const nested = JSON.parse(parsed.pairing_ticket) as { id?: string };
+    if (typeof nested.id === "string" && nested.id.trim()) return nested.id.trim();
+  } else if (
+    parsed.pairing_ticket &&
+    typeof parsed.pairing_ticket.id === "string" &&
+    parsed.pairing_ticket.id.trim()
+  ) {
+    return parsed.pairing_ticket.id.trim();
+  }
+  return "paired-peer";
 }
 
 let mockState: MockWorkspaceState = createInitialMockState();
@@ -867,12 +906,114 @@ export const relayApi = {
     if (isTauriRuntime()) {
       return commands.connectPeerTicket(ticketJson);
     }
-    const parsed = JSON.parse(ticketJson) as { id?: string };
-    mockState.status.remote_node_id = parsed.id ?? "paired-peer";
+    const nodeId = parseMockTicketNodeId(ticketJson);
+    const existing = mockState.trustedPeers.find((peer) => peer.node_id === nodeId);
+    if (existing?.revoked_at !== null && existing !== undefined) {
+      throw new Error(`peer has been revoked: ${nodeId}`);
+    }
+    const now = new Date().toISOString();
+    const role: PeerRole = mockState.status.mode === "host" ? "client" : "host";
+    if (existing) {
+      existing.ticket_or_addrs = ticketJson.trim();
+      existing.last_seen_at = now;
+    } else {
+      const prefix = role === "host" ? "Workstation" : "Laptop";
+      mockState.trustedPeers.push({
+        node_id: nodeId,
+        label: `${prefix} ${nodeId.slice(0, 8)}`,
+        role,
+        ticket_or_addrs: ticketJson.trim(),
+        paired_at: now,
+        last_seen_at: now,
+        revoked_at: null,
+      });
+    }
+    mockState.status.remote_node_id = nodeId;
     mockState.status.connected = true;
     mockState.status.transport_path = "direct_lan";
     mockState.status.rtt_ms = 2;
     return structuredClone(mockState.status);
+  },
+
+  async listTrustedPeers(): Promise<TrustedPeerRecord_Serialize[]> {
+    if (isTauriRuntime()) {
+      return commands.listTrustedPeers();
+    }
+    return structuredClone(sortTrustedPeers(mockState.trustedPeers));
+  },
+
+  async renameTrustedPeer(nodeId: string, label: string): Promise<TrustedPeerRecord_Serialize> {
+    if (isTauriRuntime()) {
+      return commands.renameTrustedPeer(nodeId, label);
+    }
+    const trimmed = label.trim();
+    if (!trimmed) {
+      throw new Error("device label cannot be empty");
+    }
+    const peer = mockState.trustedPeers.find((item) => item.node_id === nodeId);
+    if (!peer) {
+      throw new Error(`trusted peer not found: ${nodeId}`);
+    }
+    peer.label = trimmed;
+    return structuredClone(peer);
+  },
+
+  async reconnectTrustedPeer(nodeId: string): Promise<PeerStatus_Serialize> {
+    if (isTauriRuntime()) {
+      return commands.reconnectTrustedPeer(nodeId);
+    }
+    const peer = mockState.trustedPeers.find((item) => item.node_id === nodeId);
+    if (!peer) {
+      throw new Error(`trusted peer not found: ${nodeId}`);
+    }
+    if (peer.revoked_at !== null) {
+      throw new Error(`peer has been revoked: ${nodeId}`);
+    }
+    if (mockState.status.mode === "local_dual_sandbox") {
+      throw new Error("Switch to Client or Host mode to pair with another machine");
+    }
+    peer.last_seen_at = new Date().toISOString();
+    mockState.status.remote_node_id = peer.node_id;
+    mockState.status.connected = true;
+    mockState.status.transport_path = "direct_lan";
+    mockState.status.rtt_ms = 2;
+    return structuredClone(mockState.status);
+  },
+
+  async revokeTrustedPeer(nodeId: string): Promise<TrustedPeerRecord_Serialize> {
+    if (isTauriRuntime()) {
+      return commands.revokeTrustedPeer(nodeId);
+    }
+    const peer = mockState.trustedPeers.find((item) => item.node_id === nodeId);
+    if (!peer) {
+      throw new Error(`trusted peer not found: ${nodeId}`);
+    }
+    peer.revoked_at = peer.revoked_at ?? new Date().toISOString();
+    if (mockState.status.remote_node_id === nodeId) {
+      mockState.status.remote_node_id = null;
+      mockState.status.connected = false;
+      mockState.status.transport_path = "offline";
+      mockState.status.rtt_ms = null;
+    }
+    return structuredClone(peer);
+  },
+
+  async removeTrustedPeer(nodeId: string): Promise<void> {
+    if (isTauriRuntime()) {
+      await commands.removeTrustedPeer(nodeId);
+      return;
+    }
+    const idx = mockState.trustedPeers.findIndex((item) => item.node_id === nodeId);
+    if (idx < 0) {
+      throw new Error(`trusted peer not found: ${nodeId}`);
+    }
+    mockState.trustedPeers.splice(idx, 1);
+    if (mockState.status.remote_node_id === nodeId) {
+      mockState.status.remote_node_id = null;
+      mockState.status.connected = false;
+      mockState.status.transport_path = "offline";
+      mockState.status.rtt_ms = null;
+    }
   },
 
   async listChatMessages(limit = 100): Promise<AgentChatMessage_Serialize[]> {

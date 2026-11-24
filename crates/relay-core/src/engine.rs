@@ -2,7 +2,7 @@ use crate::agent::AgentChatMessage;
 use crate::contracts::{
     ApprovalDecision, DagDelta, DagSnapshot, EdgeKind, Freshness, GraphEdge, GraphNode,
     HandoffSummary, NodeKind, PatchProposal, RuntimeMode, StalePropagationReport, TaskId,
-    TaskLogChunk, TaskRecord, TaskSpec, TaskState, WireRequest,
+    TaskLogChunk, TaskRecord, TaskSpec, TaskState, TrustedPeerRecord, WireRequest,
 };
 use crate::dag::{DagEngine, supersedes_edge};
 use crate::error::{RelayError, RelayResult};
@@ -1042,6 +1042,45 @@ impl RelayEngine {
         self.store
             .resolve_chat_approvals(&self.repo_id, task_id, patch_id, decision)
             .await
+    }
+
+    pub async fn upsert_trusted_peer(
+        &self,
+        peer: &TrustedPeerRecord,
+    ) -> RelayResult<TrustedPeerRecord> {
+        self.store.upsert_trusted_peer(peer).await
+    }
+
+    pub async fn list_trusted_peers(&self) -> RelayResult<Vec<TrustedPeerRecord>> {
+        self.store.list_trusted_peers().await
+    }
+
+    pub async fn get_trusted_peer(&self, node_id: &str) -> RelayResult<Option<TrustedPeerRecord>> {
+        self.store.get_trusted_peer(node_id).await
+    }
+
+    pub async fn is_peer_revoked(&self, node_id: &str) -> RelayResult<bool> {
+        self.store.is_peer_revoked(node_id).await
+    }
+
+    pub async fn touch_trusted_peer_seen(&self, node_id: &str) -> RelayResult<bool> {
+        self.store.touch_trusted_peer_seen(node_id).await
+    }
+
+    pub async fn rename_trusted_peer(
+        &self,
+        node_id: &str,
+        label: &str,
+    ) -> RelayResult<TrustedPeerRecord> {
+        self.store.rename_trusted_peer(node_id, label).await
+    }
+
+    pub async fn revoke_trusted_peer(&self, node_id: &str) -> RelayResult<TrustedPeerRecord> {
+        self.store.revoke_trusted_peer(node_id).await
+    }
+
+    pub async fn remove_trusted_peer(&self, node_id: &str) -> RelayResult<bool> {
+        self.store.remove_trusted_peer(node_id).await
     }
 
     pub async fn enqueue_outbox(&self, payload: &Value) -> RelayResult<i64> {

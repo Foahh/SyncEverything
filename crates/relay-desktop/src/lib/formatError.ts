@@ -12,7 +12,12 @@ type ErrorTranslationKey =
   | "errors.repoPathEmpty"
   | "errors.runtimeShuttingDown"
   | "errors.taskNotCancellable"
-  | "errors.taskNotFound";
+  | "errors.taskNotFound"
+  | "errors.peerRevoked"
+  | "errors.peerNotFound"
+  | "errors.emptyDeviceLabel"
+  | "errors.localNodeTicket"
+  | "errors.switchModeToPair";
 
 const KNOWN_ERROR_KEYS: Readonly<Record<string, ErrorTranslationKey>> = {
   "Open the same Git repository on both devices before pairing.": "errors.openRepoBeforePairing",
@@ -26,6 +31,9 @@ const KNOWN_ERROR_KEYS: Readonly<Record<string, ErrorTranslationKey>> = {
   "Repository path cannot be empty.": "errors.repoPathEmpty",
   "Runtime is shutting down": "errors.runtimeShuttingDown",
   "This task can no longer be cancelled.": "errors.taskNotCancellable",
+  "device label cannot be empty": "errors.emptyDeviceLabel",
+  "This ticket belongs to the local node": "errors.localNodeTicket",
+  "Switch to Client or Host mode to pair with another machine": "errors.switchModeToPair",
 };
 
 const RELAY_ERROR_PREFIX_RE =
@@ -36,17 +44,21 @@ function matchKnownErrorKey(message: string): ErrorTranslationKey | null {
   if (Object.hasOwn(KNOWN_ERROR_KEYS, normalized)) {
     return KNOWN_ERROR_KEYS[normalized];
   }
-  if (normalized.toLowerCase().includes("relay.toml already exists")) {
+  const lower = normalized.toLowerCase();
+  if (lower.includes("relay.toml already exists")) {
     return "errors.manifestAlreadyExists";
   }
-  if (
-    normalized.includes("invalid state transition") &&
-    normalized.toLowerCase().includes("cancelled")
-  ) {
+  if (normalized.includes("invalid state transition") && lower.includes("cancelled")) {
     return "errors.taskNotCancellable";
   }
-  if (normalized.toLowerCase().startsWith("task not found:")) {
+  if (lower.startsWith("task not found:")) {
     return "errors.taskNotFound";
+  }
+  if (lower.includes("peer_revoked") || lower.includes("peer has been revoked")) {
+    return "errors.peerRevoked";
+  }
+  if (lower.includes("trusted peer not found")) {
+    return "errors.peerNotFound";
   }
   return null;
 }

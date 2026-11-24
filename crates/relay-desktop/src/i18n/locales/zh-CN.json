@@ -48,6 +48,9 @@
     "connectedTo": "已连上算力主机",
     "waitingPeer": "尚未配对主机",
     "queuedCount": "{{count}} 项待同步",
+    "trustedCount_one": "{{count}} 台受信任设备",
+    "trustedCount_other": "{{count}} 台受信任设备",
+    "manageDevices": "管理设备",
     "runsSection": "任务记录",
     "noRuns": "还没有任务，点上方「交给主机运行」开始。",
     "reviewFix": "查看修复建议",
@@ -257,7 +260,41 @@
       "chooseRole": "配对前，请先选择这台设备在当前仓库中的角色。",
       "roleHostDesc": "执行任务与快速检查，并生成一次性配对码。",
       "roleClientDesc": "在本地修改代码，并连接远程算力主机执行任务。",
-      "copyFailed": "无法访问剪贴板，请选中上方配对码手动复制。"
+      "copyFailed": "无法访问剪贴板，请选中上方配对码手动复制。",
+      "devicesTab": "受信任设备",
+      "trustedTitle": "受信任设备",
+      "trustedEmpty": "暂无受信任设备。配对算力主机或笔记本后，下次启动将自动重连。",
+      "nodeIdLabel": "节点 ID",
+      "copyNodeId": "复制节点 ID",
+      "copiedNodeId": "已复制节点 ID",
+      "lastSeen": "最近在线 {{time}}",
+      "pairedAt": "配对于 {{time}}",
+      "status": {
+        "connected": "已连接",
+        "offline": "离线",
+        "revoked": "已吊销"
+      },
+      "role": {
+        "host": "算力主机",
+        "client": "笔记本",
+        "peer": "设备"
+      },
+      "actions": {
+        "rename": "重命名",
+        "saveRename": "保存",
+        "cancelRename": "取消",
+        "reconnect": "重新连接",
+        "reconnecting": "连接中…",
+        "revoke": "吊销",
+        "remove": "移除"
+      },
+      "renamePlaceholder": "设备名称",
+      "renamedSuccess": "已将设备重命名为「{{label}}」。",
+      "reconnectedSuccess": "已重新连接到 {{label}}。",
+      "revokedSuccess": "已吊销 {{label}}，该设备的后续请求将被拦截。",
+      "removedSuccess": "已从受信任设备列表中移除 {{label}}。",
+      "revokedHint": "已吊销的设备无法继续同步；如需重新配对，请先移除此记录。",
+      "autoReconnectHint": "启动时将自动重连未吊销的受信任设备。"
     },
     "workspace": {
       "title": "工作区与 AI 设置",
@@ -374,6 +411,11 @@
     "repoPathEmpty": "请输入本地仓库目录路径。",
     "runtimeShuttingDown": "应用正在关闭，请稍后重试。",
     "taskNotCancellable": "该任务当前状态无法取消。",
-    "taskNotFound": "未找到该任务。"
+    "taskNotFound": "未找到该任务。",
+    "peerRevoked": "此设备已被吊销访问权限。如需重新配对，请先在受信任设备中将其移除。",
+    "peerNotFound": "未找到该受信任设备记录。",
+    "emptyDeviceLabel": "保存前请输入设备名称。",
+    "localNodeTicket": "该配对码属于当前本机，请粘贴另一台设备的配对码。",
+    "switchModeToPair": "请先切换到算力主机或笔记本模式，再与其他设备配对。"
   }
 }

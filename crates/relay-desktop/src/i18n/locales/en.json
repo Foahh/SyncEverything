@@ -48,6 +48,9 @@
     "connectedTo": "Connected to host",
     "waitingPeer": "No host paired yet",
     "queuedCount": "{{count}} pending sync",
+    "trustedCount_one": "{{count}} trusted device",
+    "trustedCount_other": "{{count}} trusted devices",
+    "manageDevices": "Manage Devices",
     "runsSection": "Runs",
     "noRuns": "No runs yet. Click \"Run on Host\" to start.",
     "reviewFix": "Review Fix",
@@ -257,7 +260,41 @@
       "chooseRole": "Choose a role for this device before pairing with another machine on the same repository.",
       "roleHostDesc": "Runs tasks, executes quick checks, and shares a pairing code.",
       "roleClientDesc": "Edits code locally and connects to a workstation host.",
-      "copyFailed": "Could not access clipboard. Select the pairing code above and copy it manually."
+      "copyFailed": "Could not access clipboard. Select the pairing code above and copy it manually.",
+      "devicesTab": "Trusted Devices",
+      "trustedTitle": "Trusted Devices",
+      "trustedEmpty": "No trusted devices yet. Pair a workstation or laptop to auto-reconnect on launch.",
+      "nodeIdLabel": "Node ID",
+      "copyNodeId": "Copy Node ID",
+      "copiedNodeId": "Node ID copied",
+      "lastSeen": "Last seen {{time}}",
+      "pairedAt": "Paired {{time}}",
+      "status": {
+        "connected": "Connected",
+        "offline": "Offline",
+        "revoked": "Revoked"
+      },
+      "role": {
+        "host": "Workstation",
+        "client": "Laptop",
+        "peer": "Device"
+      },
+      "actions": {
+        "rename": "Rename",
+        "saveRename": "Save",
+        "cancelRename": "Cancel",
+        "reconnect": "Reconnect",
+        "reconnecting": "Connecting…",
+        "revoke": "Revoke",
+        "remove": "Remove"
+      },
+      "renamePlaceholder": "Device name",
+      "renamedSuccess": "Renamed device to \"{{label}}\".",
+      "reconnectedSuccess": "Reconnected to {{label}}.",
+      "revokedSuccess": "Revoked {{label}}. Incoming requests from this device will be blocked.",
+      "removedSuccess": "Removed {{label}} from trusted devices.",
+      "revokedHint": "Revoked devices are blocked from syncing. Remove this entry to pair again.",
+      "autoReconnectHint": "Active trusted devices reconnect automatically on startup."
     },
     "workspace": {
       "title": "Workspace & AI Settings",
@@ -374,6 +411,11 @@
     "repoPathEmpty": "Enter a local repository folder path.",
     "runtimeShuttingDown": "SyncEverything is shutting down. Please try again shortly.",
     "taskNotCancellable": "This task can no longer be cancelled.",
-    "taskNotFound": "Task not found."
+    "taskNotFound": "Task not found.",
+    "peerRevoked": "This device has been revoked. Remove it from Trusted Devices to pair again.",
+    "peerNotFound": "This trusted device no longer exists.",
+    "emptyDeviceLabel": "Enter a device name before saving.",
+    "localNodeTicket": "This pairing code belongs to the current device.",
+    "switchModeToPair": "Switch to Workstation or Laptop mode before pairing with another device."
   }
 }

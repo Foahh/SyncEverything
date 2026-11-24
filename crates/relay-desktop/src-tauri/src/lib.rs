@@ -10,7 +10,7 @@ use relay_core::agent::{
 };
 use relay_core::contracts::{
     ApprovalDecision, DagSnapshot, GraphEdge, GraphNode, HandoffSummary, PeerStatus, RuntimeMode,
-    StalePropagationReport, TaskLogStreamKind, TaskRecord, TaskSpec,
+    StalePropagationReport, TaskLogStreamKind, TaskRecord, TaskSpec, TrustedPeerRecord,
 };
 use runtime::{DesktopRuntime, validate_user_repo};
 use serde::{Deserialize, Serialize};
@@ -527,6 +527,81 @@ async fn connect_peer_ticket(
 
 #[tauri::command]
 #[specta::specta]
+async fn list_trusted_peers(
+    app: AppHandle,
+    state: State<'_, RuntimeManager>,
+) -> Result<Vec<TrustedPeerRecord>, String> {
+    state
+        .get_or_init(&app)
+        .await?
+        .list_trusted_peers()
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+#[specta::specta]
+async fn rename_trusted_peer(
+    app: AppHandle,
+    state: State<'_, RuntimeManager>,
+    node_id: String,
+    label: String,
+) -> Result<TrustedPeerRecord, String> {
+    state
+        .get_or_init(&app)
+        .await?
+        .rename_trusted_peer(&node_id, &label)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+#[specta::specta]
+async fn reconnect_trusted_peer(
+    app: AppHandle,
+    state: State<'_, RuntimeManager>,
+    node_id: String,
+) -> Result<PeerStatus, String> {
+    state
+        .get_or_init(&app)
+        .await?
+        .reconnect_trusted_peer(&node_id)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+#[specta::specta]
+async fn revoke_trusted_peer(
+    app: AppHandle,
+    state: State<'_, RuntimeManager>,
+    node_id: String,
+) -> Result<TrustedPeerRecord, String> {
+    state
+        .get_or_init(&app)
+        .await?
+        .revoke_trusted_peer(&node_id)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+#[specta::specta]
+async fn remove_trusted_peer(
+    app: AppHandle,
+    state: State<'_, RuntimeManager>,
+    node_id: String,
+) -> Result<(), String> {
+    state
+        .get_or_init(&app)
+        .await?
+        .remove_trusted_peer(&node_id)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+#[specta::specta]
 async fn list_chat_messages(
     app: AppHandle,
     state: State<'_, RuntimeManager>,
@@ -605,6 +680,11 @@ pub fn specta_builder() -> Builder<tauri::Wry> {
             upsert_dag_node,
             get_pairing_ticket,
             connect_peer_ticket,
+            list_trusted_peers,
+            rename_trusted_peer,
+            reconnect_trusted_peer,
+            revoke_trusted_peer,
+            remove_trusted_peer,
             list_chat_messages,
             send_chat_message,
             cancel_chat_turn,

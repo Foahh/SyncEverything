@@ -61,6 +61,31 @@ impl PeerState {
         }
     }
 
+    pub(super) fn disconnect(&mut self, peer: EndpointId) {
+        if let Some(conn) = self.outbound.as_ref().filter(|conn| conn.remote_id() == peer) {
+            conn.close(1u32.into(), b"peer revoked");
+            self.outbound = None;
+            self.rtt = None;
+        }
+        if let Some(conn) = self
+            .inbound
+            .as_ref()
+            .and_then(WeakConnectionHandle::upgrade)
+            .filter(|conn| conn.remote_id() == peer)
+        {
+            conn.close(1u32.into(), b"peer revoked");
+            self.inbound = None;
+        }
+        if self.selected == Some(peer) {
+            self.selected = None;
+            self.outbound = None;
+            self.inbound = None;
+            self.rtt = None;
+            self.last_synced_commit = None;
+        }
+        self.addrs.remove(&peer);
+    }
+
     pub(super) fn outbound(&self, peer: EndpointId) -> Option<Connection> {
         self.outbound
             .as_ref()
