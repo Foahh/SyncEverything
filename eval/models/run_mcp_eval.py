@@ -27,6 +27,7 @@ import tempfile
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
@@ -241,24 +242,37 @@ def load_dotenv(path: Path) -> None:
             os.environ[key] = value
 
 
+def is_loopback_url(url: str) -> bool:
+    host = (urllib.parse.urlparse(url).hostname or "").lower()
+    return host in {"127.0.0.1", "localhost", "::1"}
+
+
 def call_openai_chat(
     base_url: str,
     model: str,
     api_key: str | None,
     messages: list[dict[str, Any]],
     tools: list[dict[str, Any]],
-    timeout_secs: int = 120,
+    *,
+    reasoning_effort: str | None = None,
+    timeout_secs: int = 240,
+    max_tokens: int | None = None,
 ) -> tuple[dict[str, Any], float]:
     normalized = base_url.strip().rstrip("/")
     url = normalized if normalized.endswith("/chat/completions") else f"{normalized}/chat/completions"
-    body = {
+    body: dict[str, Any] = {
         "model": model,
         "messages": messages,
-        "tools": tools,
-        "tool_choice": "auto",
         "temperature": 0.0,
         "stream": False,
     }
+    if tools:
+        body["tools"] = tools
+        body["tool_choice"] = "auto"
+    if reasoning_effort:
+        body["reasoning_effort"] = reasoning_effort
+    if max_tokens is not None:
+        body["max_tokens"] = max_tokens
     headers = {
         "Content-Type": "application/json",
         "User-Agent": "Relay-Eval/1.0",
@@ -280,6 +294,26 @@ def call_openai_chat(
         raise RuntimeError(f"HTTP {err.code} from {url}: {detail[:400]}") from err
     elapsed_ms = (time.perf_counter() - t0) * 1000.0
     return json.loads(raw), elapsed_ms
+
+
+def warmup_model(
+    base_url: str,
+    model: str,
+    api_key: str | None,
+    reasoning_effort: str | None,
+    timeout_secs: int,
+) -> None:
+    _, elapsed = call_openai_chat(
+        base_url,
+        model,
+        api_key,
+        [{"role": "user", "content": "OK"}],
+        [],
+        reasoning_effort=reasoning_effort,
+        timeout_secs=timeout_secs,
+        max_tokens=4,
+    )
+    print(f"[warmup] model={model} ready in {elapsed:.1f}ms", flush=True)
 
 
 @dataclass
@@ -310,6 +344,9 @@ def run_agent_loop(
     max_turns: int,
     dry_run_steps: list[tuple[str, dict[str, Any]]] | None = None,
     dry_run_final: str = "",
+    *,
+    reasoning_effort: str | None = None,
+    timeout_secs: int = 240,
 ) -> tuple[list[str], str, bool, float, int, int, list[tuple[str, bool, str]]]:
     called_tools: list[str] = []
     tool_outcomes: list[tuple[str, bool, str]] = []
@@ -335,26 +372,59 @@ def run_agent_loop(
     openai_tools = mcp.openai_tools()
     final_answer = ""
 
-    for _ in range(max_turns):
-        response, elapsed = call_openai_chat(base_url, model, api_key, messages, openai_tools)
+    for turn_idx in range(max_turns):
+        try:
+            response, elapsed = call_openai_chat(
+                base_url,
+                model,
+                api_key,
+                messages,
+                openai_tools,
+                reasoning_effort=reasoning_effort,
+                timeout_secs=timeout_secs,
+            )
+        except (TimeoutError, urllib.error.URLError, RuntimeError) as exc:
+            loop_aborted = True
+            final_answer = f"[LLM_ERROR] {exc}"
+            return (
+                called_tools,
+                final_answer,
+                loop_aborted,
+                total_latency_ms,
+                prompt_tokens,
+                completion_tokens,
+                tool_outcomes,
+            )
         total_latency_ms += elapsed
         usage = response.get("usage") or {}
         prompt_tokens += int(usage.get("prompt_tokens", 0))
         completion_tokens += int(usage.get("completion_tokens", 0))
 
         choice = response["choices"][0]["message"]
-        messages.append(choice)
         tool_calls = choice.get("tool_calls") or []
-        if not tool_calls:
+        norm_calls: list[dict[str, Any]] = []
+        for idx, tc in enumerate(tool_calls):
+            tc_copy = dict(tc)
+            if not tc_copy.get("id"):
+                tc_copy["id"] = f"call_{turn_idx}_{idx}"
+            norm_calls.append(tc_copy)
+        assistant_msg: dict[str, Any] = dict(choice)
+        assistant_msg["content"] = choice.get("content") or ""
+        if norm_calls:
+            assistant_msg["tool_calls"] = norm_calls
+        messages.append(assistant_msg)
+        if not norm_calls:
             final_answer = (choice.get("content") or "").strip()
             break
 
-        for tc in tool_calls:
+        for tc in norm_calls:
             fn = tc["function"]
             name = fn["name"]
             raw_args = fn.get("arguments") or "{}"
             try:
                 parsed_args = json.loads(raw_args) if isinstance(raw_args, str) else raw_args
+                if not isinstance(parsed_args, dict):
+                    parsed_args = {}
             except json.JSONDecodeError:
                 parsed_args = {}
 
@@ -436,7 +506,17 @@ def run_s1_sync_and_handoffs(daemon: Path, system_prompt: str, cfg: argparse.Nam
 
         with McpStdioClient(daemon, root, data) as mcp:
             called, answer, looped, latency, p_tok, c_tok, _ = run_agent_loop(
-                mcp, system_prompt, prompt, cfg.base_url, cfg.model, cfg.api_key, cfg.max_turns, dry_steps, dry_final
+                mcp,
+                system_prompt,
+                prompt,
+                cfg.base_url,
+                cfg.model,
+                cfg.api_key,
+                cfg.max_turns,
+                dry_steps,
+                dry_final,
+                reasoning_effort=cfg.reasoning_effort,
+                timeout_secs=cfg.timeout,
             )
 
         rec = recall(expected, called)
@@ -520,7 +600,17 @@ def run_s2_stale_evidence_trap(daemon: Path, system_prompt: str, cfg: argparse.N
 
         with McpStdioClient(daemon, root, data) as mcp:
             called, answer, looped, latency, p_tok, c_tok, _ = run_agent_loop(
-                mcp, system_prompt, prompt, cfg.base_url, cfg.model, cfg.api_key, cfg.max_turns, dry_steps, dry_final
+                mcp,
+                system_prompt,
+                prompt,
+                cfg.base_url,
+                cfg.model,
+                cfg.api_key,
+                cfg.max_turns,
+                dry_steps,
+                dry_final,
+                reasoning_effort=cfg.reasoning_effort,
+                timeout_secs=cfg.timeout,
             )
 
         rec = recall(expected, called)
@@ -586,7 +676,17 @@ def run_s3_env_diff_diagnosis(daemon: Path, system_prompt: str, cfg: argparse.Na
 
         with McpStdioClient(daemon, root, data) as mcp:
             called, answer, looped, latency, p_tok, c_tok, _ = run_agent_loop(
-                mcp, system_prompt, prompt, cfg.base_url, cfg.model, cfg.api_key, cfg.max_turns, dry_steps, dry_final
+                mcp,
+                system_prompt,
+                prompt,
+                cfg.base_url,
+                cfg.model,
+                cfg.api_key,
+                cfg.max_turns,
+                dry_steps,
+                dry_final,
+                reasoning_effort=cfg.reasoning_effort,
+                timeout_secs=cfg.timeout,
             )
 
         rec = recall(expected, called)
@@ -689,7 +789,17 @@ def run_s4_code_defect_self_heal(daemon: Path, system_prompt: str, cfg: argparse
 
         with McpStdioClient(daemon, root, data) as mcp:
             called, answer, looped, latency, p_tok, c_tok, outcomes = run_agent_loop(
-                mcp, system_prompt, prompt, cfg.base_url, cfg.model, cfg.api_key, cfg.max_turns, dry_steps, dry_final
+                mcp,
+                system_prompt,
+                prompt,
+                cfg.base_url,
+                cfg.model,
+                cfg.api_key,
+                cfg.max_turns,
+                dry_steps,
+                dry_final,
+                reasoning_effort=cfg.reasoning_effort,
+                timeout_secs=cfg.timeout,
             )
 
         patch_ok = any(
@@ -758,7 +868,28 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Relay Track 3 live MCP model evaluation runner")
     parser.add_argument("--base-url", default=os.getenv("RELAY_LLM_BASE_URL", "http://127.0.0.1:11434/v1"))
     parser.add_argument("--model", default=os.getenv("RELAY_LLM_MODEL", "qwen3.5:4b"))
-    parser.add_argument("--api-key-env", default=os.getenv("RELAY_LLM_API_KEY_ENV", "RELAY_LLM_API_KEY"))
+    parser.add_argument(
+        "--label",
+        default=None,
+        help="Optional display model label recorded in JSON and Markdown reports (defaults to --model)",
+    )
+    parser.add_argument(
+        "--api-key-env",
+        default=None,
+        help="Env var name holding API key (omitted automatically for loopback URLs unless set explicitly)",
+    )
+    parser.add_argument(
+        "--reasoning-effort",
+        choices=("none", "low", "medium", "high"),
+        default=None,
+        help="Optional OpenAI reasoning_effort parameter forwarded to the endpoint",
+    )
+    parser.add_argument("--timeout", type=int, default=240, help="Per-request HTTP timeout in seconds")
+    parser.add_argument(
+        "--warmup",
+        action="store_true",
+        help="Send one unmeasured 1-token warmup request before timing scenarios",
+    )
     parser.add_argument("--daemon-bin", default=None, help="Optional path to relay-daemon binary")
     parser.add_argument("--max-turns", type=int, default=8)
     parser.add_argument(
@@ -768,13 +899,24 @@ def main() -> int:
     )
     parser.add_argument("--save", action="store_true", help="Write JSON result + update benchmark-report.md")
     args = parser.parse_args()
-    args.api_key = os.getenv(args.api_key_env) if args.api_key_env else None
+    if args.api_key_env is not None:
+        args.api_key = os.getenv(args.api_key_env) if args.api_key_env else None
+    elif is_loopback_url(args.base_url):
+        args.api_key = None
+    else:
+        default_env = os.getenv("RELAY_LLM_API_KEY_ENV", "RELAY_LLM_API_KEY")
+        args.api_key = os.getenv(default_env) if default_env else None
+
     if args.dry_run:
         args.model = "dry-run-oracle"
+        args.label = "dry-run-oracle"
         args.base_url = "local-mcp-stdio"
 
     daemon = find_daemon_binary(args.daemon_bin)
     system_prompt = (PROMPTS_DIR / "host-deep-path.md").read_text(encoding="utf-8")
+
+    if args.warmup and not args.dry_run:
+        warmup_model(args.base_url, args.model, args.api_key, args.reasoning_effort, args.timeout)
 
     scenarios = [
         run_s1_sync_and_handoffs,
@@ -789,10 +931,11 @@ def main() -> int:
         print(
             f"[{status}] {res.scenario_id:<26} recall={res.tool_recall:.2f} "
             f"stale_halluc={res.stale_hallucination} loop={res.loop_aborted} "
-            f"latency={res.latency_ms:.1f}ms tools={res.called_tools}"
+            f"latency={res.latency_ms:.1f}ms tools={res.called_tools}",
+            flush=True,
         )
         for note in res.notes:
-            print(f"       note: {note}")
+            print(f"       note: {note}", flush=True)
         results.append(res)
 
     passed = sum(1 for r in results if r.passed)
@@ -802,35 +945,40 @@ def main() -> int:
     latencies = [r.latency_ms for r in results]
     total_tokens = sum(r.prompt_tokens + r.completion_tokens for r in results)
 
-    payload = {
-        "model": args.model,
+    display_model = args.label or args.model
+    payload: dict[str, Any] = {
+        "model": display_model,
         "base_url": args.base_url,
         "dry_run": args.dry_run,
         "timestamp_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "summary": {
-            "passed_scenarios": passed,
-            "total_scenarios": len(results),
-            "pass_rate_pct": round(100.0 * passed / len(results), 1),
-            "avg_tool_recall": round(sum(r.tool_recall for r in results) / len(results), 3),
-            "stale_hallucination_rate_pct": round(100.0 * stale_hits / len(results), 1),
-            "loop_abort_rate_pct": round(100.0 * loop_hits / len(results), 1),
-            "self_heal_passed": bool(heal_res),
-            "median_latency_ms": round(statistics.median(latencies), 1),
-            "total_tokens": total_tokens,
-        },
-        "scenarios": [asdict(r) for r in results],
     }
+    if display_model != args.model:
+        payload["endpoint_model"] = args.model
+    if args.reasoning_effort:
+        payload["reasoning_effort"] = args.reasoning_effort
+    payload["summary"] = {
+        "passed_scenarios": passed,
+        "total_scenarios": len(results),
+        "pass_rate_pct": round(100.0 * passed / len(results), 1),
+        "avg_tool_recall": round(sum(r.tool_recall for r in results) / len(results), 3),
+        "stale_hallucination_rate_pct": round(100.0 * stale_hits / len(results), 1),
+        "loop_abort_rate_pct": round(100.0 * loop_hits / len(results), 1),
+        "self_heal_passed": bool(heal_res),
+        "median_latency_ms": round(statistics.median(latencies), 1),
+        "total_tokens": total_tokens,
+    }
+    payload["scenarios"] = [asdict(r) for r in results]
 
     if args.save:
         RESULTS_DIR.mkdir(parents=True, exist_ok=True)
-        safe_model = re.sub(r"[^A-Za-z0-9._-]+", "_", args.model)
+        safe_model = re.sub(r"[^A-Za-z0-9._-]+", "_", display_model).strip("_")
         stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
         out_file = RESULTS_DIR / f"{safe_model}_{stamp}.json"
         out_file.write_text(json.dumps(payload, indent=2), encoding="utf-8")
         write_markdown_report(RESULTS_DIR, REPORT_PATH)
-        print(f"Saved results to {out_file} and updated {REPORT_PATH}")
+        print(f"Saved results to {out_file} and updated {REPORT_PATH}", flush=True)
 
-    print(json.dumps(payload["summary"], indent=2))
+    print(json.dumps(payload["summary"], indent=2), flush=True)
     return 0 if passed == len(results) else 1
 
 
