@@ -2,7 +2,7 @@
 """Relay Track 4 — dual-mode Chaos Suite judge.
 
 Supports two execution modes against the real `relay-daemon` binary and an
-isolated Git checkout of `bench/fixture-repo`:
+isolated Git checkout of `course/bench/fixture-repo`:
 
 1. `--mode scripted` (default): deterministic offline regression gate across
    all 8 frozen `ChaosCase` fault kinds + an iroh loopback P2P gate
@@ -15,9 +15,9 @@ isolated Git checkout of `bench/fixture-repo`:
    for Track 5 evaluation.
 
 Usage:
-    uv run python bench/chaos-cases/run_chaos_suite.py
-    uv run python bench/chaos-cases/run_chaos_suite.py --mode llm
-    uv run python bench/chaos-cases/run_chaos_suite.py --case chaos-04-mid-run-disconnect --keep
+    uv run python course/bench/chaos-cases/run_chaos_suite.py
+    uv run python course/bench/chaos-cases/run_chaos_suite.py --mode llm
+    uv run python course/bench/chaos-cases/run_chaos_suite.py --case chaos-04-mid-run-disconnect --keep
 """
 
 from __future__ import annotations
@@ -43,12 +43,14 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(REPO_ROOT / "eval"))
+CASES_DIR = Path(__file__).resolve().parent
+BENCH_DIR = CASES_DIR.parent
+COURSE_ROOT = BENCH_DIR.parent
+REPO_ROOT = COURSE_ROOT.parent
+sys.path.insert(0, str(COURSE_ROOT / "eval"))
 from stale_metrics import cites_stale_forecast_error
 
-FIXTURE_SRC = REPO_ROOT / "bench" / "fixture-repo"
-CASES_DIR = Path(__file__).resolve().parent
+FIXTURE_SRC = BENCH_DIR / "fixture-repo"
 RESULTS_DIR = CASES_DIR / "results"
 
 VENDOR_WHEEL = "./vendor/tiny_stats-0.1.0-py3-none-any.whl"

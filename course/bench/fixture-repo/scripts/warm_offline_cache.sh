@@ -2,7 +2,7 @@
 # Warm the offline runtime for the fixture: create the uv environment and prove
 # that smoke, the grid, and the vendored dependency all work with no network.
 #
-# Usage: bench/fixture-repo/scripts/warm_offline_cache.sh [repo-dir]
+# Usage: course/bench/fixture-repo/scripts/warm_offline_cache.sh [repo-dir]
 set -euo pipefail
 
 REPO_DIR="${1:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"

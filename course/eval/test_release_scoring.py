@@ -12,9 +12,11 @@ from stale_metrics import cites_stale_forecast_error
 from model_runs import SCORING_VERSION, load_model_runs
 
 
-ROOT = Path(__file__).resolve().parents[1]
-MODELS = runpy.run_path(str(ROOT / "eval/models/run_mcp_eval.py"))
-CHAOS = runpy.run_path(str(ROOT / "bench/chaos-cases/run_chaos_suite.py"))
+EVAL_DIR = Path(__file__).resolve().parent
+COURSE_ROOT = EVAL_DIR.parent
+ROOT = COURSE_ROOT.parent
+MODELS = runpy.run_path(str(EVAL_DIR / "models" / "run_mcp_eval.py"))
+CHAOS = runpy.run_path(str(COURSE_ROOT / "bench" / "chaos-cases" / "run_chaos_suite.py"))
 
 
 def model_reply(*calls):

@@ -16,7 +16,7 @@ Verify the real `relay-daemon mcp-stdio` JSON-RPC 2.0 handshake, all 8 tools, `S
 
 ```powershell
 cargo build -p relay-daemon
-uv run python eval/models/run_mcp_eval.py --dry-run
+uv run python course/eval/models/run_mcp_eval.py --dry-run
 ```
 
 ### 2. Benchmark Local Ollama (`qwen3.5:4b` / `qwen3.5:9b`)
@@ -32,7 +32,7 @@ uv run python eval/models/run_mcp_eval.py --dry-run
 
 ```powershell
 # Fast / non-thinking edge baseline (Edge Fast-Path)
-uv run python eval/models/run_mcp_eval.py `
+uv run python course/eval/models/run_mcp_eval.py `
   --base-url http://127.0.0.1:11434/v1 `
   --model relay-qwen3.5-4b-16k `
   --label "qwen3.5:4b (no-think)" `
@@ -40,7 +40,7 @@ uv run python eval/models/run_mcp_eval.py `
   --warmup --save
 
 # Default thinking mode (replace with relay-qwen3.5-9b-16k and label "qwen3.5:9b" for 9B)
-uv run python eval/models/run_mcp_eval.py `
+uv run python course/eval/models/run_mcp_eval.py `
   --base-url http://127.0.0.1:11434/v1 `
   --model relay-qwen3.5-4b-16k `
   --label "qwen3.5:4b" `
@@ -51,7 +51,7 @@ uv run python eval/models/run_mcp_eval.py `
 
 ```powershell
 $env:DEEPSEEK_API_KEY = "<your-key>"
-uv run python eval/models/run_mcp_eval.py `
+uv run python course/eval/models/run_mcp_eval.py `
   --base-url https://api.deepseek.com/v1 `
   --model deepseek-chat `
   --api-key-env DEEPSEEK_API_KEY `
@@ -65,6 +65,6 @@ uv run python eval/models/run_mcp_eval.py `
 - `--warmup` & `--timeout <secs>`: Send one unmeasured warmup request before timing scenarios and cap per-request HTTP latency (default `240s`).
 - **Loopback API-key safety**: When `--base-url` targets `127.0.0.1`, `localhost`, or `::1`, cloud credentials loaded from `.env` (`RELAY_LLM_API_KEY`) are never forwarded unless `--api-key-env` is passed explicitly.
 
-Passing `--save` stores the structured run log in `eval/models/results/` and updates `eval/models/benchmark-report.md` with the Markdown comparison table.
+Passing `--save` stores the structured run log in `course/eval/models/results/` and updates `course/eval/models/benchmark-report.md` with the Markdown comparison table.
 
 New runs record `scoring_version: 2`. The model report and Figure 3 use only live runs scored with the current version once the first such run exists. Until then, they display the original live cohort. Older JSON files remain available for reproducing the historical report.

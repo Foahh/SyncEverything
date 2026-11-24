@@ -18,9 +18,9 @@ Four continuation tasks (`B1`–`B4`):
 Outputs pure measured timings, token usage, manual clarifications/corrections,
 UI approval counts, first-pass vs final completion, and human-wait sensitivity
 analysis (`T_eff(t_h) = T_wall + N_suppl * t_h + N_approve * t_a`) to:
-  - bench/results/baseline_comparison_runs.jsonl
-  - bench/results/baseline_comparison_summary.json
-  - bench/results/baseline_comparison_summary.csv
+  - course/bench/results/baseline_comparison_runs.jsonl
+  - course/bench/results/baseline_comparison_summary.json
+  - course/bench/results/baseline_comparison_summary.csv
 
 Zero third-party Python dependencies (pure Python 3.11+ stdlib).
 """
@@ -48,12 +48,14 @@ from pathlib import Path
 from typing import Any
 
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(REPO_ROOT / "eval"))
+DEFAULT_OUT = Path(__file__).resolve().parent
+BENCH_DIR = DEFAULT_OUT.parent
+COURSE_ROOT = BENCH_DIR.parent
+REPO_ROOT = COURSE_ROOT.parent
+sys.path.insert(0, str(COURSE_ROOT / "eval"))
 from stale_metrics import forecast_error_values, reported_decimal_values
 
-FIXTURE_SRC = REPO_ROOT / "bench" / "fixture-repo"
-DEFAULT_OUT = Path(__file__).resolve().parent
+FIXTURE_SRC = BENCH_DIR / "fixture-repo"
 BASELINES = ("file_sync_only", "static_template", "relay_v1")
 TASKS = (
     "B1_decision_carryover",
@@ -1449,7 +1451,7 @@ def main() -> int:
     load_dotenv(REPO_ROOT / ".env")
     parser = argparse.ArgumentParser(description="Track 5 Experiment 1: Three-baseline comparison")
     parser.add_argument("--daemon-bin", default=None, help="Path to relay-daemon binary")
-    parser.add_argument("--out", default=str(DEFAULT_OUT), help="Output directory (default: bench/results)")
+    parser.add_argument("--out", default=str(DEFAULT_OUT), help="Output directory (default: course/bench/results)")
     parser.add_argument("--trials", type=int, default=3, help="Number of trials per baseline x task")
     parser.add_argument("--max-turns", type=int, default=12, help="Initial autonomous turn budget")
     parser.add_argument("--max-corrections", type=int, default=3, help="Max deterministic human-oracle correction rounds")

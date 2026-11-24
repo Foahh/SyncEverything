@@ -6,7 +6,8 @@
 # other flag through "$@").
 set -euo pipefail
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT_DIR="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 cd "$ROOT_DIR"
 
 EXE_EXT=""
@@ -23,9 +24,9 @@ fi
 
 echo "==> relay chaos suite"
 if command -v uv >/dev/null 2>&1; then
-    exec uv run python bench/chaos-cases/run_chaos_suite.py --daemon-bin "$DAEMON_BIN" "$@"
+    exec uv run python "$SCRIPT_DIR/run_chaos_suite.py" --daemon-bin "$DAEMON_BIN" "$@"
 elif command -v python3 >/dev/null 2>&1; then
-    exec python3 bench/chaos-cases/run_chaos_suite.py --daemon-bin "$DAEMON_BIN" "$@"
+    exec python3 "$SCRIPT_DIR/run_chaos_suite.py" --daemon-bin "$DAEMON_BIN" "$@"
 else
-    exec python bench/chaos-cases/run_chaos_suite.py --daemon-bin "$DAEMON_BIN" "$@"
+    exec python "$SCRIPT_DIR/run_chaos_suite.py" --daemon-bin "$DAEMON_BIN" "$@"
 fi

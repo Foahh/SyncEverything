@@ -1,6 +1,6 @@
-# Verified Late-2026 Rust API Cheatsheet (for Codex CLI & Contributors)
+# Rust API Cheatsheet (Workspace Reference)
 
-> **Purpose:** Prevent AI coding agents from hallucinating outdated `iroh` 0.x, `rmcp` 0.x, or `tauri-specta` 1.x APIs. Every version and snippet below is verified against our workspace `Cargo.toml` (`rustc 1.100.0`, `edition = "2024"`).
+> **Purpose:** Reference for contributors and AI coding agents working in the Relay Rust workspace (`rust-version = "1.94"`, `edition = "2024"`). Keeps `iroh` 1.x, `rmcp` 3.x, `sqlx` 0.9, and `tauri-specta` 2.x usage aligned with the pinned versions in [`Cargo.toml`](../Cargo.toml).
 
 ---
 
@@ -13,8 +13,7 @@
 | `rmcp` | `3.11.0` | Official Rust MCP SDK (`server`, `macros`, `transport-io`, `transport-streamable-http-server`, `elicitation`, `schemars`) |
 | `axum` | `0.8.9` | Mounts `StreamableHttpService` at `/mcp` |
 | `sqlx` | `0.9.1` | `runtime-tokio`, `sqlite`, `sqlite-bundled`, `chrono`, `uuid`, `json`, `migrate` |
-| `petgraph` | `0.8.3` | In-memory DAG & deterministic STALE traversal |
-| `notify` | `9.0.0` | Cross-platform filesystem watcher |
+| `petgraph` | `0.8.3` | In-memory DAG & deterministic `STALE` traversal |
 | `tauri` / `tauri-build` | `2.12.7` / `2.7.6` | Tauri v2 stable |
 | `tauri-specta` | `=2.0.0-rc.29` | Requires exact `specta = "=2.0.0-rc.28"` & `specta-typescript = "0.0.15"` |
 | `reqwest` | `0.13.5` | Use feature `"rustls"` (NOT `"rustls-tls"`) |
@@ -27,7 +26,7 @@
 1. **NO `git2` (libgit2) and NO local Rust LLM inference crates (`candle`, `llama-cpp-rs`).**
    * Git operations (`worktree`, `bundle`, `diff`, `status`, `rev-parse`) MUST call system `git` asynchronously via `tokio::process::Command`.
    * Python environment reconciliation & execution MUST call `uv` asynchronously via `tokio::process::Command`.
-   * LLM inference MUST call OpenAI-compatible HTTP endpoints via `reqwest` (`http://127.0.0.1:11434/v1` for Ollama `qwen3.5:4b/9b`, or configurable Cloud API base URL).
+   * LLM inference MUST call OpenAI-compatible HTTP endpoints via `reqwest` (`http://127.0.0.1:11434/v1` for local Ollama, or a user-configured Cloud API base URL).
 2. **NO arbitrary shell execution on Host.** Always parse `<repo>/relay.toml` and execute whitelisted presets only.
 3. **NO hand-written Tauri `invoke("...")` strings in TypeScript.** Always regenerate `crates/relay-desktop/src/bindings.ts` via `tauri-specta` whenever commands or event payloads change.
 
@@ -115,5 +114,5 @@ builder.export(Typescript::default(), "../src/bindings.ts")?;
 
 > **Windows, `sqlx 0.9` & Specta v2 Notes:**
 > 1. `tauri_build::build()` embeds the Windows ComCtl32 v6 manifest into `[[bin]]` targets, not `lib` unit-test harnesses. Export bindings via `cargo run -p relay-desktop --bin export_bindings -- crates/relay-desktop/src/bindings.ts` and keep unit tests in `relay-core` / `relay-daemon`.
-> 2. `specta-typescript 0.0.15` forbids `BigInt`-sized integers (`i64`/`u64`/`usize`, including `serde_json::Value`). Use `relay_core::contracts::JsonValue` (backed by `f64`) and `u32` in all `#[derive(specta::Type)]` structs!
+> 2. `specta-typescript 0.0.15` forbids `BigInt`-sized integers (`i64`/`u64`/`usize`, including `serde_json::Value`). Use `relay_core::contracts::JsonValue` (backed by `f64`) and `u32` in all `#[derive(specta::Type)]` structs.
 > 3. `sqlx 0.9.1` enforces `SqlSafeStr`: always pass `&'static str` literals (or `const &str`) to `sqlx::query` / `sqlx::query_as`, never `format!(...)` strings.

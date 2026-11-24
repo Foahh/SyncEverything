@@ -1,39 +1,39 @@
-# Relay — Post-Course Productization Roadmap
+# SyncEverything — Product Roadmap
 
-This document captures the product features intentionally deferred beyond the COMP7608 course scope (Tracks 1–6) so that Relay can evolve from a verified course system into an everyday tool for developers working across a laptop and a compute workstation.
-
----
-
-## Scope Split
-
-### Included in COMP7608 Delivery (Tracks 1–3 Enhancements)
-These lightweight capabilities are being built right alongside Tracks 1–3 because they both strengthen the course demo and immediately make Relay usable on arbitrary user repositories:
-- **Open any local Git repository (`relay.toml`)** from the desktop workbench, with dynamic preset loading instead of hardcoding `forecast-bench`.
-- **Real Git `HEAD` watcher**: background detection of real `git commit` changes that automatically records new `Artifact` nodes and cascades `Outdated` (`STALE`) status to downstream `Evidence` nodes without needing manual simulation buttons.
-- **`relay-daemon` ↔ `relay-desktop` Pairing Ticket interop + Host task execution**: headless `relay-daemon serve` prints ready-to-paste pairing tickets, opens a pairing window, and executes incoming preflight / self-healing / approval workflows over `iroh`.
-- **Desktop & Daemon LLM Settings**: configure Ollama (`qwen3.5:4b` / `9b`) or any OpenAI-compatible Cloud API directly from the desktop UI (or `RELAY_LLM_*` env vars) with live connectivity probing.
-- **Built-in Relay Agent side rail**: collapsible right-hand workbench rail (`Agent` / `Details` tabs) powered by native `shadcn/ui` chat primitives + `streamdown` streaming Markdown, real OpenAI-compatible SSE tool calling across all 8 frozen MCP tools plus whitelisted task dispatch, decision recording, and read-only repo inspection, per-repo SQLite chat persistence, and inline diff confirmation cards synced live with the DAG and approval queue.
+This roadmap tracks what has shipped in **SyncEverything v0.1** (powered by the Relay engine) and the upcoming milestones planned for open-source releases.
 
 ---
 
-## Deferred Backlog (Post-Course Productization)
+## Shipped in v0.1
 
-### 1. Zero-Config Onboarding & Multi-Project Management
-- **Project switcher**: maintain a list of recent/pinned repositories in the sidebar and switch workspaces seamlessly.
-- **Auto-generate `relay.toml`**: scan `pyproject.toml`, `package.json`, `Cargo.toml`, or `Makefile` when opening a repository that lacks `relay.toml` and propose safe default presets (smoke check, test suite, train/build commands) with one-click creation.
+- **Encrypted P2P Sync & Multi-Mode Runtime (`iroh` 1.5 + `iroh-blobs`)**: Direct LAN discovery, NAT-traversing relay fallback, air-gapped `--lan-only` mode, single-machine `LocalDualSandbox` loopback testing, Git bundle and tracked working-tree diff transfer, BLAKE3-verified execution logs, and offline SQLite outbox replay.
+- **Causal Decision-Evidence DAG & Deterministic `STALE` Quarantine**: SQLite WAL persistence, `petgraph` DAG engine, real background Git `HEAD` watching that records new `Artifact` nodes and cascades `Outdated` (`STALE`) status to downstream `Evidence`, plus deterministic MCP redaction and refusal of stale evidence reads.
+- **Isolated `git worktree` Self-Healing & Approval Gates**: Whitelisted `relay.toml` preset execution with parameter validation and timeouts, isolated per-task worktrees, ±10-line `error_snippets`, confined `read_worktree_file` inspection, `propose_worktree_patch` supporting `uv_spec` and atomic `file_edits` with automatic rollback on smoke failure, and dual-mode approval (native MCP Elicitation and SyncEverything Desktop Diff Approval).
+- **9-Tool Standard MCP Server (`rmcp` 3.11)**: Stdio (`relay-daemon mcp-stdio`) and Streamable HTTP (`relay-daemon serve` / `mcp-http` at `/mcp`) with ready-to-paste client snippets for Claude Code, Cursor, and Codex CLI directly in Desktop Settings.
+- **Zero-Friction Repository Onboarding**: Open any local Git repository from SyncEverything Desktop and auto-generate a starter `relay.toml` for Python (`uv`), Rust (`cargo`), JavaScript/TypeScript (`bun`/`pnpm`/`yarn`/`npm`), or generic Git projects.
+- **Built-in SyncEverything Agent & Model Controls**: Collapsible right workbench rail (`Agent` / `Details`) with streaming Markdown, live tool-call traces, inline approval cards, per-repo chat persistence, and configurable local Ollama or OpenAI-compatible Cloud API endpoints with reasoning-effort controls.
+- **Cross-Platform Desktop Workbench**: Tauri v2 + React 19 + shadcn/ui + React Flow UI with bilingual `en` / `zh-CN` localization and Light/Dark themes.
 
-### 2. Zero-Friction Integration with Existing AI Coding Tools
-- **One-click MCP installer**: automatically register `relay-daemon mcp-stdio` or `mcp-http` into user configs for Claude Code, Codex CLI, Cursor, Windsurf, and DeepSeek Harness (`dsh`).
-- **Automatic workspace sync on commit/save**: optional Git hook or file watcher to push bundles and update DAG state silently whenever the developer commits in their IDE.
+---
 
-### 3. General-Purpose Execution & Real-Time Observability
-- **Live streaming logs**: stream stdout/stderr line-by-line into the Inspector Drawer while a task runs on the workstation.
-- **Task cancellation & resource telemetry**: stop running jobs cleanly and display host CPU/RAM/GPU utilization and elapsed time.
-- **Multi-runtime adapters**: extend beyond `uv` (Python) to support Conda, Docker/OCI containers, Bun/Node, and Cargo/Rust sandboxes.
-- **Parameterized ad-hoc runs**: safely allow temporary overrides (e.g., pytest filter `-k`, extra hyperparameters) within explicit approval boundaries.
+## OSS Roadmap (v0.2 and Beyond)
+
+### 1. Multi-Project Workspace & Agent Integration
+- **Project switcher**: Pin and switch between recent local repositories directly from the sidebar without re-browsing directories.
+- **One-click MCP installer**: Optionally write `relay-daemon` server entries directly into user configuration files for Claude Code, Codex CLI, Cursor, Windsurf, and compatible clients (building on the existing copyable snippets).
+- **Automatic workspace sync on commit/save**: Optional Git hook or filesystem watcher to push bundles and update DAG state automatically as developers commit in their editor.
+
+### 2. Extensible Package Manager & Runtime Adapter Layer
+- **Multi-runtime adapters**: Extend environment fingerprinting and automated dependency self-healing beyond `uv` (Python) to Conda, Docker/OCI containers, Bun/Node, and Cargo/Rust sandboxes behind a unified adapter trait.
+- **Untracked-file archive sync**: Complete untracked-file archive bundling alongside tracked working-tree diffs in P2P sync bundles.
+
+### 3. Real-Time Execution Observability & Control
+- **Live streaming logs**: Stream stdout/stderr line-by-line into the Inspector Drawer while a task runs on the workstation.
+- **Task cancellation & resource telemetry**: Stop running jobs cleanly and surface Host CPU, RAM, and GPU utilization alongside elapsed runtime.
+- **Parameterized ad-hoc overrides**: Safely allow temporary per-run overrides (for example, pytest `-k` filters or hyperparameter sweeps) bounded by explicit manifest rules and approval gates.
 
 ### 4. Always-On Production Polish
-- **System tray & auto-start**: run `relay-daemon` silently in the Windows/macOS menu bar or system tray with auto-reconnect across laptop sleep/wake cycles.
-- **Persistent trusted devices & revocation**: remember paired peers across restarts, label devices, and revoke compromised or retired devices from Settings.
-- **Visual two-way conflict resolver**: side-by-side diff UI when both laptop and workstation edit the same file offline.
-- **Signed installers & auto-updates**: distribute signed `.msi` (Windows) and `.dmg` (macOS) bundles with built-in daemon setup wizard.
+- **System tray & background auto-start**: Run `relay-daemon` quietly in the Windows/macOS tray or menu bar with automatic reconnection across laptop sleep/wake cycles.
+- **Persistent trusted peers & device revocation UI**: Label paired devices, remember trust across restarts, and revoke retired or compromised peers from Desktop Settings.
+- **Visual two-way conflict resolver**: Side-by-side diff UI when both laptop and workstation modify the same file offline.
+- **Signed installers & auto-updates**: Distribute signed `.msi` (Windows), `.dmg` (macOS), and Linux packages with a guided first-run daemon setup flow.

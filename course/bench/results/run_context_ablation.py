@@ -9,7 +9,7 @@ Evaluates Relay's three context composition strategies exposed by
   3. `dag_bundle`      — Decision-Evidence DAG bundle with STALE quarantine
 
 Part A builds five real progressive DAG snapshots on isolated checkouts of
-`bench/fixture-repo` (1, 3, 6, 10 stale evidence rounds + a mixed 5-stale /
+`course/bench/fixture-repo` (1, 3, 6, 10 stale evidence rounds + a mixed 5-stale /
 1-fresh snapshot) and verifies blake3 hash determinism, token scaling, and
 `exposed_stale_metrics_count` directly from `relay-daemon compose-context`.
 
@@ -44,12 +44,14 @@ from pathlib import Path
 from typing import Any
 
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(REPO_ROOT / "eval"))
+DEFAULT_OUT = Path(__file__).resolve().parent
+BENCH_DIR = DEFAULT_OUT.parent
+COURSE_ROOT = BENCH_DIR.parent
+REPO_ROOT = COURSE_ROOT.parent
+sys.path.insert(0, str(COURSE_ROOT / "eval"))
 from stale_metrics import forecast_error_values, reported_decimal_values
 
-FIXTURE_SRC = REPO_ROOT / "bench" / "fixture-repo"
-DEFAULT_OUT = Path(__file__).resolve().parent
+FIXTURE_SRC = BENCH_DIR / "fixture-repo"
 STRATEGIES = ("full_transcript", "flat_summary", "dag_bundle")
 TEXT_SUFFIXES = {".py", ".toml", ".lock", ".md", ".txt", ".sh", ".json"}
 IGNORE_PATTERNS = shutil.ignore_patterns(".git", ".venv", ".relay", "__pycache__", "*.pyc", ".DS_Store")
@@ -736,7 +738,7 @@ def main() -> int:
     load_dotenv(REPO_ROOT / ".env")
     parser = argparse.ArgumentParser(description="Track 5 Experiment 2: compose-context ablation")
     parser.add_argument("--daemon-bin", default=None, help="Path to relay-daemon executable")
-    parser.add_argument("--out", default=str(DEFAULT_OUT), help="Output directory (default: bench/results)")
+    parser.add_argument("--out", default=str(DEFAULT_OUT), help="Output directory (default: course/bench/results)")
     parser.add_argument(
         "--models",
         nargs="*",

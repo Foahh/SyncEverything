@@ -2,7 +2,7 @@
 """Generate the 4 publication-grade Track 5 figures (PNG 300 DPI + SVG + PDF).
 
 Usage (zero modifications to project pyproject.toml or Cargo.toml):
-    uv run --with matplotlib --with numpy python bench/results/plot_figures.py
+    uv run --with matplotlib --with numpy python course/bench/results/plot_figures.py
 """
 
 from __future__ import annotations
@@ -22,13 +22,15 @@ import matplotlib.patches as mpatches
 import numpy as np
 
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(REPO_ROOT / "eval"))
+BENCH_RESULTS = Path(__file__).resolve().parent
+BENCH_DIR = BENCH_RESULTS.parent
+COURSE_ROOT = BENCH_DIR.parent
+REPO_ROOT = COURSE_ROOT.parent
+sys.path.insert(0, str(COURSE_ROOT / "eval"))
 from model_runs import load_model_runs
 
-BENCH_RESULTS = REPO_ROOT / "bench" / "results"
-CHAOS_RESULTS = REPO_ROOT / "bench" / "chaos-cases" / "results"
-MODEL_RESULTS = REPO_ROOT / "eval" / "models" / "results"
+CHAOS_RESULTS = BENCH_DIR / "chaos-cases" / "results"
+MODEL_RESULTS = COURSE_ROOT / "eval" / "models" / "results"
 FIGURES_DIR = BENCH_RESULTS / "figures"
 
 # Okabe-Ito colorblind-safe palette
