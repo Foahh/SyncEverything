@@ -55,6 +55,7 @@ def run(args: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
 
 def git_dirty(cwd: Path) -> bool:
     proc = run(["git", "status", "--porcelain"], cwd)
+    proc.check_returncode()
     return proc.stdout.strip() != ""
 
 
@@ -88,12 +89,12 @@ def main() -> int:
             ignore=shutil.ignore_patterns(".git", ".venv", ".relay", "__pycache__", "*.pyc"),
         )
         normalize_lf(repo)
-        run(["git", "init", "--initial-branch=main"], repo)
-        run(["git", "config", "core.autocrlf", "false"], repo)
-        run(["git", "config", "user.name", "Relay Calibration"], repo)
-        run(["git", "config", "user.email", "calibration@relay.local"], repo)
-        run(["git", "add", "--all"], repo)
-        run(["git", "commit", "-m", "chore(bench): calibration baseline"], repo)
+        run(["git", "init", "--initial-branch=main"], repo).check_returncode()
+        run(["git", "config", "core.autocrlf", "false"], repo).check_returncode()
+        run(["git", "config", "user.name", "Relay Calibration"], repo).check_returncode()
+        run(["git", "config", "user.email", "calibration@relay.local"], repo).check_returncode()
+        run(["git", "add", "--all"], repo).check_returncode()
+        run(["git", "-c", "commit.gpgsign=false", "commit", "-m", "chore(bench): calibration baseline"], repo).check_returncode()
 
     wheel_cleanup = tempfile.TemporaryDirectory(prefix="relay-fixture-wheel-gate-")
     try:
