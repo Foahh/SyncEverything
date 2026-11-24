@@ -1,62 +1,66 @@
 # Chaos Suite — Track 4 Fault-Injection Benchmark
 
-Eight declarative fault-injection cases plus a one-click judge. Every JSON file conforms to the frozen `relay_core::contracts::ChaosCase` schema (`docs/contracts.md` §6); the schema is not extended.
+Eight declarative fault-injection cases plus a dual-mode judge (`scripted` offline CI gate and live `llm` coding-agent eval) and a P2P loopback connectivity gate (`relay-daemon sandbox-dual`). Every JSON file conforms strictly to the frozen `relay_core::contracts::ChaosCase` schema (`docs/contracts.md` §6).
 
-## Coverage
+## Coverage (8/8 Fault Kinds · 8/8 MCP Tools)
 
 | Case | `injected_fault.kind` | Scenario | Expected tool trace | Core assertions |
 |---|---|---|---|---|
-| `chaos-01-missing-dep` | `missing_dependency` | Undeclared `tiny_stats` import → offline `uv_spec` wheel repair | preflight → propose → approve | missing module detected, smoke verified, approval gate, 1 fresh evidence, main tree clean |
-| `chaos-02-upstream-edit` | `upstream_code_edit` | Laptop commits a new alpha default after the host result | preflight → approve → snapshot → read log | 1 stale evidence, 0 fresh, task record stays `completed`, stale log read refused |
-| `chaos-03-same-line-conflict` | `same_line_conflict` | Laptop holds an uncommitted edit on the patched line | preflight → propose → approve | client `git apply` conflicts, client edit preserved, host run still fresh, host tree clean |
-| `chaos-04-mid-run-disconnect` | `mid_run_disconnect` | Connection killed mid-preflight, daemon restarted | preflight → approve | state persisted `preflight_running`, preflight resumes, 1 fresh evidence, task `completed` |
-| `chaos-05-runtime-exception` | `runtime_exception` | Undefined `DEFAULT_ALPHA` NameError in smoke | preflight → propose → approve | smoke verified after `code_diff`, calibrated `best_window = 28`, task `completed` |
+| `chaos-01-missing-dep` | `missing_dependency` | Undeclared `tiny_stats` import → offline `uv_spec` wheel repair | check env → preflight → propose → approve | missing module detected, real `ApprovalRequired` gate verified, 1 fresh evidence, main tree clean |
+| `chaos-02-upstream-edit` | `upstream_code_edit` | Laptop commits a new alpha default after the host result | preflight → approve → snapshot → read log | 1 stale evidence, 0 fresh, task stays `completed`, `STALE` error block enforced |
+| `chaos-03-same-line-conflict` | `same_line_conflict` | Laptop holds an uncommitted edit on the patched line | preflight → propose → approve | real `git apply` fails on client, client edit byte-preserved, host tree clean |
+| `chaos-04-mid-run-disconnect` | `mid_run_disconnect` | Daemon killed cleanly mid-smoke preflight, then restarted | preflight → sync status → handoffs → approve | state persisted `preflight_running`, preflight resumes, 1 fresh evidence, task `completed` |
+| `chaos-05-runtime-exception` | `runtime_exception` | Undefined `DEFAULT_ALPHA` NameError in smoke | preflight → propose → approve | `NameError` detected in preflight, smoke verified after `code_diff`, `best_window = 28`, task `completed` |
 | `chaos-06-corrupted-lock` | `corrupted_env_lock` | Truncated `uv.lock` fails TOML parsing | preflight → propose → approve | parse failure detected, lock repair verified, task `completed` |
-| `chaos-07-stale-evidence-trap` | `stale_evidence_trap` | Results requested after an upstream invalidation | snapshot → read log | stale read refused, DAG bundle exposes 0 stale metrics, full transcript exposes 1 |
+| `chaos-07-stale-evidence-trap` | `stale_evidence_trap` | Results requested after an upstream invalidation | snapshot → read log | `STALE` read refused, DAG bundle exposes 0 stale metrics, full transcript exposes 1 |
 | `chaos-08-duplicate-replay` | `duplicate_task_replay` | Client replays an approval after a lost response | preflight → approve → snapshot | replay answers `execution_started`, 1 evidence, task stays `completed` |
 
-## One-click judge
+## One-Click Dual-Mode Judge
 
 ```bash
-./bench/chaos-cases/judge.sh               # builds the daemon if needed, then runs all cases
-uv run python bench/chaos-cases/run_chaos_suite.py   # or call the judge directly
+# Default: deterministic offline regression + P2P loopback gate
+./bench/chaos-cases/judge.sh
+uv run python bench/chaos-cases/run_chaos_suite.py
+
+# Live LLM evaluation mode (auto-loads RELAY_LLM_* from repo-root .env)
+./bench/chaos-cases/judge.sh --mode llm
+uv run python bench/chaos-cases/run_chaos_suite.py --mode llm
 ```
 
 Useful flags:
 
 ```bash
-# one case, keeping its repo/data for inspection
+# Single case, keeping scratch repo and --data-dir for inspection
 uv run python bench/chaos-cases/run_chaos_suite.py --case chaos-04-mid-run-disconnect --keep
 
-# explicit binary or report directory
-uv run python bench/chaos-cases/run_chaos_suite.py --daemon-bin target/debug/relay-daemon --out bench/chaos-cases/results
+# Explicit binary, report directory, or skipping the P2P loopback gate
+uv run python bench/chaos-cases/run_chaos_suite.py --daemon-bin target/debug/relay-daemon.exe --out bench/chaos-cases/results
 ```
 
-The judge exits non-zero if any assertion fails. It writes `results/chaos-report.json` (machine-readable metrics) and `results/chaos-report.md` (assertion table) on every run.
+- `--mode scripted` (default): writes `results/chaos-report.json` and `results/chaos-report.md`, enforces `tool_recall == 1.0`, verifies 8/8 frozen MCP tool coverage, and runs `relay-daemon sandbox-dual` as an `iroh` loopback connectivity gate (unless `--skip-p2p-gate`).
+- `--mode llm`: equips an OpenAI-compatible LLM (`RELAY_LLM_BASE_URL` / `RELAY_LLM_MODEL` / `RELAY_LLM_API_KEY` from `.env` or environment) with all 8 live MCP tools plus repo-confined read-only helpers (`list_repo_files`, `read_repo_file`), scoring self-healing success rate, tool recall, retry overhead, STALE anti-hallucination immunity, tokens, and latency in `results/chaos-llm-report.{json,md}` for Track 5.
 
-Latest full run on this workstation: **8/8 PASS** (see `results/chaos-report.md`).
+Latest verified runs (Windows workstation):
+- **Scripted + P2P Gate**: **8/8 PASS** (`tool_recall = 1.00`, `8/8` MCP tools covered, `sandbox-dual` loopback **PASS** in `2117.4 ms`; see `results/chaos-report.md`).
+- **Live Cloud LLM (`deepseek-flash`)**: **8/8 PASS**, Self-Heal **4/4 (100%)**, Avg Tool Recall **1.000**, Retries **0**, Stale Hallucinations **0** (see `results/chaos-llm-report.md`).
 
-## How a case is executed
+## How a Case Is Executed
 
-1. The fixture is copied into a scratch directory, `git init`-ed, and committed as the baseline (`initial_commit: "HEAD"` is resolved there).
-2. The fault is injected and committed, then a `TaskSpec` is submitted through `relay-daemon submit-task`.
-3. `relay-daemon mcp-stdio` is driven over JSON-RPC for the tool flow; the judge behaves like an external MCP client, not like the built-in UI agent.
-4. Metrics come from four sources: MCP tool responses, the SQLite task store (`--data-dir/relay.db`, read-only), `git status` in the host checkout, and `relay-daemon compose-context --all-strategies --no-sync`.
-5. Each `ground_truth_assertions` entry is compared against those metrics with exact equality (floats compared numerically, bools strictly).
+1. The fixture is copied into a scratch directory with LF-normalized text files (`core.autocrlf = false`), `git init`-ed, and committed cleanly (`initial_commit: "HEAD"`).
+2. The fault recipe injects the failure and submits a `TaskSpec` via `relay-daemon submit-task`.
+3. `relay-daemon mcp-stdio` is driven over JSON-RPC (`--mode scripted` deterministically; `--mode llm` via the live OpenAI-compatible tool loop with simulated human UI diff approval once `approval_required` is observed).
+4. Metrics come from four real sources: MCP tool outputs, read-only SQLite inspection (`--data-dir/relay.db`), `git status` / `git apply` on checkouts, and `relay-daemon compose-context --all-strategies --no-sync`.
+5. Every `ground_truth_assertions` entry is checked with strict equality (bools strict, numbers numeric). Case 3 additionally executes a real client `git apply` (not `--check`) against a dirty laptop checkout (`default=0.55`) and verifies exact byte preservation.
 
-No model is required: repairs are deterministic scripted patches, so the suite is a regression test rather than a model benchmark. Track 5 consumes these results for the 8-fault self-healing success-rate figure.
+## Determinism & Offline Policy
 
-## Determinism and offline policy
+- `UV_OFFLINE=1`, `UV_NO_CONFIG=1`, and cleared index variables ensure zero PyPI traffic and keep machine-local mirror URLs out of proposal diffs.
+- Case 1 repairs `tiny_stats` offline using `vendor/tiny_stats-0.1.0-py3-none-any.whl`.
+- Every case runs in an isolated temporary repo + `--data-dir`, cleaned up automatically unless `--keep` is passed.
+- `judge.sh` supports Windows Git Bash / MSYS (`.exe` detection + `uv run python`), macOS, and Linux.
 
-- `UV_OFFLINE=1`, `UV_NO_CONFIG=1`, and cleared index variables: no PyPI or machine-local mirror traffic, and no mirror URL leaks into a proposal diff.
-- The missing-dependency case installs `vendor/tiny_stats-0.1.0-py3-none-any.whl` from the fixture, so `uv add` and `uv run` stay offline.
-- Each case gets a fresh repo and a fresh `--data-dir`; cases never share SQLite state.
-- `elapsed_ms` is the only intentionally non-deterministic field and is never asserted.
+## Adding a Case
 
-## Adding a case
-
-1. Add `case_NN_<slug>.json` with a `kind` from `InjectedFaultKind` (`docs/contracts.md` §6) and assertions that reference metrics the judge can compute.
-2. Add a recipe in `run_chaos_suite.py` under `RECIPES` keyed by that `kind`, and populate the metric keys used by the JSON.
-3. Run the case in isolation with `--case <case_id> --keep`, inspect `resolved` repo/data dirs, then run the full suite.
-
-The suite refuses to start if any frozen fault kind lacks a case JSON.
+1. Add `case_NN_<slug>.json` with a `kind` from `InjectedFaultKind` (`docs/contracts.md` §6) and assertions matching computable metrics.
+2. Add scripted and LLM recipes in `run_chaos_suite.py` (`SCRIPTED_RECIPES` and `LLM_RECIPES`).
+3. Test isolated execution via `--case <case_id> --keep`, then re-run the full `--mode scripted` and `--mode llm` suites.

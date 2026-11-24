@@ -18,10 +18,10 @@ Run `python scripts/verify_calibration.py` (or pass `--repo <checkout>`). The sc
 
 | Gate | Check | Current result |
 |---|---|---|
-| 1 | 3 smoke runs all finish under 3s | worst 106 ms, median 59 ms |
+| 1 | 3 smoke runs all finish under 3s | worst 649 ms, median 228 ms |
 | 2 | `train_grid` output reproducible except `elapsed_ms`; `best_window = 28` | `best_mae = 2.16502`, 3 rows |
 | 3 | `alpha_sweep` reproducible, 9 rows (3 windows x 3 alphas) | best `window=28 alpha=0.5 mae=1.92274` |
-| 4 | Vendored wheel installs and imports offline | `tiny_stats.mean([1,2,3]) = 2.0` |
+| 4 | Preset runs leave checkout clean & vendored wheel installs offline in an isolated temp copy | `tiny_stats.mean([1,2,3]) = 2.0` (`--repo` untouched) |
 
 `elapsed_ms` is wall-clock telemetry and is excluded from the reproducibility comparison, both here and in the Track 5 plot data. The latest full run is recorded in `results/calibration-latest.txt` (four gates, `PASS`).
 
