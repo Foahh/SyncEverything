@@ -64,8 +64,8 @@ pub enum TaskState {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Type)]
 #[serde(rename_all = "snake_case")]
 pub enum PatchKind {
-    UvSpec,
-    FileEdits,
+    DependencySpec,
+    CodeDiff,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Type, JsonSchema)]
@@ -137,6 +137,8 @@ pub struct ProjectMeta {
     pub name: String,
     #[serde(default = "default_smoke_preset")]
     pub smoke_preset: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub package_manager: Option<String>,
 }
 
 fn default_smoke_preset() -> String {

@@ -103,7 +103,7 @@ test("a stale approval card cannot resolve a different proposal for the same tas
     active_proposal: {
       patch_id: "current-fix",
       task_id: taskId,
-      kind: "uv_spec" as const,
+      kind: "dependency_spec" as const,
       summary: "fix",
       diff_preview: "",
       worktree_branch: "task/test",

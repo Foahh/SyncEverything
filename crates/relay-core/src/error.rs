@@ -34,8 +34,8 @@ pub enum RelayError {
     #[error("git command failed: {0}")]
     Git(String),
 
-    #[error("uv command failed: {0}")]
-    Uv(String),
+    #[error("package manager ({manager}) error: {message}")]
+    PackageManager { manager: String, message: String },
 
     #[error("transport error: {0}")]
     Transport(String),

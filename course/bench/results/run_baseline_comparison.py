@@ -1043,9 +1043,9 @@ def run_dry_baseline_case(baseline: str, setup: dict[str, Any], daemon_bin: Path
                     "propose_worktree_patch",
                     {
                         "task_id": setup["relay_task_id"],
-                        "patch_kind": "uv_spec",
+                        "patch_kind": "dependency_spec",
                         "summary": "Install vendored tiny_stats wheel offline",
-                        "uv_spec": "./vendor/tiny_stats-0.1.0-py3-none-any.whl",
+                        "dependency_spec": "./vendor/tiny_stats-0.1.0-py3-none-any.whl",
                     },
                 )
             elif tid == "B4_defect_dirty_tree":
@@ -1058,7 +1058,7 @@ def run_dry_baseline_case(baseline: str, setup: dict[str, Any], daemon_bin: Path
                     "propose_worktree_patch",
                     {
                         "task_id": setup["relay_task_id"],
-                        "patch_kind": "file_edits",
+                        "patch_kind": "code_diff",
                         "summary": "Define DEFAULT_ALPHA = 0.35",
                         "edits": [
                             {
@@ -1130,7 +1130,7 @@ def system_prompt_for(baseline: str) -> str:
             "Rules:\n"
             "1. Inspect `get_dag_snapshot` and `list_handoffs` first to capture session decisions, constraints, and STALE quarantine warnings. `get_dag_snapshot` is the sole authoritative source (SSOT) for verified experiment metrics.\n"
             "2. NEVER cite a `stale` evidence node's metric or historical static text files as valid for HEAD when `fresh_evidence_count == 0`.\n"
-            "3. For queued tasks: call `run_preflight_in_worktree(task_id)`. If preflight fails: for missing Python module use `propose_worktree_patch(task_id=..., patch_kind='uv_spec', summary=..., uv_spec='./vendor/...')` pointing to any local `./vendor/*.whl` file found via `list_repo_files`; for a code bug, inspect `error_snippets` or call `read_worktree_file` and call `propose_worktree_patch(task_id=..., patch_kind='file_edits', summary=..., edits=[{\"file_path\": ..., \"old_text\": ..., \"new_text\": ...}])`.\n"
+            "3. For queued tasks: call `run_preflight_in_worktree(task_id)`. If preflight fails: for missing Python module use `propose_worktree_patch(task_id=..., patch_kind='dependency_spec', summary=..., dependency_spec='./vendor/...')` pointing to any local `./vendor/*.whl` file found via `list_repo_files`; for a code bug, inspect `error_snippets` or call `read_worktree_file` and call `propose_worktree_patch(task_id=..., patch_kind='code_diff', summary=..., edits=[{\"file_path\": ..., \"old_text\": ..., \"new_text\": ...}])`.\n"
             "4. Call `approve_and_execute_task(task_id)` first; if `approval_required` is returned, pause or mention approval is needed and proceed when approved."
         )
     extra = (

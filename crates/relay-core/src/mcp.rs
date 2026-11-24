@@ -190,23 +190,29 @@ impl RelayMcpServer {
     ) -> RelayResult<PatchProposal> {
         let task_id = parse_task_id(&args.task_id)?;
         match args.patch_kind.as_str() {
-            "uv_spec" => {
-                if args.uv_spec.as_deref().map(str::trim).is_none_or(str::is_empty) {
+            "dependency_spec" => {
+                if args
+                    .dependency_spec
+                    .as_deref()
+                    .map(str::trim)
+                    .is_none_or(str::is_empty)
+                {
                     return Err(RelayError::Internal(
-                        "patch_kind 'uv_spec' requires a non-empty 'uv_spec' string".into(),
+                        "patch_kind 'dependency_spec' requires a non-empty 'dependency_spec' string"
+                            .into(),
                     ));
                 }
             }
-            "file_edits" => {
+            "code_diff" => {
                 if args.edits.as_deref().is_none_or(|edits| edits.is_empty()) {
                     return Err(RelayError::Internal(
-                        "patch_kind 'file_edits' requires a non-empty 'edits' array".into(),
+                        "patch_kind 'code_diff' requires a non-empty 'edits' array".into(),
                     ));
                 }
             }
             kind => {
                 return Err(RelayError::Internal(format!(
-                    "unknown patch kind '{kind}' (expected 'uv_spec' or 'file_edits')"
+                    "unknown patch kind '{kind}' (expected 'dependency_spec' or 'code_diff')"
                 )));
             }
         }
@@ -385,7 +391,7 @@ impl RelayMcpContext {
             let summary = if report.smoke_passed {
                 "Smoke preflight passed".into()
             } else if let Some(module) = &report.detected_missing_module {
-                format!("Smoke preflight failed: missing Python module {module}")
+                format!("Smoke preflight failed: missing dependency {module}")
             } else {
                 format!("Smoke preflight failed (exit code {:?})", report.exit_code)
             };
@@ -439,30 +445,31 @@ impl RelayMcpContext {
         let handle = self.worktree(task).await?;
         let manifest = sandbox.task_manifest(handle.worktree_path())?;
         let patch_input = match args.patch_kind.as_str() {
-            "uv_spec" => PatchInput::UvSpec(
-                args.uv_spec
+            "dependency_spec" => PatchInput::DependencySpec(
+                args.dependency_spec
                     .as_deref()
                     .map(str::trim)
                     .filter(|s| !s.is_empty())
                     .ok_or_else(|| {
                         RelayError::Internal(
-                            "patch_kind 'uv_spec' requires a non-empty 'uv_spec' string".into(),
+                            "patch_kind 'dependency_spec' requires a non-empty 'dependency_spec' string"
+                                .into(),
                         )
                     })?,
             ),
-            "file_edits" => PatchInput::FileEdits(
+            "code_diff" => PatchInput::CodeDiff(
                 args.edits
                     .as_deref()
                     .filter(|edits| !edits.is_empty())
                     .ok_or_else(|| {
                         RelayError::Internal(
-                            "patch_kind 'file_edits' requires a non-empty 'edits' array".into(),
+                            "patch_kind 'code_diff' requires a non-empty 'edits' array".into(),
                         )
                     })?,
             ),
             kind => {
                 return Err(RelayError::Internal(format!(
-                    "unknown patch kind '{kind}' (expected 'uv_spec' or 'file_edits')"
+                    "unknown patch kind '{kind}' (expected 'dependency_spec' or 'code_diff')"
                 )));
             }
         };
@@ -709,7 +716,7 @@ impl RelayMcpServer {
     }
 
     #[tool(
-        description = "Compare a target Git commit's pyproject.toml and uv.lock environment fingerprint against the Host environment, listing any missing Python packages."
+        description = "Compare a target Git commit's dependency manifest and lockfile fingerprint against the Host environment across supported package managers (uv, cargo, bun, pnpm, yarn, npm, generic), reporting ecosystem, package_manager, missing packages, and dependency drift notes."
     )]
     async fn check_env_diff(
         &self,
@@ -749,7 +756,7 @@ impl RelayMcpServer {
     }
 
     #[tool(
-        description = "Read a UTF-8 file with 1-based line numbers inside the isolated Git worktree for task_id (read-only; blocks .git, .venv, .relay, .env*, and binary files). Use this when you need exact lines before calling propose_worktree_patch with file_edits."
+        description = "Read a UTF-8 file with 1-based line numbers inside the isolated Git worktree for task_id (read-only; blocks .git, .venv, .relay, .env*, and binary files). Use this when you need exact lines before calling propose_worktree_patch with code_diff."
     )]
     async fn read_worktree_file(
         &self,
@@ -759,7 +766,7 @@ impl RelayMcpServer {
     }
 
     #[tool(
-        description = "After a failed smoke preflight (or requested code fix), apply a candidate fix inside the task's isolated Git worktree, re-run smoke verification, and persist the PatchProposal. Set patch_kind to 'uv_spec' with uv_spec='<package or wheel path>' for missing Python dependencies, or 'file_edits' with edits=[{file_path, old_text, new_text}] for exact search-and-replace edits (omit/null old_text to overwrite or create an entire file). Failed patches roll back the worktree cleanly for retry."
+        description = "After a failed smoke preflight (or requested code fix), apply a candidate fix inside the task's isolated Git worktree, re-run smoke verification, and persist the PatchProposal. Set patch_kind to 'dependency_spec' with dependency_spec='<package spec or local wheel path>' for missing dependencies managed by the repository's package manager (uv, cargo, bun, pnpm, yarn, npm), or 'code_diff' with edits=[{file_path, old_text, new_text}] for exact search-and-replace edits (omit/null old_text to overwrite or create an entire file). Failed patches roll back the worktree cleanly for retry."
     )]
     async fn propose_worktree_patch(
         &self,
@@ -785,7 +792,7 @@ const RELAY_MCP_INSTRUCTIONS: &str = concat!(
     "Rules:\n",
     "1. Treat get_dag_snapshot as the sole authoritative source (SSOT) for experiment metrics. Always call get_dag_snapshot before citing metrics. When fresh_evidence_count == 0 or metric_authority_note is set, NEVER cite stale nodes or historical numbers from static repository text files or handoff notes as valid for current HEAD.\n",
     "2. Never execute arbitrary shell commands; only run whitelisted presets through Relay task tools.\n",
-    "3. For a task_id, follow: run_preflight_in_worktree -> inspect stderr_tail/error_snippets (and read_worktree_file if more context is needed) -> propose_worktree_patch (patch_kind='uv_spec' or 'file_edits') -> approve_and_execute_task.\n",
+    "3. For a task_id, follow: run_preflight_in_worktree -> inspect stderr_tail/error_snippets (and read_worktree_file if more context is needed) -> propose_worktree_patch (patch_kind='dependency_spec' or 'code_diff') -> approve_and_execute_task.\n",
     "4. If approve_and_execute_task returns approval_required, pause and ask the user to approve the diff rather than retrying in a loop."
 );
 

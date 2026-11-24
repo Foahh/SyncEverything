@@ -250,6 +250,8 @@ async function runMockCopilotTurn(
         JSON.stringify(
           {
             commit_sha: mockState.dag.head_commit_sha ?? "HEAD",
+            ecosystem: "generic",
+            package_manager: "generic",
             in_sync: true,
             missing_packages: [],
           },

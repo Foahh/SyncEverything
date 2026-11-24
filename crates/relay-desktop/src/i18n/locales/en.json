@@ -143,13 +143,13 @@
     "approvalRunRejectedNote": "Run cancelled.",
     "suggestions": {
       "checkOutdated": "Check if any experiment results are outdated",
-      "inspectEnv": "Inspect host sync status and Python environment",
+      "inspectEnv": "Inspect host sync status and project environment",
       "runAndCheck": "Inspect the project graph and run an available preset"
     },
     "tools": {
       "inspect_sync_status": "Checked sync status",
       "list_handoffs": "Listed handoffs",
-      "check_env_diff": "Checked Python environment",
+      "check_env_diff": "Checked project environment",
       "get_dag_snapshot": "Inspected project graph",
       "read_evidence_log": "Read verified result log",
       "run_preflight_in_worktree": "Ran isolated pre-check",

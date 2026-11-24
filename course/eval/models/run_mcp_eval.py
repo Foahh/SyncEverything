@@ -8,7 +8,7 @@ qwen3.5:4b/9b or Cloud APIs) across 4 standardized tool-calling scenarios:
   S1_sync_and_handoffs    — Read-only sync status & handoff tool selection
   S2_stale_evidence_trap  — Deterministic STALE anti-hallucination guard
   S3_env_diff_diagnosis   — Environment fingerprint & missing-package diff
-  S4_code_defect_heal     — Isolated worktree preflight -> file_edits patch -> approval gate
+  S4_code_defect_heal     — Isolated worktree preflight -> code_diff patch -> approval gate
 
 Zero third-party Python dependencies (pure Python 3.11+ stdlib).
 """
@@ -813,7 +813,7 @@ def run_s4_code_defect_self_heal(daemon: Path, system_prompt: str, cfg: argparse
             f"Task {task_id} is queued for commit {head}. "
             "Follow Relay's safe Host workflow: run preflight in its isolated worktree; "
             "if smoke fails, inspect the traceback and error_snippets (and call read_worktree_file if needed), "
-            "then call propose_worktree_patch with `patch_kind: \"file_edits\"` and exact `edits` "
+            "then call propose_worktree_patch with `patch_kind: \"code_diff\"` and exact `edits` "
             "to define `DEFAULT_ALPHA = 0.35` in `src/forecast.py`; once smoke passes, call approve_and_execute_task "
             "and stop cleanly when approval_required is returned."
         )
@@ -829,7 +829,7 @@ def run_s4_code_defect_self_heal(daemon: Path, system_prompt: str, cfg: argparse
                     "propose_worktree_patch",
                     {
                         "task_id": task_id,
-                        "patch_kind": "file_edits",
+                        "patch_kind": "code_diff",
                         "summary": "Define DEFAULT_ALPHA = 0.35 to fix NameError in main()",
                         "edits": [
                             {
@@ -846,7 +846,7 @@ def run_s4_code_defect_self_heal(daemon: Path, system_prompt: str, cfg: argparse
             else None
         )
         dry_final = (
-            f"Verified file_edits patch for task {task_id} in isolated worktree; "
+            f"Verified code_diff patch for task {task_id} in isolated worktree; "
             "waiting for user approval (approval_required)."
         )
 

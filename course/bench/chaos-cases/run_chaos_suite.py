@@ -83,8 +83,8 @@ Mandatory workflow & safety rules:
 1. Never invent metrics, commit SHAs, or execution outcomes without tool output.
 2. `get_dag_snapshot` is the SOLE authoritative source (SSOT) for experiment metrics. Always call `get_dag_snapshot` before answering questions about experiment metrics. Report numeric results ONLY from `fresh` evidence nodes for current HEAD. When `fresh_evidence_count == 0` or `metric_authority_note` is present, NEVER cite redacted/stale node metrics OR historical numbers from static repository text files, logs, or handoff notes as valid for current HEAD; explain why prior evidence is stale and recommend re-running. Do NOT retry `read_evidence_log` if it refuses a STALE node.
 3. For queued tasks, follow: `run_preflight_in_worktree` -> if smoke fails (or a code fix is requested), inspect `stderr_tail` / `error_snippets` (and call `read_worktree_file` if you need more lines) and call `propose_worktree_patch` -> then call `approve_and_execute_task`.
-4. The host runs `uv` strictly offline (`UV_OFFLINE=1`). If a module is missing, inspect `list_repo_files` to find any vendored wheel (e.g. `./vendor/...`) and call `propose_worktree_patch(task_id=..., patch_kind="uv_spec", summary=..., uv_spec="./vendor/...")`.
-5. When calling `propose_worktree_patch(task_id=..., patch_kind="file_edits", summary=..., edits=[...])`, pass a JSON array of edit objects `{"file_path": "<relative path>", "old_text": "<exact unique text>", "new_text": "<replacement>"}`. Copy `old_text` verbatim from `error_snippets` or `read_worktree_file` so it matches uniquely. Omit `old_text` (or set `"old_text": null`) to overwrite or create an entire file (ideal for restoring a corrupted lockfile). If smoke fails, the worktree is rolled back cleanly for retry.
+4. The host runs `uv` strictly offline (`UV_OFFLINE=1`). If a module is missing, inspect `list_repo_files` to find any vendored wheel (e.g. `./vendor/...`) and call `propose_worktree_patch(task_id=..., patch_kind="dependency_spec", summary=..., dependency_spec="./vendor/...")`.
+5. When calling `propose_worktree_patch(task_id=..., patch_kind="code_diff", summary=..., edits=[...])`, pass a JSON array of edit objects `{"file_path": "<relative path>", "old_text": "<exact unique text>", "new_text": "<replacement>"}`. Copy `old_text` verbatim from `error_snippets` or `read_worktree_file` so it matches uniquely. Omit `old_text` (or set `"old_text": null`) to overwrite or create an entire file (ideal for restoring a corrupted lockfile). If smoke fails, the worktree is rolled back cleanly for retry.
 6. Respect the human approval gate: call `approve_and_execute_task` WITHOUT `approved_via_ui=true` first so Relay surfaces `approval_required`, unless the user prompt tells you approval was already granted (e.g. a duplicate replay after lost response) or a reviewer approves in a follow-up message.
 """
 
@@ -742,13 +742,13 @@ def scripted_missing_dependency(ctx: dict[str, Any]) -> dict[str, Any]:
             "propose_worktree_patch",
             {
                 "task_id": task_id,
-                "patch_kind": "uv_spec",
+                "patch_kind": "dependency_spec",
                 "summary": "Declare tiny_stats from the offline vendor wheel",
-                "uv_spec": VENDOR_WHEEL,
+                "dependency_spec": VENDOR_WHEEL,
             },
         )
         if is_err or proposal is None:
-            raise RuntimeError(f"uv_spec proposal failed: {text}")
+            raise RuntimeError(f"dependency_spec proposal failed: {text}")
         metrics["proposal_smoke_verified"] = proposal["smoke_verified"]
 
         # Trigger the genuine approval gate BEFORE setting approved_via_ui=True.
@@ -858,7 +858,7 @@ def scripted_same_line_conflict(ctx: dict[str, Any]) -> dict[str, Any]:
             "propose_worktree_patch",
             {
                 "task_id": task_id,
-                "patch_kind": "file_edits",
+                "patch_kind": "code_diff",
                 "summary": "Raise the default EWMA alpha to 0.45",
                 "edits": [
                     {
@@ -870,7 +870,7 @@ def scripted_same_line_conflict(ctx: dict[str, Any]) -> dict[str, Any]:
             },
         )
         if is_err or proposal is None:
-            raise RuntimeError(f"file_edits proposal failed: {text}")
+            raise RuntimeError(f"code_diff proposal failed: {text}")
         is_err, response, text = daemon.call(
             "approve_and_execute_task",
             {"task_id": task_id, "patch_id": proposal["patch_id"], "approved_via_ui": True},
@@ -1023,7 +1023,7 @@ def scripted_runtime_exception(ctx: dict[str, Any]) -> dict[str, Any]:
             "propose_worktree_patch",
             {
                 "task_id": task_id,
-                "patch_kind": "file_edits",
+                "patch_kind": "code_diff",
                 "summary": "Define DEFAULT_ALPHA = 0.35 before the argparse default is evaluated",
                 "edits": [
                     {
@@ -1035,7 +1035,7 @@ def scripted_runtime_exception(ctx: dict[str, Any]) -> dict[str, Any]:
             },
         )
         if is_err or proposal is None:
-            raise RuntimeError(f"file_edits proposal failed: {text}")
+            raise RuntimeError(f"code_diff proposal failed: {text}")
         metrics["proposal_smoke_verified"] = proposal["smoke_verified"]
 
         is_err, response, text = daemon.call(
@@ -1089,7 +1089,7 @@ def scripted_corrupted_lock(ctx: dict[str, Any]) -> dict[str, Any]:
             "propose_worktree_patch",
             {
                 "task_id": task_id,
-                "patch_kind": "file_edits",
+                "patch_kind": "code_diff",
                 "summary": "Restore a valid uv.lock so the offline environment can start",
                 "edits": [
                     {
@@ -1623,7 +1623,7 @@ def llm_same_line_conflict(ctx: dict[str, Any], case: dict[str, Any], llm_cfg: d
         f"Queued Task ID: {task_id}\n"
         f"Active repository HEAD: {head_sha(repo)}\n"
         f"User request: {case['user_prompt']}\n"
-        "On the host, run preflight, inspect `src/forecast.py` with `read_worktree_file`, propose a `file_edits` patch "
+        "On the host, run preflight, inspect `src/forecast.py` with `read_worktree_file`, propose a `code_diff` patch "
         "changing the `--alpha` argparse `default=0.35` to `default=0.45`, verify smoke preflight, respect human approval, "
         "and run `train_grid` in the isolated worktree."
     )
@@ -1706,7 +1706,7 @@ def llm_runtime_exception(ctx: dict[str, Any], case: dict[str, Any], llm_cfg: di
         f"Queued Task ID: {task_id}\n"
         f"User request: {case['user_prompt']}\n"
         "Run preflight first, inspect `error_snippets` (and `read_worktree_file` on `src/forecast.py` if needed), "
-        "and define `DEFAULT_ALPHA = 0.35` via `propose_worktree_patch(patch_kind=\"file_edits\", ...)`."
+        "and define `DEFAULT_ALPHA = 0.35` via `propose_worktree_patch(patch_kind=\"code_diff\", ...)`."
     )
     with Daemon(daemon_bin, repo, data) as daemon:
         agent_run = run_llm_agent_loop(daemon, repo, prompt, llm_cfg, allow_human_approval=True)
@@ -1745,7 +1745,7 @@ def llm_corrupted_lock(ctx: dict[str, Any], case: dict[str, Any], llm_cfg: dict[
         f"Active repository HEAD: {commit}\n"
         f"Queued Task ID: {task_id}\n"
         f"User request: {case['user_prompt']}\n"
-        "Run preflight first, inspect `uv.lock` and `pyproject.toml` with `read_worktree_file`, propose a `file_edits` "
+        "Run preflight first, inspect `uv.lock` and `pyproject.toml` with `read_worktree_file`, propose a `code_diff` "
         "patch (you may omit/null `old_text` to overwrite `uv.lock` cleanly with valid TOML matching `pyproject.toml`), "
         "verify smoke, and run after approval."
     )

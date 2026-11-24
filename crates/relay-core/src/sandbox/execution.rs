@@ -1,3 +1,4 @@
+use super::pm;
 use super::{
     WorktreeSandbox, git_command, git_output, load_manifest, resolve_preset,
     validate_confined_path_components, validate_confined_relative_path, working_diff,
@@ -18,6 +19,8 @@ use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 use uuid::Uuid;
 
+pub use super::pm::uv::detect_missing_python_module;
+
 const SMOKE_TAIL_LINES: usize = 30;
 const ERROR_SNIPPET_RADIUS: usize = 10;
 const MAX_ERROR_SNIPPETS: usize = 3;
@@ -31,15 +34,15 @@ pub struct ErrorSourceSnippet {
 
 #[derive(Debug, Clone, Copy)]
 pub enum PatchInput<'a> {
-    UvSpec(&'a str),
-    FileEdits(&'a [FileEdit]),
+    DependencySpec(&'a str),
+    CodeDiff(&'a [FileEdit]),
 }
 
 impl PatchInput<'_> {
     pub fn kind(&self) -> PatchKind {
         match self {
-            Self::UvSpec(_) => PatchKind::UvSpec,
-            Self::FileEdits(_) => PatchKind::FileEdits,
+            Self::DependencySpec(_) => PatchKind::DependencySpec,
+            Self::CodeDiff(_) => PatchKind::CodeDiff,
         }
     }
 }
@@ -78,6 +81,19 @@ impl WorktreeSandbox {
         Ok(&manifest.project.smoke_preset)
     }
 
+    fn authorized_package_manager<'a>(
+        &self,
+        manifest: &'a RelayManifest,
+    ) -> RelayResult<Option<&'a str>> {
+        let host_pm = load_manifest(self.repo_root())?.project.package_manager;
+        if host_pm != manifest.project.package_manager {
+            return Err(RelayError::Internal(
+                "package_manager differs from the host relay.toml".into(),
+            ));
+        }
+        Ok(manifest.project.package_manager.as_deref())
+    }
+
     fn shared_cargo_target_dir(&self) -> RelayResult<PathBuf> {
         Ok(std::path::absolute(&self.worktrees_base)?.join("cargo-target"))
     }
@@ -105,7 +121,7 @@ impl WorktreeSandbox {
         let program = Path::new(&preset.program);
         #[cfg(windows)]
         let launcher = match std::env::var_os("PATH") {
-            Some(path) => resolve_windows_package_launcher(&preset.program, &args, &path)?,
+            Some(path) => pm::security::resolve_windows_package_launcher(&preset.program, &args, &path)?,
             None => None,
         };
         #[cfg(windows)]
@@ -206,6 +222,7 @@ impl WorktreeSandbox {
                 &BTreeMap::new(),
             )
             .await?;
+        let adapter = pm::resolve_adapter(worktree_path, self.authorized_package_manager(manifest)?)?;
         let error_snippets = if output.success {
             Vec::new()
         } else {
@@ -219,7 +236,7 @@ impl WorktreeSandbox {
             exit_code: output.exit_code,
             stdout_tail: tail_lines(&output.stdout),
             stderr_tail: tail_lines(&output.stderr),
-            detected_missing_module: detect_missing_python_module(&output.stderr),
+            detected_missing_module: adapter.detect_missing_dependency(&output.stderr),
             error_snippets,
             raw_log: output.raw_log,
         })
@@ -239,14 +256,15 @@ impl WorktreeSandbox {
             .await?;
         let worktree_path = std::path::absolute(worktree_path)?;
         let smoke_preset = self.authorized_smoke_preset(manifest)?;
+        let adapter = pm::resolve_adapter(&worktree_path, self.authorized_package_manager(manifest)?)?;
         let kind = patch.kind();
         let diff_before = working_diff(&worktree_path).await?;
         let apply_result = match patch {
-            PatchInput::UvSpec(spec) => add_uv_dependency(&worktree_path, spec).await,
-            PatchInput::FileEdits(edits) => apply_file_edits(&worktree_path, edits).await,
+            PatchInput::DependencySpec(spec) => adapter.add_dependency(&worktree_path, spec).await,
+            PatchInput::CodeDiff(edits) => apply_code_diff_edits(&worktree_path, edits).await,
         };
         if let Err(error) = apply_result {
-            if matches!(patch, PatchInput::UvSpec(_)) {
+            if matches!(patch, PatchInput::DependencySpec(_)) {
                 let _ = rollback_worktree(&worktree_path).await;
             }
             return Err(error);
@@ -271,7 +289,15 @@ impl WorktreeSandbox {
                 return Err(error);
             }
         };
-        // Smoke can reconcile a tracked lockfile. Approval must cover the final diff.
+        // Smoke can reconcile or create a lockfile. Approval must cover the complete final diff.
+        if smoke.success {
+            pm::security::stage_intent_to_add(
+                adapter.name(),
+                &worktree_path,
+                adapter.lockfile_paths(),
+            )
+            .await?;
+        }
         let diff_preview = working_diff(&worktree_path).await?;
         if !smoke.success {
             rollback_worktree(&worktree_path).await?;
@@ -294,54 +320,10 @@ impl WorktreeSandbox {
     }
 }
 
-#[cfg(windows)]
-fn is_safe_cmd_arg(arg: &str) -> bool {
-    !arg.is_empty()
-        && arg.bytes().all(|byte| {
-            byte.is_ascii_alphanumeric()
-                || matches!(byte, b'-' | b'_' | b'.' | b':' | b'/' | b'@' | b'+' | b'=')
-        })
-}
-
-#[cfg(windows)]
-fn resolve_windows_package_launcher(
-    program: &str,
-    args: &[String],
-    search_path: &std::ffi::OsStr,
-) -> RelayResult<Option<std::path::PathBuf>> {
-    // Standard Windows npm/pnpm/yarn installs often expose only a .cmd shim.
-    // Prefer a native .exe if available; otherwise allow .cmd only when every
-    // resolved argument belongs to a strict cmd.exe-inert character allowlist.
-    if !matches!(program, "npm" | "pnpm" | "yarn") {
-        return Ok(None);
-    }
-    let mut cmd_candidate = None;
-    for dir in std::env::split_paths(search_path).filter(|dir| dir.is_absolute()) {
-        let exe = dir.join(format!("{program}.exe"));
-        if exe.is_file() {
-            return Ok(Some(exe));
-        }
-        if cmd_candidate.is_none() {
-            let cmd = dir.join(format!("{program}.cmd"));
-            if cmd.is_file() {
-                cmd_candidate = Some(cmd);
-            }
-        }
-    }
-    let Some(cmd) = cmd_candidate else {
-        return Ok(None);
-    };
-    if let Some(unsafe_arg) = args.iter().find(|arg| !is_safe_cmd_arg(arg)) {
-        return Err(RelayError::Internal(format!(
-            "argument '{unsafe_arg}' contains characters not allowed for Windows .cmd launcher '{program}'"
-        )));
-    }
-    Ok(Some(cmd))
-}
-
 #[cfg(all(windows, test))]
 #[test]
 fn package_manager_shims_allow_safe_custom_scripts_and_reject_unsafe_chars() {
+    use pm::security::resolve_windows_package_launcher;
     let dir = tempfile::tempdir().unwrap();
 
     for (program, args) in [
@@ -396,6 +378,7 @@ fn package_manager_shims_allow_safe_custom_scripts_and_reject_unsafe_chars() {
 #[cfg(all(windows, test))]
 #[test]
 fn package_manager_launcher_prefers_exe_over_cmd() {
+    use pm::security::resolve_windows_package_launcher;
     let dir = tempfile::tempdir().unwrap();
     let exe = dir.path().join("npm.exe");
     let cmd = dir.path().join("npm.cmd");
@@ -412,7 +395,7 @@ fn package_manager_launcher_prefers_exe_over_cmd() {
     assert_eq!(resolved, Some(exe));
 }
 
-fn worktree_command(
+pub(crate) fn worktree_command(
     program: impl AsRef<std::ffi::OsStr>,
     worktree_path: &Path,
     cargo_target_dir: Option<&Path>,
@@ -497,40 +480,6 @@ fn preset_args(preset: &CommandPreset, params: &BTreeMap<String, String>) -> Rel
     Ok(args)
 }
 
-async fn add_uv_dependency(worktree_path: &Path, spec: &str) -> RelayResult<()> {
-    for filename in ["pyproject.toml", "uv.lock"] {
-        match tokio::fs::symlink_metadata(worktree_path.join(filename)).await {
-            Ok(metadata) if !metadata.is_file() => {
-                return Err(RelayError::Uv(format!("{filename} must be a regular file")));
-            }
-            Ok(_) => {}
-            Err(error) if filename == "uv.lock" && error.kind() == io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error.into()),
-        }
-    }
-
-    let output = worktree_command("uv", worktree_path, None)
-        .args(["add", "--no-sync", "--", spec])
-        .stdin(Stdio::null())
-        .kill_on_drop(true)
-        .output()
-        .await?;
-    if !output.status.success() {
-        return Err(RelayError::Uv(
-            String::from_utf8_lossy(&output.stderr).trim().to_owned(),
-        ));
-    }
-    // A lockfile generated from scratch must also appear in the proposal.
-    git_output(git_command(worktree_path).args([
-        "add",
-        "--intent-to-add",
-        "--",
-        "uv.lock",
-    ]))
-    .await?;
-    Ok(())
-}
-
 async fn rollback_worktree(worktree_path: &Path) -> RelayResult<()> {
     git_output(git_command(worktree_path).args(["reset", "--hard", "HEAD"])).await?;
     git_output(git_command(worktree_path).args(["clean", "-fd"])).await?;
@@ -544,10 +493,10 @@ struct StagedEditFile {
     existed: bool,
 }
 
-async fn apply_file_edits(worktree_path: &Path, edits: &[FileEdit]) -> RelayResult<()> {
+async fn apply_code_diff_edits(worktree_path: &Path, edits: &[FileEdit]) -> RelayResult<()> {
     if edits.is_empty() {
         return Err(RelayError::Internal(
-            "file_edits requires at least one edit entry".into(),
+            "code_diff requires at least one edit entry".into(),
         ));
     }
     let canonical_root = std::fs::canonicalize(worktree_path)?;
@@ -572,7 +521,7 @@ async fn apply_file_edits(worktree_path: &Path, edits: &[FileEdit]) -> RelayResu
                         Ok(meta) => {
                             if meta.file_type().is_symlink() {
                                 return Err(RelayError::Internal(format!(
-                                    "symlink target '{display_path}' is not allowed in file_edits"
+                                    "symlink target '{display_path}' is not allowed in code_diff"
                                 )));
                             }
                             if !meta.is_file() {
@@ -630,7 +579,7 @@ async fn apply_file_edits(worktree_path: &Path, edits: &[FileEdit]) -> RelayResu
                         Ok(meta) => {
                             if meta.file_type().is_symlink() {
                                 return Err(RelayError::Internal(format!(
-                                    "symlink target '{display_path}' is not allowed in file_edits"
+                                    "symlink target '{display_path}' is not allowed in code_diff"
                                 )));
                             }
                             if meta.is_dir() {
@@ -1116,18 +1065,6 @@ fn resolve_snippet_target(canonical_root: &Path, raw_path: &str) -> Option<(Stri
     }
     let display = rel_display_path(resolved);
     (!display.is_empty()).then_some((display, full))
-}
-
-/// Extract the last missing-module diagnostic from a Python traceback.
-pub fn detect_missing_python_module(stderr: &str) -> Option<String> {
-    stderr.lines().rev().find_map(|line| {
-        let module = line
-            .trim_start()
-            .strip_prefix("ModuleNotFoundError: No module named '")?
-            .split_once('\'')?
-            .0;
-        (!module.is_empty()).then(|| module.to_owned())
-    })
 }
 
 pub fn extract_metrics_json(stdout: &str) -> Option<JsonValue> {

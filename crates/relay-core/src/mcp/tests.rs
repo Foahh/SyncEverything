@@ -198,6 +198,8 @@ async fn mcp_end_to_end_preflight_patch_approval_and_stale_block() {
         .await
         .unwrap();
     assert!(diff.in_sync);
+    assert_eq!(diff.ecosystem, "python");
+    assert_eq!(diff.package_manager, "uv");
 
     let report = server
         .handle_run_preflight(RunPreflightArgs { task_id: task_id.to_string() })
@@ -226,9 +228,9 @@ async fn mcp_end_to_end_preflight_patch_approval_and_stale_block() {
     let failed_patch = server
         .handle_propose_patch(ProposeWorktreePatchArgs {
             task_id: task_id.to_string(),
-            patch_kind: "file_edits".into(),
+            patch_kind: "code_diff".into(),
             summary: "Incomplete edit that still fails smoke".into(),
-            uv_spec: None,
+            dependency_spec: None,
             edits: Some(vec![FileEdit {
                 file_path: "src/app.py".into(),
                 old_text: Some("import json\n".into()),
@@ -245,9 +247,9 @@ async fn mcp_end_to_end_preflight_patch_approval_and_stale_block() {
     let patch = server
         .handle_propose_patch(ProposeWorktreePatchArgs {
             task_id: task_id.to_string(),
-            patch_kind: "file_edits".into(),
+            patch_kind: "code_diff".into(),
             summary: "Define the smoke message".into(),
-            uv_spec: None,
+            dependency_spec: None,
             edits: Some(fix_edits()),
         })
         .await

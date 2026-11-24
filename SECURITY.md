@@ -33,7 +33,7 @@ SyncEverything (powered by the Relay engine) coordinates Git state and task exec
 
 ### 2. Isolated `git worktree` Boundaries
 
-- Preflights, self-healing proposals (`uv_spec`, `file_edits`), and preset executions run inside per-task Git worktrees created from the requested `base_commit_sha`, leaving the user's main working checkout untouched.
+- Preflights, self-healing proposals (`dependency_spec`, `code_diff`), and preset executions run inside per-task Git worktrees created from the requested `base_commit_sha`, leaving the user's main working checkout untouched.
 - If a candidate self-healing patch fails smoke verification, tracked and untracked worktree modifications are automatically rolled back.
 - The `read_worktree_file` MCP tool enforces strict canonical path confinement inside the task worktree and blocks `..` traversal, symlink escapes outside the worktree, binary files, and sensitive directories/files (`.git/`, `.venv/`, `.relay/`, `.env*`).
 

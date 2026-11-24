@@ -1,7 +1,7 @@
 {
   "case_id": "chaos-01-missing-dep",
   "title": "Missing Python Dependency Auto-Healing",
-  "description": "Laptop introduces an import of the vendored `tiny_stats` helper without declaring it in `pyproject.toml` / `uv.lock`. Host detects the failure inside an isolated `git worktree`, proposes a `uv_spec` patch against the offline vendor wheel, verifies smoke preflight, and pauses for human Diff approval before executing the 3-window grid.",
+  "description": "Laptop introduces an import of the vendored `tiny_stats` helper without declaring it in `pyproject.toml` / `uv.lock`. Host detects the failure inside an isolated `git worktree`, proposes a `dependency_spec` patch against the offline vendor wheel, verifies smoke preflight, and pauses for human Diff approval before executing the 3-window grid.",
   "initial_commit": "HEAD",
   "injected_fault": {
     "kind": "missing_dependency",
@@ -34,7 +34,7 @@
     },
     {
       "assertion_id": "smoke_verified_before_elicitation",
-      "description": "Candidate uv_spec patch passes smoke preflight inside the isolated worktree prior to approval",
+      "description": "Candidate dependency_spec patch passes smoke preflight inside the isolated worktree prior to approval",
       "metric_key": "proposal_smoke_verified",
       "expected_value": true
     },

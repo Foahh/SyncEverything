@@ -253,7 +253,7 @@ export type LlmSettingsView_Serialize = {
 
 export type NodeKind = { kind: "decision"; rationale: string; constraints: string[] } | { kind: "artifact"; git_commit_sha: string; env_fingerprint: string; working_tree_dirty: boolean; changed_files: string[] } | { kind: "evidence"; task_id: string; preset: string; metrics_json: JsonValue; log_blob_hash: string };
 
-export type PatchKind = "uv_spec" | "file_edits";
+export type PatchKind = "dependency_spec" | "code_diff";
 
 export type PatchProposal = {
 	patch_id: string,

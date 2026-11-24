@@ -36,7 +36,7 @@ pub struct RunPreflightArgs {
 pub struct ReadWorktreeFileArgs {
     #[schemars(description = "UUIDv7 of the task whose isolated worktree should be read")]
     pub task_id: String,
-    #[schemars(description = "Worktree-relative path to a UTF-8 file (e.g. 'src/main.py' or 'uv.lock')")]
+    #[schemars(description = "Worktree-relative path to a UTF-8 file (e.g. 'src/main.py', 'Cargo.toml', or 'package.json')")]
     pub file_path: String,
     #[schemars(description = "Optional 1-based inclusive start line (default 1)")]
     #[serde(default)]
@@ -60,14 +60,14 @@ pub struct WorktreeFileView {
 pub struct ProposeWorktreePatchArgs {
     #[schemars(description = "UUIDv7 of the task undergoing self-healing")]
     pub task_id: String,
-    #[schemars(description = "Patch type: 'uv_spec' for dependency fix or 'file_edits' for exact search-and-replace / full-file edits")]
+    #[schemars(description = "Patch type: 'dependency_spec' for structured package-manager dependency addition or 'code_diff' for exact search-and-replace / full-file edits")]
     pub patch_kind: String,
     #[schemars(description = "Short human-readable explanation of the root cause and fix")]
     pub summary: String,
-    #[schemars(description = "Required when patch_kind is 'uv_spec': a single PEP-508 package spec or local wheel path (e.g. 'requests>=2.32' or './vendor/pkg.whl')")]
+    #[schemars(description = "Required when patch_kind is 'dependency_spec': a single package spec for the active package manager (e.g. 'requests>=2.32', './vendor/pkg.whl', 'serde@1.0', or 'zod@3.23.8')")]
     #[serde(default)]
-    pub uv_spec: Option<String>,
-    #[schemars(description = "Required when patch_kind is 'file_edits': ordered list of file edits applied atomically in the task worktree")]
+    pub dependency_spec: Option<String>,
+    #[schemars(description = "Required when patch_kind is 'code_diff': ordered list of file edits applied atomically in the task worktree")]
     #[serde(default)]
     pub edits: Option<Vec<FileEdit>>,
 }
@@ -104,6 +104,8 @@ pub enum ApprovalExecutionResponse {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Type)]
 pub struct EnvDiffReport {
     pub commit_sha: String,
+    pub ecosystem: String,
+    pub package_manager: String,
     pub repo_env_fingerprint: String,
     pub host_env_fingerprint: String,
     pub in_sync: bool,

@@ -6,7 +6,7 @@ Eight declarative fault-injection cases plus a dual-mode judge (`scripted` offli
 
 | Case | `injected_fault.kind` | Scenario | Expected tool trace | Core assertions |
 |---|---|---|---|---|
-| `chaos-01-missing-dep` | `missing_dependency` | Undeclared `tiny_stats` import → offline `uv_spec` wheel repair | check env → preflight → propose → approve | missing module detected, real `ApprovalRequired` gate verified, 1 fresh evidence, main tree clean |
+| `chaos-01-missing-dep` | `missing_dependency` | Undeclared `tiny_stats` import → offline `dependency_spec` wheel repair | check env → preflight → propose → approve | missing module detected, real `ApprovalRequired` gate verified, 1 fresh evidence, main tree clean |
 | `chaos-02-upstream-edit` | `upstream_code_edit` | Laptop commits a new alpha default after the host result | preflight → approve → snapshot → read log | 1 stale evidence, 0 fresh, task stays `completed`, `STALE` error block enforced |
 | `chaos-03-same-line-conflict` | `same_line_conflict` | Laptop holds an uncommitted edit on the patched line | preflight → propose → approve | real `git apply` fails on client, client edit byte-preserved, host tree clean |
 | `chaos-04-mid-run-disconnect` | `mid_run_disconnect` | Daemon killed cleanly mid-smoke preflight, then restarted | preflight → sync status → handoffs → approve | state persisted `preflight_running`, preflight resumes, 1 fresh evidence, task `completed` |
@@ -52,7 +52,7 @@ uv run python course/bench/chaos-cases/run_chaos_suite.py \
 Latest verified runs (Windows workstation):
 - **Scripted + P2P Gate**: **8/8 PASS** (`tool_recall = 1.00`, `8/8` MCP tools covered, `sandbox-dual` single-machine loopback **PASS** in `976.6 ms`; see `results/chaos-report.md`).
 - **Live Cloud LLM (`deepseek-flash`)**: **8/8 PASS (100.0%)**, Self-Heal **4/4 (100.0%)**, Avg Tool Recall **1.000**, Retries **0**, Stale Hallucinations **0** (`299,127` tokens; see `results/chaos-llm-report.md`).
-- **Live Local Ollama (`qwen3.5:9b`, 16K ctx)**: **3/8 PASS (37.5%)**, Self-Heal **1/4 (25.0%)** (`uv_spec` offline wheel + disconnect/replay pass; `chaos-02` & `chaos-07` acknowledged STALE in prose yet repeated raw `2.165...` metrics from snapshot; unified `code_diff` hunk cases fail), Avg Tool Recall **0.781**, Retries **23**, Stale Hallucinations **2** (`336,070` tokens; see `results/chaos-llm-qwen3.5_9b.md`).
+- **Live Local Ollama (`qwen3.5:9b`, 16K ctx)**: **3/8 PASS (37.5%)**, Self-Heal **1/4 (25.0%)** (`dependency_spec` offline wheel + disconnect/replay pass; `chaos-02` & `chaos-07` acknowledged STALE in prose yet repeated raw `2.165...` metrics from snapshot; unified `code_diff` hunk cases fail), Avg Tool Recall **0.781**, Retries **23**, Stale Hallucinations **2** (`336,070` tokens; see `results/chaos-llm-qwen3.5_9b.md`).
 - **Live Local Ollama (`qwen3.5:4b`, 16K ctx)**: **3/8 PASS (37.5%)**, Self-Heal **1/4 (25.0%)** (same fault split), Avg Tool Recall **0.781**, Retries **11**, Stale Hallucinations **2** (`220,128` tokens; see `results/chaos-llm-qwen3.5_4b.md`).
 
 ## How a Case Is Executed

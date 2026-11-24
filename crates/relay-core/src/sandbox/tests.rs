@@ -212,7 +212,7 @@ async fn git_bundle_roundtrip_transfers_commits_between_repos() {
 }
 
 #[tokio::test]
-async fn worktree_preflight_and_file_edits_self_healing_preserves_clean_main_tree() {
+async fn worktree_preflight_and_code_diff_self_healing_preserves_clean_main_tree() {
     let temp = TempDir::new();
     let repo = temp.join("main");
     let base_commit = init_python_repo(&repo).await;
@@ -258,7 +258,7 @@ async fn worktree_preflight_and_file_edits_self_healing_preserves_clean_main_tre
             path,
             branch,
             &manifest,
-            PatchInput::FileEdits(&[FileEdit {
+            PatchInput::CodeDiff(&[FileEdit {
                 file_path: "src/app.py".into(),
                 old_text: Some("NON_EXISTENT_SYMBOL = 1".into()),
                 new_text: "SMOKE_MESSAGE = \"Smoke passed\"".into(),
@@ -276,7 +276,7 @@ async fn worktree_preflight_and_file_edits_self_healing_preserves_clean_main_tre
             path,
             branch,
             &manifest,
-            PatchInput::FileEdits(&[FileEdit {
+            PatchInput::CodeDiff(&[FileEdit {
                 file_path: "src/app.py".into(),
                 old_text: Some("parser.add_argument".into()),
                 new_text: "parser.add_arg".into(),
@@ -296,7 +296,7 @@ async fn worktree_preflight_and_file_edits_self_healing_preserves_clean_main_tre
                 path,
                 branch,
                 &manifest,
-                PatchInput::FileEdits(&[FileEdit {
+                PatchInput::CodeDiff(&[FileEdit {
                     file_path: blocked.into(),
                     old_text: None,
                     new_text: "blocked\n".into(),
@@ -315,7 +315,7 @@ async fn worktree_preflight_and_file_edits_self_healing_preserves_clean_main_tre
             path,
             branch,
             &manifest,
-            PatchInput::FileEdits(&[
+            PatchInput::CodeDiff(&[
                 FileEdit {
                     file_path: "src/app.py".into(),
                     old_text: Some("import json\n".into()),
@@ -355,12 +355,12 @@ async fn worktree_preflight_and_file_edits_self_healing_preserves_clean_main_tre
             path,
             branch,
             &manifest,
-            PatchInput::FileEdits(&edits),
+            PatchInput::CodeDiff(&edits),
             "Define the smoke message",
         )
         .await
         .unwrap();
-    assert_eq!(proposal.kind, PatchKind::FileEdits);
+    assert_eq!(proposal.kind, PatchKind::CodeDiff);
     assert!(proposal.smoke_verified, "{}", proposal.smoke_stdout_tail);
     assert!(proposal.smoke_stdout_tail.contains("Smoke passed"));
     assert!(proposal.diff_preview.contains("diff --git a/src/app.py b/src/app.py"));
@@ -439,23 +439,36 @@ async fn compares_environment_inputs_at_a_commit_with_the_host() {
     let absent = compute_env_fingerprint(&repo).unwrap();
     let empty = sandbox.check_env_diff("HEAD").await.unwrap();
     assert_eq!(empty.host_env_fingerprint, absent);
+    assert_eq!(empty.ecosystem, "generic");
+    assert_eq!(empty.package_manager, "generic");
     assert!(empty.in_sync);
-    assert_eq!(absent.len(), "uv:blake3:".len() + 16);
+    assert_eq!(absent.len(), "generic:blake3:".len() + 16);
+    assert!(absent.starts_with("generic:blake3:"));
+
     fs::write(repo.join("uv.lock"), "").unwrap();
-    assert_ne!(compute_env_fingerprint(&repo).unwrap(), absent);
+    let uv_lock_only = compute_env_fingerprint(&repo).unwrap();
+    assert!(uv_lock_only.starts_with("uv:blake3:"));
+    assert_eq!(uv_lock_only.len(), "uv:blake3:".len() + 16);
+    assert_ne!(uv_lock_only, absent);
     fs::remove_file(repo.join("uv.lock")).unwrap();
+
     fs::write(
         repo.join("pyproject.toml"),
         "[project]\ndependencies = [\"Some_Package[extra]>=2\", \"Scipy>=1.14\"]\n",
     )
     .unwrap();
     let head = create_initial_commit(&repo).await;
-    assert!(sandbox.check_env_diff("HEAD").await.unwrap().in_sync);
+    let synced = sandbox.check_env_diff("HEAD").await.unwrap();
+    assert!(synced.in_sync);
+    assert_eq!(synced.ecosystem, "python");
+    assert_eq!(synced.package_manager, "uv");
 
     fs::write(repo.join("pyproject.toml"), "[project]\ndependencies = []\n").unwrap();
     fs::write(repo.join("uv.lock"), "[[package]]\nname = \"some-package\"\n").unwrap();
     let report = sandbox.check_env_diff(&head).await.unwrap();
     assert_eq!(report.commit_sha, head);
+    assert_eq!(report.ecosystem, "python");
+    assert_eq!(report.package_manager, "uv");
     assert_eq!(report.host_env_fingerprint, compute_env_fingerprint(&repo).unwrap());
     assert!(!report.in_sync);
     assert_eq!(report.missing_packages, vec!["scipy"]);
@@ -628,10 +641,11 @@ fn generates_valid_default_manifests_for_detected_project_types() {
     )
     .unwrap();
     let (py_toml, py_kind) = generate_default_manifest(&py_dir).unwrap();
-    assert_eq!(py_kind, "python-uv");
+    assert_eq!(py_kind, "uv");
     let py_manifest: RelayManifest = toml::from_str(&py_toml).unwrap();
     assert_eq!(py_manifest.project.repo_id, "py-sample-app");
     assert_eq!(py_manifest.project.smoke_preset, "smoke");
+    assert_eq!(py_manifest.project.package_manager.as_deref(), Some("uv"));
     assert_eq!(py_manifest.presets["smoke"].program, "uv");
     assert_eq!(py_manifest.presets["test"].program, "uv");
 
@@ -639,9 +653,10 @@ fn generates_valid_default_manifests_for_detected_project_types() {
     fs::create_dir(&rs_dir).unwrap();
     fs::write(rs_dir.join("Cargo.toml"), "[package]\nname = \"demo\"\n").unwrap();
     let kind = write_default_manifest(&rs_dir).unwrap();
-    assert_eq!(kind, "rust-cargo");
+    assert_eq!(kind, "cargo");
     let rs_manifest = load_manifest(&rs_dir).unwrap();
     assert_eq!(rs_manifest.project.smoke_preset, "check");
+    assert_eq!(rs_manifest.project.package_manager.as_deref(), Some("cargo"));
     assert_eq!(rs_manifest.presets["check"].program, "cargo");
     assert_eq!(rs_manifest.presets["test"].program, "cargo");
     assert_eq!(rs_manifest.presets["check"].timeout_secs, 900);
@@ -657,8 +672,9 @@ fn generates_valid_default_manifests_for_detected_project_types() {
     .unwrap();
     fs::write(js_bun_dir.join("bun.lock"), "").unwrap();
     let (bun_toml, bun_kind) = generate_default_manifest(&js_bun_dir).unwrap();
-    assert_eq!(bun_kind, "js-ts");
+    assert_eq!(bun_kind, "bun");
     let bun_manifest: RelayManifest = toml::from_str(&bun_toml).unwrap();
+    assert_eq!(bun_manifest.project.package_manager.as_deref(), Some("bun"));
     assert_eq!(bun_manifest.presets["smoke"].program, "bun");
     assert_eq!(bun_manifest.presets["smoke"].args, vec!["--version"]);
     assert_eq!(bun_manifest.presets["lint"].args, vec!["run", "lint"]);
@@ -669,6 +685,7 @@ fn generates_valid_default_manifests_for_detected_project_types() {
     let (gen_toml, gen_kind) = generate_default_manifest(&generic_dir).unwrap();
     assert_eq!(gen_kind, "generic");
     let gen_manifest: RelayManifest = toml::from_str(&gen_toml).unwrap();
+    assert_eq!(gen_manifest.project.package_manager.as_deref(), Some("generic"));
     assert_eq!(gen_manifest.presets["smoke"].program, "git");
 }
 

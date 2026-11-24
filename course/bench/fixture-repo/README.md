@@ -27,7 +27,7 @@ Run `python scripts/verify_calibration.py` (or pass `--repo <checkout>`). The sc
 
 ## Offline dependency healing
 
-`vendor/tiny_stats-0.1.0-py3-none-any.whl` is a tiny pure-Python helper built by `scripts/build_vendor_wheel.py` (deterministic entry timestamps). The missing-dependency Chaos case injects `import tiny_stats`, then repairs it with a `uv_spec` patch pointing at this wheel:
+`vendor/tiny_stats-0.1.0-py3-none-any.whl` is a tiny pure-Python helper built by `scripts/build_vendor_wheel.py` (deterministic entry timestamps). The missing-dependency Chaos case injects `import tiny_stats`, then repairs it with a `dependency_spec` patch pointing at this wheel:
 
 ```
 ./vendor/tiny_stats-0.1.0-py3-none-any.whl

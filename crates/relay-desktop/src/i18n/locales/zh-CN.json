@@ -143,13 +143,13 @@
     "approvalRunRejectedNote": "已取消本次运行。",
     "suggestions": {
       "checkOutdated": "检查当前有哪些实验结果已过期",
-      "inspectEnv": "查看主机同步状态和 Python 环境差异",
+      "inspectEnv": "查看主机同步状态和项目环境差异",
       "runAndCheck": "检查项目图谱并运行一个可用预设任务"
     },
     "tools": {
       "inspect_sync_status": "查询设备同步状态",
       "list_handoffs": "读取跨设备交接记录",
-      "check_env_diff": "比对 Python 环境依赖",
+      "check_env_diff": "比对项目环境依赖",
       "get_dag_snapshot": "读取项目状态图谱",
       "read_evidence_log": "读取最新结果日志",
       "run_preflight_in_worktree": "在隔离副本执行预检",

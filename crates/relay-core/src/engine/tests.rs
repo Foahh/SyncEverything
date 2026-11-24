@@ -364,7 +364,7 @@ async fn lifecycle_persists_patch_approval_evidence_and_utf8_log() {
     let patch = PatchProposal {
         patch_id: "patch-1".into(),
         task_id: id,
-        kind: PatchKind::UvSpec,
+        kind: PatchKind::DependencySpec,
         summary: "Add scipy".into(),
         diff_preview: "+ scipy".into(),
         worktree_branch: "relay/task-1".into(),

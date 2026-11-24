@@ -51,7 +51,7 @@ The graph and transition rules are implemented in [`dag.rs`](../crates/relay-cor
 
 1. A `TaskSpec` names a repository, a base commit, a command preset, parameters, and whether approval is required.
 2. The Host opens a task-specific Git worktree at the requested commit and runs the configured smoke preflight. The executor checks the selected preset against the Host checkout's `relay.toml`, accepts only allowed parameters, passes arguments directly to the configured executable, and enforces the preset timeout.
-3. If preflight fails, the desktop can ask the model client to diagnose the failure. MCP clients can also inspect worktree files via `read_worktree_file` and submit a candidate dependency change (`uv_spec`) or atomic edit (`file_edits`). A fix is recorded as a proposal only after smoke preflight passes with it applied inside the worktree; failed candidates roll back cleanly.
+3. If preflight fails, the desktop can ask the model client to diagnose the failure. MCP clients can also inspect worktree files via `read_worktree_file` and submit a candidate dependency change (`dependency_spec`) or atomic edit (`code_diff`). A fix is recorded as a proposal only after smoke preflight passes with it applied inside the worktree; failed candidates roll back cleanly.
 4. When approval is required, desktop users review the diff in the approval drawer. The MCP tool uses native elicitation when available and can return `ApprovalRequired` for a UI decision. Before running the preset, the executor checks the base commit and any approved diff. A successful run records metrics and logs as Evidence.
 
 Worktrees isolate checkout and environment changes. Task processes run with the Host account's permissions, so the Host must trust the repository and its presets. For the handler and executor, see [`mcp.rs`](../crates/relay-core/src/mcp.rs) and [`sandbox/execution.rs`](../crates/relay-core/src/sandbox/execution.rs).
@@ -59,6 +59,31 @@ Worktrees isolate checkout and environment changes. Task processes run with the 
 ### Model interface
 
 [`LlmClient`](../crates/relay-core/src/agent.rs) sends OpenAI-compatible `/chat/completions` requests with `reqwest`. The shared client takes a base URL, a model name, an optional reasoning effort setting, and an optional API key or environment variable name. The desktop's built-in diagnosis defaults to local Ollama. The model proposes changes; worktree verification and the approval flow control what executes.
+
+## Extending with a New PackageManagerAdapter
+
+The sandbox package-manager layer lives under [`crates/relay-core/src/sandbox/pm/`](../crates/relay-core/src/sandbox/pm/) and decouples preset generation (L1), environment fingerprinting & dependency diffing (L2), and structured dependency self-healing (L3) from the core engine, MCP server, and desktop UI.
+
+Built-in adapters are registered in [`PackageManagerRegistry::builtin`](../crates/relay-core/src/sandbox/pm/mod.rs) in deterministic priority order:
+
+1. `uv` (`python`, priority `10`) — `pyproject.toml` + `uv.lock`
+2. `cargo` (`rust`, priority `20`) — `Cargo.toml` + `Cargo.lock`
+3. `bun` / `pnpm` / `yarn` / `npm` (`javascript`, priorities `30`–`33`) — `package.json` + lockfile sub-detection
+4. `generic` (`generic`, priority `1000`) — fallback `git` smoke preset; directs `dependency_spec` requests to `code_diff`
+
+Repositories can pin an explicit adapter via `[project].package_manager = "<name>"` in `relay.toml`, or leave it unset for automatic priority detection.
+
+### Adding a new ecosystem (e.g., `poetry`, `conda`, `go`, `dotnet`, or `vcpkg`)
+
+Adding a new package manager requires **zero changes** to `RelayEngine`, `RelayMcpServer`, `SelfHealingAgent`, or the desktop UI:
+
+1. **Create a module** in `crates/relay-core/src/sandbox/pm/<name>.rs` implementing [`PackageManagerAdapter`](../crates/relay-core/src/sandbox/pm/mod.rs):
+   - `name()`, `ecosystem()`, `priority()`, and `detect(repo_root)` (e.g., `poetry.lock` / `[tool.poetry]` for `poetry`, `environment.yml` for `conda`, `go.mod` for `go`, `*.csproj` for `dotnet`, `vcpkg.json` for `vcpkg`).
+   - **L1 (`generate_presets`)**: return a safe `smoke_preset` and whitelisted starter presets invoking the tool directly with explicit argv (never shell strings).
+   - **L2 (`manifest_files`, `lockfile_paths`, `parse_dependencies`)**: declare the manifest and lockfile paths so `compute_fingerprint` automatically emits `<pm>:blake3:<16hex>`, and parse declared/locked dependencies for `check_env_diff`.
+   - **L3 (`supports_dependency_add`, `add_dependency`)**: validate `spec` through centralized helpers in [`pm/security.rs`](../crates/relay-core/src/sandbox/pm/security.rs) (`reject_common_injection`, `ensure_regular_or_absent`, and `is_safe_cmd_arg` / Windows launcher safety), invoke the CLI with script-safe explicit argv via `tokio::process::Command`, and finish with `security::stage_intent_to_add(self.name(), worktree_path, self.lockfile_paths())` so newly created lockfiles appear in human approval diffs.
+2. **Register the adapter** in `PackageManagerRegistry::builtin()` in [`crates/relay-core/src/sandbox/pm/mod.rs`](../crates/relay-core/src/sandbox/pm/mod.rs) (and add its file-presence rule in `detect_from_file_presence` if detection depends on lockfile disambiguation).
+3. **Add unit tests** in `crates/relay-core/src/sandbox/pm/tests.rs` covering detection priority, explicit `package_manager` override, L1 manifest generation, L2 fingerprinting/diffing, and L3 input-injection / symlink rejection.
 
 ## Repository layout
 
