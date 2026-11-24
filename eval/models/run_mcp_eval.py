@@ -77,9 +77,13 @@ def run_cmd(args: list[str], cwd: Path | None = None, check: bool = True) -> sub
 
 
 def init_fixture_git_repo(target_dir: Path) -> str:
-    shutil.copytree(FIXTURE_SRC, target_dir)
+    shutil.copytree(
+        FIXTURE_SRC,
+        target_dir,
+        ignore=shutil.ignore_patterns(".git", ".venv", ".relay", "__pycache__", "*.pyc", ".DS_Store"),
+    )
     for file_path in target_dir.rglob("*"):
-        if file_path.is_file() and file_path.suffix in {".py", ".toml", ".lock", ".md"}:
+        if file_path.is_file() and file_path.suffix.lower() in {".py", ".toml", ".lock", ".md", ".sh", ".txt", ".json"}:
             text = file_path.read_text(encoding="utf-8")
             file_path.write_text(text, encoding="utf-8", newline="\n")
     (target_dir / ".gitignore").write_text(".venv/\n.relay/\n__pycache__/\n", encoding="utf-8", newline="\n")
@@ -216,15 +220,37 @@ class McpStdioClient:
                 self.proc.kill()
 
 
+def load_dotenv(path: Path) -> None:
+    """Load KEY=VALUE pairs from a local .env file without overriding explicit env vars or logging values."""
+    if not path.is_file():
+        return
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[7:].strip()
+        if "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip()
+        if len(value) >= 2 and ((value[0] == '"' and value[-1] == '"') or (value[0] == "'" and value[-1] == "'")):
+            value = value[1:-1]
+        if key and not os.environ.get(key):
+            os.environ[key] = value
+
+
 def call_openai_chat(
     base_url: str,
     model: str,
     api_key: str | None,
     messages: list[dict[str, Any]],
     tools: list[dict[str, Any]],
-    timeout_secs: int = 90,
+    timeout_secs: int = 120,
 ) -> tuple[dict[str, Any], float]:
-    url = f"{base_url.rstrip('/')}/chat/completions"
+    normalized = base_url.strip().rstrip("/")
+    url = normalized if normalized.endswith("/chat/completions") else f"{normalized}/chat/completions"
     body = {
         "model": model,
         "messages": messages,
@@ -233,7 +259,10 @@ def call_openai_chat(
         "temperature": 0.0,
         "stream": False,
     }
-    headers = {"Content-Type": "application/json"}
+    headers = {
+        "Content-Type": "application/json",
+        "User-Agent": "Relay-Eval/1.0",
+    }
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
     req = urllib.request.Request(
@@ -617,8 +646,8 @@ def run_s4_code_defect_self_heal(daemon: Path, system_prompt: str, cfg: argparse
             f"Task {task_id} is queued for commit {head}. "
             "Follow Relay's safe Host workflow: run preflight in its isolated worktree; "
             "if smoke fails, diagnose the traceback and call propose_worktree_patch with a minimal unified git diff "
-            "(`patch_kind: \"code_diff\"`) that defines `DEFAULT_ALPHA = 0.35` in `src/forecast.py` "
-            "(note line 74 references `default=DEFAULT_ALPHA`); once smoke passes, call approve_and_execute_task "
+            f"(`patch_kind: \"code_diff\"`) that defines `DEFAULT_ALPHA = 0.35` in `src/forecast.py` "
+            f"(note line {next(i for i, line in enumerate(broken.splitlines(), 1) if 'default=DEFAULT_ALPHA' in line)} references `default=DEFAULT_ALPHA`); once smoke passes, call approve_and_execute_task "
             "and stop cleanly when approval_required is returned."
         )
         expected = ["run_preflight_in_worktree", "propose_worktree_patch", "approve_and_execute_task"]
@@ -725,6 +754,7 @@ def write_markdown_report(results_dir: Path, report_path: Path) -> None:
 
 
 def main() -> int:
+    load_dotenv(REPO_ROOT / ".env")
     parser = argparse.ArgumentParser(description="Relay Track 3 live MCP model evaluation runner")
     parser.add_argument("--base-url", default=os.getenv("RELAY_LLM_BASE_URL", "http://127.0.0.1:11434/v1"))
     parser.add_argument("--model", default=os.getenv("RELAY_LLM_MODEL", "qwen3.5:4b"))

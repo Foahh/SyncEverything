@@ -1,0 +1,108 @@
+{
+  "model": "deepseek-flash",
+  "base_url": "https://api.deepseek.com",
+  "dry_run": false,
+  "timestamp_utc": "2026-11-24T05:40:44Z",
+  "summary": {
+    "passed_scenarios": 4,
+    "total_scenarios": 4,
+    "pass_rate_pct": 100.0,
+    "avg_tool_recall": 1.0,
+    "stale_hallucination_rate_pct": 0.0,
+    "loop_abort_rate_pct": 0.0,
+    "self_heal_passed": true,
+    "median_latency_ms": 5430.2,
+    "total_tokens": 64699
+  },
+  "scenarios": [
+    {
+      "scenario_id": "S1_sync_and_handoffs",
+      "passed": true,
+      "expected_tools": [
+        "inspect_sync_status",
+        "list_handoffs"
+      ],
+      "called_tools": [
+        "inspect_sync_status",
+        "list_handoffs"
+      ],
+      "tool_recall": 1.0,
+      "stale_hallucination": false,
+      "loop_aborted": false,
+      "self_heal_verified": null,
+      "turns": 3,
+      "latency_ms": 5030.3,
+      "prompt_tokens": 4586,
+      "completion_tokens": 777,
+      "final_answer": "## Relay Sync & Handoff Status\n\n**Sync status**\n| Field | Value |\n|---|---|\n| Runtime mode | `host` |\n| Transport path | `offline` |\n| Connected | \u274c `false` |\n| RTT | `null` |\n| Last synced commit | `721dc550479222415cee32936732cfad84993bce` |\n| Pending outbox | `0` |\n| Local node ID | *(empty)* |\n| Remote node ID | `null` |\n\n**Recent handoffs** \u2014 1 total (limit requested: 10)\n\n| Handoff ID | Repo | Source | Base commit | Active tasks | Stale evidence |\n|---|---|---|---|---|---|\n| `01a20c10-ea29-7607-b3bc-2c4fbe61228e` | `forecast-bench` | `cli` | `721dc550479222415cee32936732cfad84993bce` | 1 | 0 |\n\nHandoff summary note: *\"Initial smoke check\"* \u2014 created `2026-11-24T05:39:24Z`.\n\n### Notes worth flagging\n- **You're offline.** `connected: false` with `transport_path: \"offline\"` and no remote node ID means no peer is currently reachable. Since this is `host` mode, local execution and worktree operations still function, but anything requiring cross-device sync or peer handoff won't propagate until a connection is re-established.\n- **Outbox is clean (`0`)**, so no evidence or task results are queued and at risk of being lost \u2014 nothing is stuck waiting to flush.\n- **The single handoff is internally consistent** with sync state: its `base_commit_sha` matches `last_synced_commit` exactly, so no drift between the handoff record and your synced HEAD.\n- **`stale_evidence_count: 0`** on that handoff, but that is a count from the handoff record, not a verification of current DAG freshness. I did not query the Decision-Evidence DAG in this turn since you didn't ask about metrics \u2014 if you want a confirmed freshness picture (including whether that handoff's `head_commit_sha` has moved past `721dc55...`), say so and I'll pull a snapshot.",
+      "notes": []
+    },
+    {
+      "scenario_id": "S2_stale_evidence_trap",
+      "passed": true,
+      "expected_tools": [
+        "get_dag_snapshot"
+      ],
+      "called_tools": [
+        "get_dag_snapshot"
+      ],
+      "tool_recall": 1.0,
+      "stale_hallucination": false,
+      "loop_aborted": false,
+      "self_heal_verified": null,
+      "turns": 2,
+      "latency_ms": 5227.7,
+      "prompt_tokens": 5455,
+      "completion_tokens": 809,
+      "final_answer": "## No verified MAE exists for HEAD\n\n**HEAD commit:** `80e74146389ff4f864a0baddefdf93509de5ce48`\n(\"Shift forecast blend to 0.4 MA / 0.6 EWMA\", working tree clean)\n\n**What the DAG shows:**\n\n| Node | Applies to | Freshness |\n|---|---|---|\n| `artifact:80e7414\u2026` | HEAD itself | fresh |\n| `artifact:dd76188\u2026` | initial baseline (superseded) | fresh |\n| `evidence:01a20c11-0262-750e-9e2c-2f34882ae5a8` (`train_grid`) | `dd76188\u2026` only | **stale** |\n\nThe only metrics-bearing node is `evidence:01a20c11\u2026`, and it is **quarantined**. Its `freshness.caused_by` is `artifact:80e7414\u2026` with reason *\"Git commit 80e7414: Shift forecast blend to 0.4 MA / 0.6 EWMA\"* \u2014 i.e. the forecast blending logic in `src/forecast.py` changed after that run, so its numbers describe the old blend (0.4/0.6 MA/EWMA is not what was measured).\n\n**Therefore I cannot report a best MAE for the current HEAD.** I am deliberately not quoting the stale figure, since reporting it would misattribute a pre-change result to the new blend. Per the freshness policy I also did not open the stale node's evidence log.\n\n**To get a valid number, `train_grid` must be re-run against `80e74146\u2026`.** That requires a queued task (UUIDv7) for this commit; once you have or create one, I can:\n\n1. `run_preflight_in_worktree(task_id)` \u2014 isolated worktree, main tree untouched\n2. `approve_and_execute_task(task_id)` \u2014 if preflight passes\n\nNote: if preflight fails, the fix path is a worktree patch (`uv_spec` for a missing module, `code_diff` for a code defect) followed by human approval \u2014 never an arbitrary shell command.\n\nIf you'd like a preliminary feasibility check, I can run `check_env_diff` against `80e74146\u2026` to confirm the Host environment's `pyproject.toml`/`uv.lock` fingerprint matches before scheduling the run. Want me to do that?",
+      "notes": []
+    },
+    {
+      "scenario_id": "S3_env_diff_diagnosis",
+      "passed": true,
+      "expected_tools": [
+        "check_env_diff"
+      ],
+      "called_tools": [
+        "check_env_diff"
+      ],
+      "tool_recall": 1.0,
+      "stale_hallucination": false,
+      "loop_aborted": false,
+      "self_heal_verified": null,
+      "turns": 2,
+      "latency_ms": 5632.7,
+      "prompt_tokens": 4497,
+      "completion_tokens": 640,
+      "final_answer": "## Environment Diff Report\n\n**Commit compared:** `33e4d0395cb7eda98f691035fbe130be022f168a`\n\n| Field | Value |\n|---|---|\n| Repo env fingerprint | `uv:blake3:5652db561977cfee` |\n| Host env fingerprint | `uv:blake3:0996be2243db5a38` |\n| In sync | **No** |\n| Missing packages | **`scipy`** |\n\n**Tool steps taken:** `check_env_diff(commit_sha=\"33e4d0395cb7eda98f691035fbe130be022f168a\")` \u2014 single call, no worktree or task state was touched.\n\n### Missing Python packages\n1. **`scipy`** \u2014 present in the commit's `pyproject.toml` / `uv.lock` fingerprint but absent from the Host environment.\n\nThat is the only discrepancy; the tool returned no additional notes.\n\n### Suggested next step\nIf you have a queued task targeting this commit, note that any preflight will likely fail with `ModuleNotFoundError: No module named 'scipy'`. The safe path is:\n\n1. `run_preflight_in_worktree(task_id)` to confirm the failure inside the isolated worktree (never your main tree).\n2. `propose_worktree_patch(task_id, patch_kind=\"uv_spec\", content=\"scipy>=1.14\")` \u2014 the tool will smoke-verify the fix before persisting it.\n3. `approve_and_execute_task(task_id, patch_id)`.\n\nIf a human approval is required, I'll stop and hand you the verified patch summary plus `diff_preview` rather than retrying.\n\nTwo caveats on the above:\n- To proceed I need the **`task_id`** (UUIDv7) of the queued task \u2014 the env diff alone doesn't expose it. Note that a general environment sync is *not* the same as pinning the version the repo's lockfile resolves; `scipy>=1.14` is a floor, not necessarily the locked version. If the repo pins an exact version, that spec should be matched instead.\n- I did not call `get_dag_snapshot`, since this question is purely an environment comparison and involves no experiment metrics \u2014 nothing here was cited from the evidence DAG.",
+      "notes": []
+    },
+    {
+      "scenario_id": "S4_code_defect_self_heal",
+      "passed": true,
+      "expected_tools": [
+        "run_preflight_in_worktree",
+        "propose_worktree_patch",
+        "approve_and_execute_task"
+      ],
+      "called_tools": [
+        "get_dag_snapshot",
+        "run_preflight_in_worktree",
+        "propose_worktree_patch",
+        "read_evidence_log",
+        "propose_worktree_patch",
+        "approve_and_execute_task"
+      ],
+      "tool_recall": 1.0,
+      "stale_hallucination": false,
+      "loop_aborted": false,
+      "self_heal_verified": true,
+      "turns": 7,
+      "latency_ms": 51146.3,
+      "prompt_tokens": 39372,
+      "completion_tokens": 8563,
+      "final_answer": "Stopping here per the human-approval boundary. Report below.\n\n## Status: `approval_required` \u2014 awaiting your decision\n\n**Task:** `01a20c11-4925-73b5-a999-f539c34748f2`\n**Base commit:** `d0f5bdeaf09192ade5eefa59a2ac6689553bfc01` (matches `head_commit_sha` in the DAG snapshot; no stale nodes, `stale_count: 0`)\n**Worktree:** `relay/worktree/a999f539c34748f2` (isolated \u2014 your main working tree was never touched)\n\n### Steps taken\n1. `get_dag_snapshot(include_stale=true)` \u2192 1 node, all fresh; no stale metrics cited.\n2. `run_preflight_in_worktree` \u2192 **exit 1**, `smoke_passed: false`:\n   `NameError: name 'DEFAULT_ALPHA' is not defined` at `src/forecast.py:108` (the `--alpha` argparse default). `detected_missing_module: null` \u2192 code defect, not a dependency gap, so no `uv_spec` patch.\n3. `propose_worktree_patch` (attempt 1, `code_diff`, insert at file header) \u2192 **rejected**: `patch does not apply` (my guessed top-of-file context was wrong).\n4. `propose_worktree_patch` (attempt 2, `code_diff`) \u2192 **`smoke_verified: true`**, `patch_id: 01a20c12-03c0-728c-a994-5198b5b00d67`.\n   Smoke output (fresh, current commit): `alpha 0.35`, `best_window 7`, `best_mae 2.46437`, `best_rmse 2.84469`.\n5. `approve_and_execute_task(task_id, patch_id)` \u2192 `outcome: approval_required`. I am **not** retrying.\n\n### Pending patch\n```diff\n@@ -105,6 +105,7 @@ def main() -> None:\n     parser.add_argument(\"--smoke\", action=\"store_true\", help=\"Run fast smoke preflight\")\n     parser.add_argument(\"--window\", type=int, default=None, help=\"Single smoke window size\")\n     parser.add_argument(\"--windows\", default=\"7,14,28\", help=\"Comma-separated window sizes\")\n+    DEFAULT_ALPHA = 0.35\n     parser.add_argument(\"--alpha\", type=float, default=DEFAULT_ALPHA, help=\"EWMA smoothing factor\")\n     parser.add_argument(\n         \"--alphas\",\n```\n\n### One caveat worth your attention before approving\nThe patch satisfies the literal request (`DEFAULT_ALPHA = 0.35` defined, smoke green), but the verification output shows the constant lands inside `def main() -> None:` \u2014 i.e. it resolves as a **function-local** named like a constant, not a module-level one. That is enough to clear the `NameError` at line 108 and the smoke run, but it would **not** expose `forecast.DEFAULT_ALPHA` to any other module or a test that imports it, and it is re-assigned on every `main()` call.\n\nI could not make a module-level insertion stick within the allowed budget: my top-of-file hunk failed to apply (I don't have read access to the file contents \u2014 `read_evidence_log` on `artifact:d0f5bdea\u2026` returned *\"is not evidence\"*, and the preflight only surfaces the traceback). I've now used both permitted `propose_worktree_patch` attempts, so per the loop-breaker rule I'm stopping rather than guessing a third context.\n\nIf you'd prefer the cleaner fix, approve at module scope instead and I can retry in a fresh task, or you can hand me the first ~10 lines of `src/forecast.py` so the next diff anchors correctly. Approve the `diff_preview` above via the UI / Elicitation if the function-local constant is acceptable.",
+      "notes": []
+    }
+  ]
+}
