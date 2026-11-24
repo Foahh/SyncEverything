@@ -38,6 +38,7 @@ import tempfile
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 from typing import Any
@@ -1192,24 +1193,37 @@ SCRIPTED_RECIPES = {
 # ---------------------------------------------------------------------------
 
 
+def is_loopback_url(url: str) -> bool:
+    host = (urllib.parse.urlparse(url).hostname or "").lower()
+    return host in {"127.0.0.1", "localhost", "::1"}
+
+
 def call_openai_chat(
     base_url: str,
     model: str,
     api_key: str | None,
     messages: list[dict[str, Any]],
     tools: list[dict[str, Any]],
-    timeout_secs: int = 120,
+    *,
+    reasoning_effort: str | None = None,
+    timeout_secs: int = 240,
+    max_tokens: int | None = None,
 ) -> tuple[dict[str, Any], float]:
     normalized = base_url.strip().rstrip("/")
     url = normalized if normalized.endswith("/chat/completions") else f"{normalized}/chat/completions"
-    body = {
+    body: dict[str, Any] = {
         "model": model,
         "messages": messages,
-        "tools": tools,
-        "tool_choice": "auto",
         "temperature": 0.0,
         "stream": False,
     }
+    if tools:
+        body["tools"] = tools
+        body["tool_choice"] = "auto"
+    if reasoning_effort:
+        body["reasoning_effort"] = reasoning_effort
+    if max_tokens is not None:
+        body["max_tokens"] = max_tokens
     headers = {"Content-Type": "application/json", "User-Agent": "Relay-Chaos-Judge/1.0"}
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
@@ -1223,6 +1237,20 @@ def call_openai_chat(
         raise RuntimeError(f"HTTP {err.code} from {url}: {detail[:400]}") from err
     elapsed_ms = (time.perf_counter() - t0) * 1000.0
     return json.loads(raw), elapsed_ms
+
+
+def warmup_llm(llm_cfg: dict[str, Any]) -> None:
+    _, elapsed = call_openai_chat(
+        llm_cfg["base_url"],
+        llm_cfg["model"],
+        llm_cfg["api_key"],
+        [{"role": "user", "content": "OK"}],
+        [],
+        reasoning_effort=llm_cfg.get("reasoning_effort"),
+        timeout_secs=int(llm_cfg.get("timeout_secs", 240)),
+        max_tokens=4,
+    )
+    print(f"[warmup] model={llm_cfg['model']} ready in {elapsed:.1f}ms", flush=True)
 
 
 def run_llm_agent_loop(
@@ -1255,27 +1283,57 @@ def run_llm_agent_loop(
 
     for turn in range(1, int(llm_cfg["max_turns"]) + 1):
         turns = turn
-        response, elapsed = call_openai_chat(
-            llm_cfg["base_url"],
-            llm_cfg["model"],
-            llm_cfg["api_key"],
-            messages,
-            tools,
-        )
+        try:
+            response, elapsed = call_openai_chat(
+                llm_cfg["base_url"],
+                llm_cfg["model"],
+                llm_cfg["api_key"],
+                messages,
+                tools,
+                reasoning_effort=llm_cfg.get("reasoning_effort"),
+                timeout_secs=int(llm_cfg.get("timeout_secs", 240)),
+            )
+        except (TimeoutError, urllib.error.URLError, RuntimeError) as exc:
+            loop_aborted = True
+            final_answer = f"[LLM_ERROR] {exc}"
+            return {
+                "called_tools": called_tools,
+                "local_tools": local_tools,
+                "turns": turns,
+                "retries": retries,
+                "loop_aborted": True,
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
+                "total_tokens": prompt_tokens + completion_tokens,
+                "latency_ms": round(llm_latency_ms, 1),
+                "approval_required_observed": approval_required_observed,
+                "final_answer": final_answer,
+                "tool_events": tool_events,
+            }
         llm_latency_ms += elapsed
         usage = response.get("usage") or {}
         prompt_tokens += int(usage.get("prompt_tokens", 0))
         completion_tokens += int(usage.get("completion_tokens", 0))
 
         choice = response["choices"][0]["message"]
-        messages.append(choice)
         tool_calls = choice.get("tool_calls") or []
-        if not tool_calls:
+        norm_calls: list[dict[str, Any]] = []
+        for idx, tc in enumerate(tool_calls):
+            tc_copy = dict(tc)
+            if not tc_copy.get("id"):
+                tc_copy["id"] = f"call_{turn}_{idx}"
+            norm_calls.append(tc_copy)
+        assistant_msg: dict[str, Any] = dict(choice)
+        assistant_msg["content"] = choice.get("content") or ""
+        if norm_calls:
+            assistant_msg["tool_calls"] = norm_calls
+        messages.append(assistant_msg)
+        if not norm_calls:
             final_answer = (choice.get("content") or "").strip()
             break
 
         pending_approval_msg: str | None = None
-        for tc in tool_calls:
+        for tc in norm_calls:
             fn = tc["function"]
             name = fn["name"]
             raw_args = fn.get("arguments") or "{}"
@@ -2088,6 +2146,8 @@ def write_llm_reports(
     out_dir: Path,
     daemon_bin: Path,
     llm_cfg: dict[str, Any],
+    *,
+    report_stem: str = "chaos-llm-report",
 ) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
     passed = sum(1 for r in results if r["passed"])
@@ -2096,41 +2156,46 @@ def write_llm_reports(
     stale_hits = sum(1 for r in results if r["stale_hallucination"])
     covered = sorted({tool for r in results for tool in r["called_tools"]} & FROZEN_MCP_TOOLS)
     latencies = [r["latency_ms"] for r in results] or [0.0]
+    display_model = llm_cfg.get("label") or llm_cfg["model"]
 
-    payload = {
+    payload: dict[str, Any] = {
         "suite": "relay-track4-chaos-llm",
         "mode": "llm",
         "generated_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
         "daemon_bin": display_path(daemon_bin),
         "python": sys.version.split()[0],
-        "model": llm_cfg["model"],
+        "model": display_model,
         "base_url": llm_cfg["base_url"],
-        "mcp_tools_covered": covered,
-        "summary": {
-            "total": len(results),
-            "passed": passed,
-            "failed": len(results) - passed,
-            "pass_rate_pct": round(100.0 * passed / len(results), 1),
-            "self_heal_passed": healing_passed,
-            "self_heal_total": len(healing_cases),
-            "self_heal_rate_pct": round(100.0 * healing_passed / len(healing_cases), 1) if healing_cases else 0.0,
-            "avg_tool_recall": round(sum(r["tool_recall"] for r in results) / len(results), 3),
-            "total_retries": sum(r["retries"] for r in results),
-            "stale_hallucination_count": stale_hits,
-            "total_tokens": sum(r["total_tokens"] for r in results),
-            "median_llm_latency_ms": round(statistics.median(latencies), 1),
-            "mcp_tools_covered_count": len(covered),
-        },
-        "cases": results,
     }
-    (out_dir / "chaos-llm-report.json").write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    if display_model != llm_cfg["model"]:
+        payload["endpoint_model"] = llm_cfg["model"]
+    if llm_cfg.get("reasoning_effort"):
+        payload["reasoning_effort"] = llm_cfg["reasoning_effort"]
+    payload["mcp_tools_covered"] = covered
+    payload["summary"] = {
+        "total": len(results),
+        "passed": passed,
+        "failed": len(results) - passed,
+        "pass_rate_pct": round(100.0 * passed / len(results), 1),
+        "self_heal_passed": healing_passed,
+        "self_heal_total": len(healing_cases),
+        "self_heal_rate_pct": round(100.0 * healing_passed / len(healing_cases), 1) if healing_cases else 0.0,
+        "avg_tool_recall": round(sum(r["tool_recall"] for r in results) / len(results), 3),
+        "total_retries": sum(r["retries"] for r in results),
+        "stale_hallucination_count": stale_hits,
+        "total_tokens": sum(r["total_tokens"] for r in results),
+        "median_llm_latency_ms": round(statistics.median(latencies), 1),
+        "mcp_tools_covered_count": len(covered),
+    }
+    payload["cases"] = results
+    (out_dir / f"{report_stem}.json").write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
 
     summary = payload["summary"]
     lines = [
         "# Relay Chaos Suite Report (Track 4 — Live LLM)",
         "",
         f"- Generated: {payload['generated_at']}",
-        f"- Model: `{llm_cfg['model']}` (`{llm_cfg['base_url']}`)",
+        f"- Model: `{display_model}` (`{llm_cfg['base_url']}`)",
         f"- Pass Rate: **{summary['passed']}/{summary['total']} ({summary['pass_rate_pct']}%)** · Self-Heal: **{summary['self_heal_passed']}/{summary['self_heal_total']} ({summary['self_heal_rate_pct']}%)**",
         f"- Avg Tool Recall: **{summary['avg_tool_recall']:.3f}** · Retries: **{summary['total_retries']}** · Stale Hallucinations: **{summary['stale_hallucination_count']}** · Total Tokens: **{summary['total_tokens']}**",
         "",
@@ -2156,7 +2221,7 @@ def write_llm_reports(
             expected = json.dumps(item["expected"], ensure_ascii=False)
             mark = "PASS" if item["passed"] else "FAIL"
             lines.append(f"| {item['assertion_id']} | `{item['metric_key']}` | {expected} | {actual} | {mark} |")
-    (out_dir / "chaos-llm-report.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    (out_dir / f"{report_stem}.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 def load_cases(selected: list[str] | None) -> list[dict[str, Any]]:
@@ -2191,7 +2256,33 @@ def main() -> int:
     parser.add_argument("--skip-p2p-gate", action="store_true", help="Skip `relay-daemon sandbox-dual` loopback gate")
     parser.add_argument("--base-url", default=os.getenv("RELAY_LLM_BASE_URL", "http://127.0.0.1:11434/v1"))
     parser.add_argument("--model", default=os.getenv("RELAY_LLM_MODEL", "qwen3.5:4b"))
-    parser.add_argument("--api-key-env", default=os.getenv("RELAY_LLM_API_KEY_ENV", "RELAY_LLM_API_KEY"))
+    parser.add_argument(
+        "--label",
+        default=None,
+        help="Optional display model name recorded in LLM reports (defaults to --model)",
+    )
+    parser.add_argument(
+        "--api-key-env",
+        default=None,
+        help="Env var name holding API key (omitted automatically for loopback URLs unless set explicitly)",
+    )
+    parser.add_argument(
+        "--reasoning-effort",
+        choices=("none", "low", "medium", "high"),
+        default=None,
+        help="Optional OpenAI reasoning_effort parameter forwarded to the endpoint",
+    )
+    parser.add_argument("--timeout", type=int, default=240, help="Per-request HTTP timeout in seconds")
+    parser.add_argument(
+        "--warmup",
+        action="store_true",
+        help="Send one unmeasured 1-token warmup request before running --mode llm cases",
+    )
+    parser.add_argument(
+        "--report-stem",
+        default="chaos-llm-report",
+        help="Output filename stem (without extension) for --mode llm JSON/Markdown reports",
+    )
     parser.add_argument("--max-turns", type=int, default=14)
     args = parser.parse_args()
 
@@ -2241,15 +2332,27 @@ def main() -> int:
             )
             return 0 if (not failed and gate_ok) else 1
 
-        api_key = os.getenv(args.api_key_env) if args.api_key_env else None
+        if args.api_key_env is not None:
+            api_key = os.getenv(args.api_key_env) if args.api_key_env else None
+        elif is_loopback_url(args.base_url):
+            api_key = None
+        else:
+            default_env = os.getenv("RELAY_LLM_API_KEY_ENV", "RELAY_LLM_API_KEY")
+            api_key = os.getenv(default_env) if default_env else None
         llm_cfg = {
             "base_url": args.base_url,
             "model": args.model,
+            "label": args.label,
             "api_key": api_key,
+            "reasoning_effort": args.reasoning_effort,
+            "timeout_secs": args.timeout,
             "max_turns": args.max_turns,
         }
+        if args.warmup:
+            warmup_llm(llm_cfg)
+        display_model = args.label or args.model
         print(
-            f"Relay Chaos Suite [llm] · model={args.model} · {len(cases)} cases · daemon={display_path(daemon_bin)}",
+            f"Relay Chaos Suite [llm] · model={display_model} · {len(cases)} cases · daemon={display_path(daemon_bin)}",
             flush=True,
         )
         results = []
@@ -2270,11 +2373,12 @@ def main() -> int:
                 for note in result["notes"]:
                     print(f"    note: {note}", flush=True)
 
-        write_llm_reports(results, out_dir, daemon_bin, llm_cfg)
+        write_llm_reports(results, out_dir, daemon_bin, llm_cfg, report_stem=args.report_stem)
         failed = [r for r in results if not r["passed"]]
         print(
             f"\nSummary: {len(results) - len(failed)}/{len(results)} passed · "
-            f"report: {out_dir / 'chaos-llm-report.md'}"
+            f"report: {out_dir / f'{args.report_stem}.md'}",
+            flush=True,
         )
         return 0 if not failed else 1
     finally:
