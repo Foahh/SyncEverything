@@ -240,7 +240,7 @@ impl RelayEngine {
             }
         }
         if edges_changed {
-            staged.validate_edge_changes(&dag.graph)?;
+            staged.validate_acyclic()?;
         }
         // Traverse the finished graph so invalidation also covers edges received in this delta.
         for edge in supersessions.into_values() {
@@ -737,7 +737,7 @@ impl RelayEngine {
         }
         staged.upsert_node(evidence_node.clone());
         staged.upsert_edge(edge.clone())?;
-        staged.validate_edge_changes(&dag.graph)?;
+        staged.validate_acyclic()?;
         let invalidated = staged.reconcile_superseded_evidence();
         task.evidence_node_id = Some(evidence_node.id.clone());
         task.error_message = None;

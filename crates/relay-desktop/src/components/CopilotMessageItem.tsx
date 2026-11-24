@@ -49,7 +49,6 @@ import type {
   AgentChatMessage_Serialize,
   AgentToolTrace_Serialize,
 } from "../bindings";
-import { extractCleanRunPreset } from "../lib/formatError";
 import type { ApprovalInput } from "../lib/relayApi";
 
 const STREAMDOWN_PLUGINS = { cjk };
@@ -196,7 +195,7 @@ function InlineApprovalCard({
 }) {
   const { t } = useTranslation();
   const isPatchFix = approval.patch_id != null;
-  const cleanPreset = isPatchFix ? null : extractCleanRunPreset(approval.summary);
+  const cleanPreset = isPatchFix ? null : approval.summary.trim() || null;
   const diffLines = parseDiffLines(approval.diff_preview);
 
   return (

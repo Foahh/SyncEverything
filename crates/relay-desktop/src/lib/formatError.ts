@@ -27,7 +27,6 @@ const KNOWN_ERROR_KEYS: Readonly<Record<string, ErrorTranslationKey>> = {
 
 const RELAY_ERROR_PREFIX_RE =
   /^(?:git command failed|transport error|internal error|uv command failed|llm client error):\s*/i;
-const LEGACY_CLEAN_RUN_RE = /^Preflight passed\.\s*Approve to run\s+(.+?)\.?$/i;
 
 function matchKnownErrorKey(message: string): ErrorTranslationKey | null {
   const normalized = message.replace(RELAY_ERROR_PREFIX_RE, "").trim();
@@ -58,15 +57,4 @@ export function formatErrorMessage(err: unknown, t: TFunction, fallback?: string
   }
   const knownKey = matchKnownErrorKey(cleaned);
   return knownKey ? t(knownKey) : cleaned;
-}
-
-export function extractCleanRunPreset(summary: string): string | null {
-  const trimmed = summary.trim();
-  if (!trimmed) return null;
-  const legacyMatch = LEGACY_CLEAN_RUN_RE.exec(trimmed);
-  if (legacyMatch) {
-    const preset = legacyMatch[1]?.trim();
-    return preset || null;
-  }
-  return trimmed;
 }

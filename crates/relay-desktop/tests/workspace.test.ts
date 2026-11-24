@@ -13,7 +13,7 @@ import {
 } from "../src/lib/relayApi";
 
 import i18n from "../src/i18n";
-import { extractCleanRunPreset, formatErrorMessage } from "../src/lib/formatError";
+import { formatErrorMessage } from "../src/lib/formatError";
 import { buildMcpSnippet } from "../src/lib/mcpConfig";
 
 const testSpec: TaskSpec_Deserialize = {
@@ -184,13 +184,4 @@ test("formatErrorMessage maps known backend errors, strips Error prefix, and fal
   expect(formatErrorMessage("   ", tZh, "自定义兜底")).toBe("自定义兜底");
   expect(formatErrorMessage("", tZh)).toBe(tZh("errors.generic"));
   expect(formatErrorMessage(null, tEn)).toBe(tEn("errors.generic"));
-});
-
-test("extractCleanRunPreset parses bare presets, legacy summaries, and empty strings", () => {
-  expect(extractCleanRunPreset("train")).toBe("train");
-  expect(extractCleanRunPreset("  train_grid  ")).toBe("train_grid");
-  expect(extractCleanRunPreset("Preflight passed. Approve to run train.")).toBe("train");
-  expect(extractCleanRunPreset("Preflight passed. Approve to run check")).toBe("check");
-  expect(extractCleanRunPreset("   ")).toBeNull();
-  expect(extractCleanRunPreset("")).toBeNull();
 });

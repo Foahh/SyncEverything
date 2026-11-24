@@ -1017,26 +1017,9 @@ fn same_directory(left: &Path, right: &Path) -> bool {
     left == right || matches!((left.canonicalize(), right.canonicalize()), (Ok(a), Ok(b)) if a == b)
 }
 
-fn legacy_data_dir(start: &Path) -> Option<PathBuf> {
-    start.ancestors()
-        .map(|dir| dir.join(".relay").join("desktop"))
-        .find(|dir| {
-            dir.join("workspace.json").is_file()
-                || dir.join("llm-settings.json").is_file()
-                || dir.join("repos").is_dir()
-        })
-}
-
 async fn resolve_base_data_dir(app: &AppHandle) -> RelayResult<PathBuf> {
     let dir = if let Some(dir) = env_path("RELAY_DATA_DIR") {
         dir
-    } else if let Some(legacy) = env::current_dir()
-        .ok()
-        .as_deref()
-        .and_then(legacy_data_dir)
-        .or_else(|| env_path("RELAY_REPO_ROOT").as_deref().and_then(legacy_data_dir))
-    {
-        legacy
     } else if let Ok(local_dir) = app.path().app_local_data_dir() {
         local_dir.join("relay-desktop")
     } else {
