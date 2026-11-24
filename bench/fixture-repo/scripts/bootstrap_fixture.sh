@@ -10,6 +10,7 @@ set -euo pipefail
 
 SOURCE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TARGET_DIR="${1:-$SOURCE_DIR/../../.tmp/relay-fixture}"
+mkdir -p "$(dirname "$TARGET_DIR")"
 TARGET_DIR="$(cd "$(dirname "$TARGET_DIR")" && pwd)/$(basename "$TARGET_DIR")"
 
 if [ -e "$TARGET_DIR/.git" ]; then
