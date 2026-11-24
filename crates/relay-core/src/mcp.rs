@@ -1,12 +1,13 @@
 use crate::contracts::{
     ApprovalDecision, ApprovalExecutionResponse, ApproveAndExecuteArgs, CheckEnvDiffArgs,
     DagSnapshot, EnvDiffReport, Freshness, GetDagSnapshotArgs, GraphNode, HandoffSummary, JsonValue,
-    ListHandoffsArgs, NodeKind, PatchKind, PatchProposal, PeerStatus, ProposeWorktreePatchArgs,
-    ReadEvidenceLogArgs, RunPreflightArgs, TaskId, TaskRecord, TaskState, TransportPath,
+    ListHandoffsArgs, NodeKind, PatchProposal, PeerStatus, ProposeWorktreePatchArgs,
+    ReadEvidenceLogArgs, ReadWorktreeFileArgs, RunPreflightArgs, TaskId, TaskRecord, TaskState,
+    TransportPath, WorktreeFileView,
 };
 use crate::engine::RelayEngine;
 use crate::error::{RelayError, RelayResult};
-use crate::sandbox::{PreflightReport, WorktreeHandle, WorktreeSandbox};
+use crate::sandbox::{PatchInput, PreflightReport, WorktreeHandle, WorktreeSandbox};
 use crate::state::validate_transition;
 use crate::sync::RelayNode;
 use chrono::Utc;
@@ -172,21 +173,51 @@ impl RelayMcpServer {
         .await
     }
 
+    pub async fn handle_read_worktree_file(
+        &self,
+        args: ReadWorktreeFileArgs,
+    ) -> RelayResult<WorktreeFileView> {
+        let task_id = parse_task_id(&args.task_id)?;
+        let context = self.context.clone();
+        finish_operation(async move {
+            let _guard = context.lock_task(task_id).await;
+            let task = context.task(task_id).await?;
+            context.read_worktree_file(&task, &args).await
+        })
+        .await
+    }
+
     pub async fn handle_propose_patch(
         &self,
         args: ProposeWorktreePatchArgs,
     ) -> RelayResult<PatchProposal> {
         let task_id = parse_task_id(&args.task_id)?;
-        let kind = match args.patch_kind.as_str() {
-            "uv_spec" => PatchKind::UvSpec,
-            "code_diff" => PatchKind::CodeDiff,
-            kind => return Err(RelayError::Internal(format!("unknown patch kind '{kind}'"))),
-        };
+        match args.patch_kind.as_str() {
+            "uv_spec" => {
+                if args.uv_spec.as_deref().map(str::trim).is_none_or(str::is_empty) {
+                    return Err(RelayError::Internal(
+                        "patch_kind 'uv_spec' requires a non-empty 'uv_spec' string".into(),
+                    ));
+                }
+            }
+            "file_edits" => {
+                if args.edits.as_deref().is_none_or(|edits| edits.is_empty()) {
+                    return Err(RelayError::Internal(
+                        "patch_kind 'file_edits' requires a non-empty 'edits' array".into(),
+                    ));
+                }
+            }
+            kind => {
+                return Err(RelayError::Internal(format!(
+                    "unknown patch kind '{kind}' (expected 'uv_spec' or 'file_edits')"
+                )));
+            }
+        }
         let context = self.context.clone();
         finish_operation(async move {
             let _guard = context.lock_task(task_id).await;
             let task = context.task(task_id).await?;
-            context.propose_patch(&task, kind, &args).await
+            context.propose_patch(&task, &args).await
         })
         .await
     }
@@ -371,44 +402,93 @@ impl RelayMcpContext {
         result
     }
 
+    async fn read_worktree_file(
+        &self,
+        task: &TaskRecord,
+        args: &ReadWorktreeFileArgs,
+    ) -> RelayResult<WorktreeFileView> {
+        let sandbox = self.sandbox()?;
+        let handle = if matches!(
+            task.state,
+            TaskState::Completed | TaskState::Rejected | TaskState::Failed | TaskState::Stale
+        ) {
+            self.find_worktree(task).await?.ok_or_else(|| {
+                RelayError::Internal(format!(
+                    "task {} has no active worktree in state {:?}",
+                    task.spec.task_id, task.state
+                ))
+            })?
+        } else {
+            self.worktree(task).await?
+        };
+        sandbox
+            .read_worktree_file(
+                handle.worktree_path(),
+                &args.file_path,
+                args.start_line,
+                args.end_line,
+                16_384,
+            )
+            .await
+    }
+
     async fn propose_patch(
         &self,
         task: &TaskRecord,
-        kind: PatchKind,
         args: &ProposeWorktreePatchArgs,
     ) -> RelayResult<PatchProposal> {
         let sandbox = self.sandbox()?;
         self.start_preflight(task).await?;
-        let result = async {
-            let handle = self.worktree(task).await?;
-            let manifest = sandbox.task_manifest(handle.worktree_path())?;
-            let proposal = sandbox
-                .apply_and_verify_patch(
-                    task.spec.task_id,
-                    handle.worktree_path(),
-                    handle.branch_name(),
-                    &manifest,
-                    kind,
-                    &args.summary,
-                    &args.content,
-                )
-                .await?;
-            if !proposal.smoke_verified {
+        let handle = self.worktree(task).await?;
+        let manifest = sandbox.task_manifest(handle.worktree_path())?;
+        let patch_input = match args.patch_kind.as_str() {
+            "uv_spec" => PatchInput::UvSpec(
+                args.uv_spec
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .ok_or_else(|| {
+                        RelayError::Internal(
+                            "patch_kind 'uv_spec' requires a non-empty 'uv_spec' string".into(),
+                        )
+                    })?,
+            ),
+            "file_edits" => PatchInput::FileEdits(
+                args.edits
+                    .as_deref()
+                    .filter(|edits| !edits.is_empty())
+                    .ok_or_else(|| {
+                        RelayError::Internal(
+                            "patch_kind 'file_edits' requires a non-empty 'edits' array".into(),
+                        )
+                    })?,
+            ),
+            kind => {
                 return Err(RelayError::Internal(format!(
-                    "patch failed smoke verification:\n{}",
-                    proposal.smoke_stdout_tail,
+                    "unknown patch kind '{kind}' (expected 'uv_spec' or 'file_edits')"
                 )));
             }
-            let task = self.engine.attach_patch_proposal(proposal).await?;
-            task.active_proposal.ok_or_else(|| {
-                RelayError::Internal("verified patch was not recorded".into())
-            })
+        };
+        let proposal = sandbox
+            .apply_and_verify_patch(
+                task.spec.task_id,
+                handle.worktree_path(),
+                handle.branch_name(),
+                &manifest,
+                patch_input,
+                &args.summary,
+            )
+            .await?;
+        if !proposal.smoke_verified {
+            return Err(RelayError::Internal(format!(
+                "patch failed smoke verification (worktree rolled back cleanly for retry):\n{}",
+                proposal.smoke_stdout_tail,
+            )));
         }
-        .await;
-        if result.is_err() {
-            self.cleanup_after_error(task).await;
-        }
-        result
+        let task = self.engine.attach_patch_proposal(proposal).await?;
+        task.active_proposal.ok_or_else(|| {
+            RelayError::Internal("verified patch was not recorded".into())
+        })
     }
 
     async fn finish_approval(
@@ -662,7 +742,7 @@ impl RelayMcpServer {
     }
 
     #[tool(
-        description = "Run the repository's smoke preflight check inside an isolated Git worktree for task_id without modifying the main working tree. Always run this before proposing a patch or executing a task."
+        description = "Run the repository's smoke preflight check inside an isolated Git worktree for task_id without modifying the main working tree. When smoke fails, returns stderr_tail, detected_missing_module, and automatic error_snippets around failing worktree lines. Always run this before proposing a patch or executing a task."
     )]
     async fn run_preflight_in_worktree(
         &self,
@@ -672,7 +752,17 @@ impl RelayMcpServer {
     }
 
     #[tool(
-        description = "After a failed smoke preflight, apply a candidate fix inside the task's isolated Git worktree, re-run smoke verification, and persist the PatchProposal. Set patch_kind to 'uv_spec' with a single Python requirement string (e.g. 'requests>=2.32') for missing modules, or 'code_diff' with a unified git diff for code fixes."
+        description = "Read a UTF-8 file with 1-based line numbers inside the isolated Git worktree for task_id (read-only; blocks .git, .venv, .relay, .env*, and binary files). Use this when you need exact lines before calling propose_worktree_patch with file_edits."
+    )]
+    async fn read_worktree_file(
+        &self,
+        Parameters(args): Parameters<ReadWorktreeFileArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        tool_result(self.handle_read_worktree_file(args).await)
+    }
+
+    #[tool(
+        description = "After a failed smoke preflight (or requested code fix), apply a candidate fix inside the task's isolated Git worktree, re-run smoke verification, and persist the PatchProposal. Set patch_kind to 'uv_spec' with uv_spec='<package or wheel path>' for missing Python dependencies, or 'file_edits' with edits=[{file_path, old_text, new_text}] for exact search-and-replace edits (omit/null old_text to overwrite or create an entire file). Failed patches roll back the worktree cleanly for retry."
     )]
     async fn propose_worktree_patch(
         &self,

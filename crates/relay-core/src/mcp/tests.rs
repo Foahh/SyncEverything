@@ -1,5 +1,5 @@
 use super::*;
-use crate::contracts::{EdgeKind, RuntimeMode, TaskSpec};
+use crate::contracts::{EdgeKind, FileEdit, RuntimeMode, TaskSpec};
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -50,19 +50,13 @@ else:
     print("training done")
 "#;
 
-const FIX: &str = r#"diff --git a/src/app.py b/src/app.py
---- a/src/app.py
-+++ b/src/app.py
-@@ -1,6 +1,8 @@
- import argparse
- import json
- 
-+SMOKE_MESSAGE = "smoke passed"
-+
- parser = argparse.ArgumentParser()
- parser.add_argument("--smoke", action="store_true")
- parser.add_argument("--alpha", type=float)
-"#;
+fn fix_edits() -> Vec<FileEdit> {
+    vec![FileEdit {
+        file_path: "src/app.py".into(),
+        old_text: Some("import argparse\nimport json\n".into()),
+        new_text: "import argparse\nimport json\n\nSMOKE_MESSAGE = \"smoke passed\"\n".into(),
+    }]
+}
 
 struct Fixture {
     temp: PathBuf,
@@ -211,18 +205,50 @@ async fn mcp_end_to_end_preflight_patch_approval_and_stale_block() {
         .unwrap();
     assert!(!report.smoke_passed);
     assert!(report.stderr_tail.contains("NameError"), "{}", report.raw_log);
+    assert!(!report.error_snippets.is_empty());
     let task = fixture.task(task_id).await;
     assert_eq!(task.state, TaskState::PreflightRunning);
     assert!(task.preflight_summary.unwrap().contains("failed"));
+
+    let worktree_file = server
+        .handle_read_worktree_file(ReadWorktreeFileArgs {
+            task_id: task_id.to_string(),
+            file_path: "src/app.py".into(),
+            start_line: Some(1),
+            end_line: Some(15),
+        })
+        .await
+        .unwrap();
+    assert_eq!(worktree_file.file_path, "src/app.py");
+    assert!(worktree_file.content.contains("print(SMOKE_MESSAGE)"));
+
+    // Failed smoke verification rolls back worktree cleanly and allows an immediate retry.
+    let failed_patch = server
+        .handle_propose_patch(ProposeWorktreePatchArgs {
+            task_id: task_id.to_string(),
+            patch_kind: "file_edits".into(),
+            summary: "Incomplete edit that still fails smoke".into(),
+            uv_spec: None,
+            edits: Some(vec![FileEdit {
+                file_path: "src/app.py".into(),
+                old_text: Some("import json\n".into()),
+                new_text: "import json\nWRONG_CONST = 'nope'\n".into(),
+            }]),
+        })
+        .await;
+    assert!(failed_patch.is_err());
+    assert!(report.worktree_path.is_dir());
+
     let marker = report.worktree_path.join(".preflight-marker");
     fs::write(&marker, "reuse this worktree").unwrap();
 
     let patch = server
         .handle_propose_patch(ProposeWorktreePatchArgs {
             task_id: task_id.to_string(),
-            patch_kind: "code_diff".into(),
+            patch_kind: "file_edits".into(),
             summary: "Define the smoke message".into(),
-            content: FIX.into(),
+            uv_spec: None,
+            edits: Some(fix_edits()),
         })
         .await
         .unwrap();

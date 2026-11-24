@@ -67,6 +67,7 @@ function toolIcon(toolName: string) {
     case "read_evidence_log":
       return <FileText />;
     case "read_repo_file":
+    case "read_worktree_file":
       return <FileCode2 />;
     case "git_diff":
       return <GitCompare />;
@@ -91,6 +92,7 @@ type ToolI18nKey =
   | "copilot.tools.get_dag_snapshot"
   | "copilot.tools.read_evidence_log"
   | "copilot.tools.run_preflight_in_worktree"
+  | "copilot.tools.read_worktree_file"
   | "copilot.tools.propose_worktree_patch"
   | "copilot.tools.approve_and_execute_task"
   | "copilot.tools.submit_task"
@@ -105,6 +107,7 @@ const KNOWN_TOOL_KEYS: Record<string, ToolI18nKey> = {
   get_dag_snapshot: "copilot.tools.get_dag_snapshot",
   read_evidence_log: "copilot.tools.read_evidence_log",
   run_preflight_in_worktree: "copilot.tools.run_preflight_in_worktree",
+  read_worktree_file: "copilot.tools.read_worktree_file",
   propose_worktree_patch: "copilot.tools.propose_worktree_patch",
   approve_and_execute_task: "copilot.tools.approve_and_execute_task",
   submit_task: "copilot.tools.submit_task",

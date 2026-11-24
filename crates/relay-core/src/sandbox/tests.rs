@@ -1,5 +1,5 @@
 use super::*;
-use crate::contracts::{JsonValue, PatchKind};
+use crate::contracts::{FileEdit, JsonValue, PatchKind};
 use std::collections::BTreeMap;
 use std::fs;
 use uuid::Uuid;
@@ -212,7 +212,7 @@ async fn git_bundle_roundtrip_transfers_commits_between_repos() {
 }
 
 #[tokio::test]
-async fn worktree_preflight_and_code_diff_self_healing_preserves_clean_main_tree() {
+async fn worktree_preflight_and_file_edits_self_healing_preserves_clean_main_tree() {
     let temp = TempDir::new();
     let repo = temp.join("main");
     let base_commit = init_python_repo(&repo).await;
@@ -231,38 +231,136 @@ async fn worktree_preflight_and_code_diff_self_healing_preserves_clean_main_tree
     assert_eq!(report.exit_code, Some(1));
     assert!(report.stderr_tail.contains("NameError"));
     assert!(report.detected_missing_module.is_none());
+    assert!(
+        report.error_snippets.iter().any(|s| {
+            s.file_path == "src/app.py" && s.line == 11 && s.snippet.contains("print(SMOKE_MESSAGE)")
+        }),
+        "expected error_snippets for src/app.py:11, got {:?}",
+        report.error_snippets
+    );
 
-    let patch = r#"diff --git a/src/app.py b/src/app.py
---- a/src/app.py
-+++ b/src/app.py
-@@ -1,5 +1,7 @@
- import argparse
- import json
--
-+
-+SMOKE_MESSAGE = "Smoke passed"
-+
- parser = argparse.ArgumentParser()
- parser.add_argument("--smoke", action="store_true")
-diff --git a/fix-note.txt b/fix-note.txt
-new file mode 100644
---- /dev/null
-+++ b/fix-note.txt
-@@ -0,0 +1 @@
-+Smoke constant restored.
-"#;
+    // Worktree reader exposes numbered lines and blocks sensitive paths.
+    let view = sandbox
+        .read_worktree_file(path, "src/app.py", Some(1), Some(12), 4096)
+        .await
+        .unwrap();
+    assert_eq!(view.file_path, "src/app.py");
+    assert_eq!(view.start_line, 1);
+    assert!(view.content.contains("   1: import argparse"));
+    assert!(sandbox.read_worktree_file(path, "../outside.txt", None, None, 4096).await.is_err());
+    assert!(sandbox.read_worktree_file(path, ".git/HEAD", None, None, 4096).await.is_err());
+    assert!(sandbox.read_worktree_file(path, ".venv/pyvenv.cfg", None, None, 4096).await.is_err());
+
+    // Zero-match and multi-match edits fail atomically with numbered snippets.
+    let zero_err = sandbox
+        .apply_and_verify_patch(
+            task_id,
+            path,
+            branch,
+            &manifest,
+            PatchInput::FileEdits(&[FileEdit {
+                file_path: "src/app.py".into(),
+                old_text: Some("NON_EXISTENT_SYMBOL = 1".into()),
+                new_text: "SMOKE_MESSAGE = \"Smoke passed\"".into(),
+            }]),
+            "Bad old_text",
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(zero_err.contains("did not match") && zero_err.contains("import argparse"), "{zero_err}");
+
+    let multi_err = sandbox
+        .apply_and_verify_patch(
+            task_id,
+            path,
+            branch,
+            &manifest,
+            PatchInput::FileEdits(&[FileEdit {
+                file_path: "src/app.py".into(),
+                old_text: Some("parser.add_argument".into()),
+                new_text: "parser.add_arg".into(),
+            }]),
+            "Ambiguous old_text",
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(multi_err.contains("matched 4 times") && multi_err.contains("Matches in src/app.py"), "{multi_err}");
+
+    // Protected paths and path traversal are rejected.
+    for blocked in ["../escape.py", ".git/config", ".venv/x.py", ".relay/state.json", ".env.local"] {
+        let err = sandbox
+            .apply_and_verify_patch(
+                task_id,
+                path,
+                branch,
+                &manifest,
+                PatchInput::FileEdits(&[FileEdit {
+                    file_path: blocked.into(),
+                    old_text: None,
+                    new_text: "blocked\n".into(),
+                }]),
+                "Blocked path",
+            )
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("blocked"), "{blocked}: {err}");
+    }
+
+    // A patch that fails smoke verification automatically rolls back tracked & untracked changes.
+    let failed_proposal = sandbox
+        .apply_and_verify_patch(
+            task_id,
+            path,
+            branch,
+            &manifest,
+            PatchInput::FileEdits(&[
+                FileEdit {
+                    file_path: "src/app.py".into(),
+                    old_text: Some("import json\n".into()),
+                    new_text: "import json\n\nWRONG_NAME = \"still broken\"\n".into(),
+                },
+                FileEdit {
+                    file_path: "scratch-untracked.txt".into(),
+                    old_text: None,
+                    new_text: "should be rolled back\n".into(),
+                },
+            ]),
+            "Broken candidate edit",
+        )
+        .await
+        .unwrap();
+    assert!(!failed_proposal.smoke_verified);
+    assert!(failed_proposal.diff_preview.contains("+WRONG_NAME"));
+    assert!(!path.join("scratch-untracked.txt").exists());
+    assert!(worktree.diff().await.unwrap().is_empty());
+
+    // Subsequent retry succeeds cleanly and idempotently on the rolled-back worktree.
+    let edits = vec![
+        FileEdit {
+            file_path: "src/app.py".into(),
+            old_text: Some("import argparse\nimport json\n".into()),
+            new_text: "import argparse\nimport json\n\nSMOKE_MESSAGE = \"Smoke passed\"\n".into(),
+        },
+        FileEdit {
+            file_path: "fix-note.txt".into(),
+            old_text: None,
+            new_text: "Smoke constant restored.\n".into(),
+        },
+    ];
     let proposal = sandbox
         .apply_and_verify_patch(
             task_id,
             path,
             branch,
             &manifest,
-            PatchKind::CodeDiff,
+            PatchInput::FileEdits(&edits),
             "Define the smoke message",
-            patch,
         )
         .await
         .unwrap();
+    assert_eq!(proposal.kind, PatchKind::FileEdits);
     assert!(proposal.smoke_verified, "{}", proposal.smoke_stdout_tail);
     assert!(proposal.smoke_stdout_tail.contains("Smoke passed"));
     assert!(proposal.diff_preview.contains("diff --git a/src/app.py b/src/app.py"));
@@ -286,6 +384,42 @@ new file mode 100644
     assert!(git(&repo, &["branch", "--list", branch]).await.is_empty());
     assert_eq!(sandbox.head_commit_sha().await.unwrap(), base_commit);
     assert!(!sandbox.is_working_tree_dirty().await.unwrap());
+}
+
+#[test]
+fn extract_error_snippets_parses_generic_formats_and_excludes_sensitive_dirs() {
+    let temp = TempDir::new();
+    let wt = temp.join("wt");
+    fs::create_dir_all(wt.join("src")).unwrap();
+    fs::create_dir_all(wt.join(".venv/lib")).unwrap();
+    fs::create_dir_all(wt.join("target/debug")).unwrap();
+    fs::write(wt.join("src/app.py"), PYTHON).unwrap();
+    fs::write(wt.join("uv.lock"), "version = 1\nrevision = 3\n\n[[package]\nname = \n").unwrap();
+    fs::write(wt.join(".venv/lib/site.py"), "x = 1\n").unwrap();
+    fs::write(wt.join("target/debug/gen.rs"), "fn main() {}\n").unwrap();
+    fs::write(wt.join(".env"), "SECRET=1\n").unwrap();
+
+    let app_abs = wt.join("src/app.py");
+    let venv_abs = wt.join(".venv/lib/site.py");
+    let stderr = format!(
+        "Traceback (most recent call last):\n\
+         \x20 File \"{}\", line 1, in <module>\n\
+         \x20 File \"{}\", line 11, in main\n\
+         --> target/debug/gen.rs:1:1\n\
+         .env:1:1\n\
+         error: Failed to parse: `uv.lock`\n\
+         \x20 Caused by: TOML parse error at line 4, column 10\n",
+        venv_abs.display(),
+        app_abs.display(),
+    );
+    let snippets = extract_error_snippets(&wt, &stderr);
+    assert_eq!(snippets.len(), 2, "{snippets:?}");
+    assert_eq!(snippets[0].file_path, "src/app.py");
+    assert_eq!(snippets[0].line, 11);
+    assert!(snippets[0].snippet.contains("  11:     print(SMOKE_MESSAGE)"));
+    assert_eq!(snippets[1].file_path, "uv.lock");
+    assert_eq!(snippets[1].line, 4);
+    assert!(snippets[1].snippet.contains("   4: [[package]"));
 }
 
 #[test]

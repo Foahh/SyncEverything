@@ -134,7 +134,7 @@ pub fn copilot_tool_definitions() -> Vec<Value> {
         ),
         tool_def(
             "run_preflight_in_worktree",
-            "Run the repository smoke preflight inside an isolated Git worktree for task_id without modifying the main working tree.",
+            "Run the repository smoke preflight inside an isolated Git worktree for task_id without modifying the main working tree. Returns stderr_tail, detected_missing_module, and error_snippets on failure.",
             json!({
                 "type": "object",
                 "properties": {
@@ -144,17 +144,44 @@ pub fn copilot_tool_definitions() -> Vec<Value> {
             }),
         ),
         tool_def(
+            "read_worktree_file",
+            "Read a UTF-8 file with line numbers inside the isolated Git worktree for task_id (read-only; blocks .git, .venv, .relay, .env*, and binary files).",
+            json!({
+                "type": "object",
+                "properties": {
+                    "task_id": { "type": "string" },
+                    "file_path": { "type": "string", "description": "Worktree-relative path, e.g. 'src/main.py' or 'uv.lock'" },
+                    "start_line": { "type": "integer", "minimum": 1 },
+                    "end_line": { "type": "integer", "minimum": 1 }
+                },
+                "required": ["task_id", "file_path"]
+            }),
+        ),
+        tool_def(
             "propose_worktree_patch",
             "After a failed preflight, apply a candidate fix inside the task's isolated Git worktree, re-run smoke check, and persist a PatchProposal.",
             json!({
                 "type": "object",
                 "properties": {
                     "task_id": { "type": "string" },
-                    "patch_kind": { "type": "string", "enum": ["uv_spec", "code_diff"] },
+                    "patch_kind": { "type": "string", "enum": ["uv_spec", "file_edits"] },
                     "summary": { "type": "string" },
-                    "content": { "type": "string", "description": "PEP-508 package spec for uv_spec or unified git diff for code_diff" }
+                    "uv_spec": { "type": "string", "description": "Required when patch_kind='uv_spec': PEP-508 package spec or local wheel path" },
+                    "edits": {
+                        "type": "array",
+                        "description": "Required when patch_kind='file_edits': ordered exact search-and-replace or full-file edits",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "file_path": { "type": "string" },
+                                "old_text": { "type": ["string", "null"], "description": "Exact unique snippet to replace, or null/omitted to overwrite or create the entire file" },
+                                "new_text": { "type": "string" }
+                            },
+                            "required": ["file_path", "new_text"]
+                        }
+                    }
                 },
-                "required": ["task_id", "patch_kind", "summary", "content"]
+                "required": ["task_id", "patch_kind", "summary"]
             }),
         ),
         tool_def(

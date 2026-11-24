@@ -8,7 +8,8 @@ use relay_core::agent::{
 use relay_core::contracts::{
     ApprovalExecutionResponse, ApproveAndExecuteArgs, CheckEnvDiffArgs, EdgeKind, Freshness,
     GetDagSnapshotArgs, GraphEdge, GraphNode, ListHandoffsArgs, NodeKind, ProposeWorktreePatchArgs,
-    ReadEvidenceLogArgs, RunPreflightArgs, RuntimeMode, TaskRecord, TaskSpec, TaskState,
+    ReadEvidenceLogArgs, ReadWorktreeFileArgs, RunPreflightArgs, RuntimeMode, TaskRecord, TaskSpec,
+    TaskState,
 };
 use relay_core::error::{RelayError, RelayResult};
 use relay_core::sandbox::{WorktreeSandbox, load_manifest, resolve_preset};
@@ -553,6 +554,12 @@ impl DesktopRuntime {
             "run_preflight_in_worktree" => {
                 match serde_json::from_value::<RunPreflightArgs>(parsed_args) {
                     Ok(args) => result_json(self.mcp.handle_run_preflight(args).await),
+                    Err(error) => err_outcome(format!("Invalid arguments: {error}")),
+                }
+            }
+            "read_worktree_file" => {
+                match serde_json::from_value::<ReadWorktreeFileArgs>(parsed_args) {
+                    Ok(args) => result_json(self.mcp.handle_read_worktree_file(args).await),
                     Err(error) => err_outcome(format!("Invalid arguments: {error}")),
                 }
             }

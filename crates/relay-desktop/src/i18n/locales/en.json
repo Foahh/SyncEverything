@@ -153,6 +153,7 @@
       "get_dag_snapshot": "Inspected project graph",
       "read_evidence_log": "Read verified result log",
       "run_preflight_in_worktree": "Ran isolated pre-check",
+      "read_worktree_file": "Read worktree file",
       "propose_worktree_patch": "Prepared verified fix",
       "approve_and_execute_task": "Requested run confirmation",
       "submit_task": "Submitted task preset",

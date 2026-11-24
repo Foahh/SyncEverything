@@ -18,6 +18,7 @@ fn failure(module: &str) -> PreflightReport {
         stdout_tail: String::new(),
         stderr_tail: traceback.clone(),
         detected_missing_module: Some(module.into()),
+        error_snippets: Vec::new(),
         raw_log: traceback,
     }
 }
@@ -92,7 +93,7 @@ async fn agent_deterministic_fallback_diagnoses_missing_module() {
     for (module, package) in [("scipy", "scipy"), ("sklearn.model_selection", "scikit-learn")] {
         let proposal = agent.diagnose_preflight_failure(&failure(module), "").await.unwrap();
         assert_eq!(proposal.patch_kind, PatchKind::UvSpec);
-        assert_eq!(proposal.content, package);
+        assert_eq!(proposal.uv_spec.as_deref(), Some(package));
         assert_eq!(proposal.source, "deterministic_fallback");
     }
 
@@ -170,7 +171,7 @@ async fn agent_uses_structured_llm_diagnosis() {
     let response = json!({
         "patch_kind": "uv_spec",
         "summary": "Add the missing library",
-        "content": "scipy>=1.14"
+        "uv_spec": "scipy>=1.14"
     });
     let (url, server) = mock_completion(response.to_string()).await;
     let proposal = SelfHealingAgent::new(endpoint(url))
@@ -178,7 +179,7 @@ async fn agent_uses_structured_llm_diagnosis() {
         .await
         .unwrap();
     assert_eq!(proposal.patch_kind, PatchKind::UvSpec);
-    assert_eq!(proposal.content, "scipy>=1.14");
+    assert_eq!(proposal.uv_spec.as_deref(), Some("scipy>=1.14"));
     assert_eq!(proposal.source, "llm");
     let body = server.await.unwrap();
     assert_eq!(body["response_format"]["type"], "json_object");
@@ -187,14 +188,14 @@ async fn agent_uses_structured_llm_diagnosis() {
 
 #[tokio::test]
 async fn agent_parses_markdown_fenced_json_diagnosis() {
-    let fenced = "```json\n{\"patch_kind\":\"uv_spec\",\"summary\":\"Install scipy\",\"content\":\"scipy>=1.14\"}\n```";
+    let fenced = "```json\n{\"patch_kind\":\"file_edits\",\"summary\":\"Define constant\",\"edits\":[{\"file_path\":\"src/app.py\",\"old_text\":\"a = 1\",\"new_text\":\"a = 2\"}]}\n```";
     let (url, server) = mock_completion(fenced.into()).await;
     let proposal = SelfHealingAgent::new(endpoint(url))
         .diagnose_preflight_failure(&failure("scipy"), "Fixture")
         .await
         .unwrap();
-    assert_eq!(proposal.patch_kind, PatchKind::UvSpec);
-    assert_eq!(proposal.content, "scipy>=1.14");
+    assert_eq!(proposal.patch_kind, PatchKind::FileEdits);
+    assert_eq!(proposal.edits.as_ref().unwrap().len(), 1);
     let _ = server.await.unwrap();
 }
 

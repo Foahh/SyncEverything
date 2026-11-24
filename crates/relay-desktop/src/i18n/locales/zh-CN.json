@@ -153,6 +153,7 @@
       "get_dag_snapshot": "读取项目状态图谱",
       "read_evidence_log": "读取最新结果日志",
       "run_preflight_in_worktree": "在隔离副本执行预检",
+      "read_worktree_file": "读取隔离副本文件",
       "propose_worktree_patch": "生成并验证修复方案",
       "approve_and_execute_task": "请求人工确认并执行",
       "submit_task": "提交预设实验任务",
