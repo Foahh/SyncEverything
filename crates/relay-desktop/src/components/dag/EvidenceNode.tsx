@@ -6,7 +6,19 @@ import { useTranslation } from "react-i18next";
 import type { GraphNode, JsonValue } from "../../bindings";
 import type { RelayFlowNode } from "../../lib/dagLayout";
 
-const ACRONYMS = new Set(["mae", "rmse", "mse", "r2", "ms", "cpu", "gpu", "rtt"]);
+const ACRONYMS = new Set([
+  "mae",
+  "rmse",
+  "mse",
+  "r2",
+  "ms",
+  "cpu",
+  "gpu",
+  "rtt",
+  "lr",
+  "cuda",
+  "mps",
+]);
 
 function formatMetricLabel(key: string): string {
   return key

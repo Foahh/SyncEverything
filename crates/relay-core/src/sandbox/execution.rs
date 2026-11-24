@@ -71,7 +71,12 @@ impl WorktreeSandbox {
 
         let start = Instant::now();
         let worktree_path = std::path::absolute(worktree_path)?;
-        let mut command = worktree_command(&preset.program, &worktree_path);
+        let program = Path::new(&preset.program);
+        #[cfg(windows)]
+        let launcher = std::env::var_os("PATH").and_then(|path| windows_package_launcher(preset, &path));
+        #[cfg(windows)]
+        let program = launcher.as_deref().unwrap_or(program);
+        let mut command = worktree_command(program, &worktree_path);
         let is_uv = Path::new(&preset.program)
             .file_stem()
             .and_then(|stem| stem.to_str())
@@ -232,14 +237,70 @@ impl WorktreeSandbox {
     }
 }
 
-fn worktree_command(program: &str, worktree_path: &Path) -> Command {
+#[cfg(windows)]
+fn windows_package_launcher(preset: &CommandPreset, search_path: &std::ffi::OsStr) -> Option<std::path::PathBuf> {
+    // Standard Windows package-manager installs can provide only a .cmd shim. Restrict
+    // shim execution to literal starter commands with no caller-controlled arguments.
+    let program = preset.program.as_str();
+    if !matches!(program, "npm" | "pnpm" | "yarn") || !preset.allowed_params.is_empty() {
+        return None;
+    }
+    match preset.args.as_slice() {
+        [version] if version == "--version" => {}
+        [run, script] if run == "run" && matches!(script.as_str(), "lint" | "typecheck" | "test" | "build") => {}
+        _ => return None,
+    }
+    std::env::split_paths(search_path)
+        .filter(|dir| dir.is_absolute())
+        .flat_map(|dir| [dir.join(format!("{program}.exe")), dir.join(format!("{program}.cmd"))])
+        .find(|path| path.is_file())
+}
+
+#[cfg(all(windows, test))]
+#[test]
+fn package_manager_shims_are_limited_to_fixed_starter_commands() {
+    let dir = tempfile::tempdir().unwrap();
+    let shim = dir.path().join("pnpm.cmd");
+    std::fs::write(&shim, "").unwrap();
+    let mut preset = CommandPreset {
+        description: String::new(),
+        program: "pnpm".into(),
+        args: vec!["--version".into()],
+        timeout_secs: 120,
+        allowed_params: vec![],
+    };
+    assert_eq!(windows_package_launcher(&preset, dir.path().as_os_str()), Some(shim));
+    preset.allowed_params.push("mode".into());
+    assert!(windows_package_launcher(&preset, dir.path().as_os_str()).is_none());
+}
+
+fn worktree_command(program: impl AsRef<std::ffi::OsStr>, worktree_path: &Path) -> Command {
+    let program = program.as_ref();
     let mut command = Command::new(program);
     command.current_dir(worktree_path).stdin(Stdio::null());
     for key in ["VIRTUAL_ENV", "CONDA_PREFIX", "UV_PROJECT", "UV_WORKING_DIRECTORY"] {
         command.env_remove(key);
     }
     command.env("UV_PROJECT_ENVIRONMENT", worktree_path.join(".venv"));
+    if Path::new(program).file_stem().and_then(|name| name.to_str())
+        .is_some_and(|name| name.eq_ignore_ascii_case("cargo"))
+    {
+        command.env("CARGO_TARGET_DIR", worktree_path.join("target"));
+    }
     command
+}
+
+#[cfg(test)]
+#[test]
+fn cargo_outputs_are_scoped_to_the_task_checkout() {
+    use std::ffi::OsStr;
+    let checkout = std::env::temp_dir().join("relay-cargo-task");
+    let target = checkout.join("target");
+    for program in ["cargo", "cargo.exe"] {
+        let cmd = worktree_command(program, &checkout);
+        assert!(cmd.as_std().get_envs().any(|(key, value)|
+            key == OsStr::new("CARGO_TARGET_DIR") && value == Some(target.as_os_str())));
+    }
 }
 
 fn preset_args(preset: &CommandPreset, params: &BTreeMap<String, String>) -> RelayResult<Vec<String>> {

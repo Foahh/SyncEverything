@@ -57,7 +57,19 @@ function UnifiedDiffViewer({ diff }: { diff: string }) {
   );
 }
 
-const ACRONYMS = new Set(["mae", "rmse", "mse", "r2", "ms", "cpu", "gpu", "rtt"]);
+const ACRONYMS = new Set([
+  "mae",
+  "rmse",
+  "mse",
+  "r2",
+  "ms",
+  "cpu",
+  "gpu",
+  "rtt",
+  "lr",
+  "cuda",
+  "mps",
+]);
 
 function formatMetricLabel(key: string): string {
   return key

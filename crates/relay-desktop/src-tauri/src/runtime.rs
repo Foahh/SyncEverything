@@ -27,14 +27,13 @@ use std::env;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
-use tauri::AppHandle;
+use tauri::{AppHandle, Manager};
 use tauri_specta::Event;
 use tokio::sync::{Mutex, RwLock, watch};
 use tokio::time::{self, MissedTickBehavior};
 use uuid::Uuid;
 
-const DEFAULT_REPO_ID: &str = "forecast-bench";
-const FIXTURE_PATH: &str = "bench/fixture-repo";
+const DEFAULT_REPO_ID: &str = "default-workspace";
 const PAIRING_WINDOW: Duration = Duration::from_secs(120);
 const PEER_SYNC_INTERVAL: Duration = Duration::from_secs(3);
 const GIT_WATCH_INTERVAL: Duration = Duration::from_secs(2);
@@ -63,17 +62,7 @@ impl DesktopRuntime {
         app: AppHandle,
         explicit_repo_root: Option<PathBuf>,
     ) -> RelayResult<Arc<Self>> {
-        let cwd = env::current_dir().ok();
-        let starts = cwd
-            .as_deref()
-            .into_iter()
-            .chain([Path::new(env!("CARGO_MANIFEST_DIR"))]);
-        let ancestors: Vec<_> = starts.flat_map(Path::ancestors).collect();
-        let workspace_dir = ancestors
-            .iter()
-            .copied()
-            .find(|dir| dir.join(FIXTURE_PATH).join("relay.toml").is_file());
-        let base_data_dir = resolve_base_data_dir(workspace_dir.or(cwd.as_deref())).await?;
+        let base_data_dir = resolve_base_data_dir(&app).await?;
 
         let repo_root = if let Some(explicit) = explicit_repo_root {
             let abs = std::path::absolute(explicit)?;
@@ -92,20 +81,11 @@ impl DesktopRuntime {
                 )));
             }
             Some(std::path::absolute(env_root)?)
-        } else if let Some(saved) = load_workspace_prefs(&base_data_dir)
-            .repo_root
-            .map(PathBuf::from)
-            .filter(|path| path.is_dir())
-        {
-            Some(saved)
         } else {
-            workspace_dir
-                .map(|dir| dir.join(FIXTURE_PATH))
-                .or_else(|| {
-                    ancestors
-                        .iter()
-                        .find_map(|dir| dir.join("relay.toml").is_file().then(|| dir.to_path_buf()))
-                })
+            load_workspace_prefs(&base_data_dir)
+                .repo_root
+                .map(PathBuf::from)
+                .filter(|path| path.is_dir())
         };
 
         let workspace_info = inspect_workspace(repo_root.as_deref());
@@ -125,28 +105,9 @@ impl DesktopRuntime {
             .await?,
         );
 
-        let repo = repo_root
-            .as_ref()
+        let sandbox = repo_root.as_ref()
+            .filter(|root| root.join(".git").exists())
             .map(|root| WorktreeSandbox::new(root, repo_data_dir.join("worktrees")));
-        let head = if let Some(repo) = &repo {
-            match repo.head_commit_sha().await {
-                Ok(head) => Some(head),
-                Err(error) => {
-                    tracing::debug!(%error, "Repository HEAD is unavailable");
-                    None
-                }
-            }
-        } else {
-            None
-        };
-        let sandbox = repo
-            .as_ref()
-            .filter(|repo| {
-                head.is_some()
-                    && repo.repo_root().join(".git").exists()
-                    && load_manifest(repo.repo_root()).is_ok()
-            })
-            .cloned();
 
         let mode = engine.runtime_mode().await;
         let (network, events) =
@@ -163,18 +124,6 @@ impl DesktopRuntime {
                     tracing::warn!(%error, "Unable to sync initial repository HEAD artifact");
                 }
             }
-        } else if let (Some(repo), Some(head)) = (&repo, head)
-            && engine.dag_snapshot(true).await?.nodes.is_empty()
-        {
-            let seed = async {
-                let node = build_git_artifact_node(repo, head, origin).await?;
-                engine.upsert_node_and_edges(node, Vec::new()).await?;
-                Ok::<_, RelayError>(())
-            };
-            if let Err(error) = seed.await {
-                tracing::warn!(%error, "Unable to seed the repository HEAD artifact");
-            }
-            network.sync_loopback_head(engine.repo_id()).await;
         }
 
         let llm_config = load_llm_config(&base_data_dir.join("llm-settings.json"))
@@ -213,7 +162,29 @@ impl DesktopRuntime {
     }
 
     pub(crate) fn workspace_info(&self) -> WorkspaceInfo {
-        self.workspace.clone()
+        let mut info = self.workspace.clone();
+        if let Some(root) = self.engine.repo_root() {
+            let refreshed = inspect_workspace(Some(root));
+            if refreshed.repo_id == info.repo_id {
+                info = refreshed;
+            }
+        }
+        if info.repo_root.is_some() {
+            info.mcp_data_dir = Some(self.repo_data_dir.to_string_lossy().into_owned());
+        }
+        info
+    }
+
+    pub(crate) fn matches_workspace(&self, root: &Path) -> bool {
+        self.engine.repo_root().is_some_and(|active| {
+            same_directory(active, root) && inspect_workspace(Some(root)).repo_id == self.engine.repo_id()
+        })
+    }
+
+    pub(crate) fn shares_storage(&self, root: &Path) -> bool {
+        let id = inspect_workspace(Some(root)).repo_id;
+        let target = self.base_data_dir.join("repos").join(sanitize_repo_dir(&id));
+        same_directory(&target, &self.repo_data_dir)
     }
 
     pub(crate) fn persist_repo_preference(&self, repo_root: &Path) -> RelayResult<()> {
@@ -336,18 +307,25 @@ impl DesktopRuntime {
     }
 
     pub(crate) async fn pairing_ticket(&self) -> RelayResult<String> {
+        if self.engine.repo_root().is_none() {
+            return Err(RelayError::Git("Open the same Git repository on both devices before pairing.".into()));
+        }
         let guard = self.network.lock().await;
         let network = guard
             .as_ref()
             .ok_or_else(|| RelayError::Transport("Runtime is shutting down".into()))?;
-        let ticket = serde_json::to_string(&network.local.addr())?;
-        if network.mode != RuntimeMode::LocalDualSandbox {
-            network.local.open_pairing_window(PAIRING_WINDOW);
+        if network.mode == RuntimeMode::LocalDualSandbox {
+            return Err(RelayError::Transport("Choose a device role before pairing".into()));
         }
+        let ticket = serde_json::to_string(&network.local.addr())?;
+        network.local.open_pairing_window(PAIRING_WINDOW);
         Ok(ticket)
     }
 
     pub(crate) async fn connect_ticket(&self, ticket_json: &str) -> RelayResult<PeerStatus> {
+        if self.engine.repo_root().is_none() {
+            return Err(RelayError::Git("Open the same Git repository on both devices before pairing.".into()));
+        }
         let address = parse_pairing_ticket(ticket_json)?;
         let mut guard = self.network.lock().await;
         let network = guard
@@ -397,10 +375,14 @@ impl DesktopRuntime {
             .as_mut()
             .ok_or_else(|| RelayError::Transport("Runtime is shutting down".into()))?;
         let id = spec.task_id;
-        if network.mode != RuntimeMode::Client && self.sandbox.is_none() {
-            return Err(RelayError::Git(
-                "Open a Git repository with a commit and relay.toml before running a task.".into(),
-            ));
+        if network.mode != RuntimeMode::Client {
+            let sandbox = self.sandbox.as_ref().ok_or_else(|| RelayError::Git(
+                "Open a Git repository before running a task.".into(),
+            ))?;
+            load_manifest(sandbox.repo_root())?;
+            sandbox.head_commit_sha().await.map_err(|_| RelayError::Git(
+                "Create the first Git commit before running a task.".into(),
+            ))?;
         }
         let result = match network.mode {
             RuntimeMode::LocalDualSandbox => {
@@ -896,12 +878,9 @@ pub(crate) fn validate_user_repo(path: &Path) -> RelayResult<PathBuf> {
             "Selected folder is not a Git repository (missing .git). Run `git init` first.".into(),
         ));
     }
-    if !abs.join("relay.toml").is_file() {
-        return Err(RelayError::Internal(
-            "Selected repository is missing relay.toml at its root.".into(),
-        ));
+    if abs.join("relay.toml").is_file() {
+        let _ = load_manifest(&abs)?;
     }
-    let _ = load_manifest(&abs)?;
     Ok(abs)
 }
 
@@ -909,11 +888,12 @@ fn inspect_workspace(repo_root: Option<&Path>) -> WorkspaceInfo {
     let Some(root) = repo_root else {
         return WorkspaceInfo {
             repo_id: DEFAULT_REPO_ID.into(),
-            name: "Relay Workspace".into(),
+            name: String::new(),
             repo_root: None,
+            mcp_data_dir: None,
             is_git_repo: false,
             has_manifest: false,
-            smoke_preset: "smoke".into(),
+            smoke_preset: String::new(),
             presets: Vec::new(),
         };
     };
@@ -935,6 +915,7 @@ fn inspect_workspace(repo_root: Option<&Path>) -> WorkspaceInfo {
                 repo_id: manifest.project.repo_id,
                 name: manifest.project.name,
                 repo_root: Some(root.to_string_lossy().into_owned()),
+                mcp_data_dir: None,
                 is_git_repo,
                 has_manifest: true,
                 smoke_preset: manifest.project.smoke_preset,
@@ -947,12 +928,13 @@ fn inspect_workspace(repo_root: Option<&Path>) -> WorkspaceInfo {
                 .map(|name| name.to_string_lossy().into_owned())
                 .unwrap_or_else(|| DEFAULT_REPO_ID.into());
             WorkspaceInfo {
-                repo_id: DEFAULT_REPO_ID.into(),
+                repo_id: relay_core::sandbox::slugify_repo_id(&fallback_name),
                 name: fallback_name,
                 repo_root: Some(root.to_string_lossy().into_owned()),
+                mcp_data_dir: None,
                 is_git_repo,
-                has_manifest: false,
-                smoke_preset: "smoke".into(),
+                has_manifest: root.join("relay.toml").exists(),
+                smoke_preset: String::new(),
                 presets: Vec::new(),
             }
         }
@@ -1031,20 +1013,32 @@ fn env_path(name: &str) -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
-async fn resolve_base_data_dir(parent: Option<&Path>) -> RelayResult<PathBuf> {
+fn same_directory(left: &Path, right: &Path) -> bool {
+    left == right || matches!((left.canonicalize(), right.canonicalize()), (Ok(a), Ok(b)) if a == b)
+}
+
+fn legacy_data_dir(start: &Path) -> Option<PathBuf> {
+    start.ancestors()
+        .map(|dir| dir.join(".relay").join("desktop"))
+        .find(|dir| {
+            dir.join("workspace.json").is_file()
+                || dir.join("llm-settings.json").is_file()
+                || dir.join("repos").is_dir()
+        })
+}
+
+async fn resolve_base_data_dir(app: &AppHandle) -> RelayResult<PathBuf> {
     let dir = if let Some(dir) = env_path("RELAY_DATA_DIR") {
         dir
-    } else if let Some(parent) = parent {
-        let dir = parent.join(".relay").join("desktop");
-        match tokio::fs::create_dir_all(&dir).await {
-            Ok(()) => return Ok(std::path::absolute(dir)?),
-            Err(error) => tracing::debug!(
-                %error,
-                path = %dir.display(),
-                "Workspace data directory unavailable"
-            ),
-        }
-        env::temp_dir().join("relay-desktop")
+    } else if let Some(legacy) = env::current_dir()
+        .ok()
+        .as_deref()
+        .and_then(legacy_data_dir)
+        .or_else(|| env_path("RELAY_REPO_ROOT").as_deref().and_then(legacy_data_dir))
+    {
+        legacy
+    } else if let Ok(local_dir) = app.path().app_local_data_dir() {
+        local_dir.join("relay-desktop")
     } else {
         env::temp_dir().join("relay-desktop")
     };

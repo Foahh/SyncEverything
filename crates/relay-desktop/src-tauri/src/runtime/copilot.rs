@@ -455,8 +455,8 @@ impl DesktopRuntime {
                 })
             })
             .collect();
-        let presets: Vec<Value> = self
-            .workspace
+        let workspace = self.workspace_info();
+        let presets: Vec<Value> = workspace
             .presets
             .iter()
             .map(|p| {
@@ -470,8 +470,8 @@ impl DesktopRuntime {
 
         let workspace_ctx = format!(
             "{COPILOT_SYSTEM_PROMPT}\n\n[ACTIVE WORKSPACE CONTEXT]\nrepo_id: {}\nname: {}\nruntime_mode: {:?}\nhead_commit_sha: {}\nstale_evidence_count: {}\nwhitelisted_presets: {}\nrecent_tasks: {}",
-            self.workspace.repo_id,
-            self.workspace.name,
+            workspace.repo_id,
+            workspace.name,
             status.mode,
             snapshot.head_commit_sha.as_deref().unwrap_or("none"),
             snapshot.stale_count,

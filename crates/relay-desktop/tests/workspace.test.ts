@@ -1,11 +1,28 @@
 import { expect, test } from "bun:test";
-import type { AgentChatStreamEvent_Serialize } from "../src/bindings";
+import type {
+  AgentChatStreamEvent_Serialize,
+  GraphNode,
+  TaskSpec_Deserialize,
+} from "../src/bindings";
 import {
   findCommitArtifact,
   needsTaskApproval,
   relayApi,
   resetBrowserPreviewState,
+  requireCurrentApproval,
 } from "../src/lib/relayApi";
+
+import { buildMcpSnippet } from "../src/lib/mcpConfig";
+
+const testSpec: TaskSpec_Deserialize = {
+  task_id: "test-task",
+  repo_id: "sample",
+  base_commit_sha: "abc123",
+  command_preset: "check",
+  params: {},
+  require_approval: true,
+  requested_by_device: "test",
+};
 
 test("clearing an active preview turn leaves no messages or late events", async () => {
   resetBrowserPreviewState();
@@ -27,7 +44,22 @@ test("clearing an active preview turn leaves no messages or late events", async 
 
 test("selects the current snapshot when a checkout revisits a commit", async () => {
   const dag = await relayApi.getDagSnapshot(true);
-  const original = findCommitArtifact(dag, dag.head_commit_sha)!;
+  dag.head_commit_sha = testSpec.base_commit_sha;
+  const original: GraphNode = {
+    id: "original",
+    label: "Initial commit",
+    freshness: { status: "fresh" },
+    payload: {
+      kind: "artifact",
+      git_commit_sha: testSpec.base_commit_sha,
+      changed_files: [],
+      working_tree_dirty: false,
+      env_fingerprint: "test",
+    },
+    device_origin: "test",
+    created_at: dag.captured_at,
+    updated_at: dag.captured_at,
+  };
   const revisit = { ...original, id: "a-revisited" };
   const unrelated = {
     ...original,
@@ -40,7 +72,7 @@ test("selects the current snapshot when a checkout revisits a commit", async () 
 });
 
 test("shows clean runs only after successful preflight and explicit approval request", async () => {
-  const [original] = await relayApi.listTasks();
+  const original = await relayApi.submitTask(testSpec);
   const clean = {
     ...original,
     state: "preflight_running" as const,
@@ -57,17 +89,69 @@ test("shows clean runs only after successful preflight and explicit approval req
 
 test("a stale approval card cannot resolve a different proposal for the same task", async () => {
   resetBrowserPreviewState();
-  const [task] = await relayApi.listTasks();
+  const task = await relayApi.submitTask(testSpec);
   const taskId = task.spec.task_id;
   await expect(
-    relayApi.resolvePatchApproval({ taskId, patchId: null, decision: "approved" }),
-  ).rejects.toThrow();
-  expect((await relayApi.listTasks())[0].state).toBe("self_healing_proposed");
-  const result = await relayApi.resolvePatchApproval({
-    taskId,
-    patchId: task.active_proposal!.patch_id,
-    decision: "rejected",
-  });
-  expect(result.state).toBe("rejected");
+    relayApi.resolvePatchApproval({ taskId, patchId: "expired-fix", decision: "approved" }),
+  ).rejects.toThrow("changed");
+  expect((await relayApi.listTasks())[0].state).toBe("queued");
+  const current = {
+    ...task,
+    state: "self_healing_proposed" as const,
+    active_proposal: {
+      patch_id: "current-fix",
+      task_id: taskId,
+      kind: "uv_spec" as const,
+      summary: "fix",
+      diff_preview: "",
+      worktree_branch: "task/test",
+      smoke_verified: true,
+      smoke_stdout_tail: "",
+      created_at: task.created_at,
+    },
+  };
+  expect(() => requireCurrentApproval(current, null)).toThrow("changed");
+  expect(() => requireCurrentApproval(current, "expired-fix")).toThrow("changed");
+  expect(() => requireCurrentApproval(current, current.active_proposal.patch_id)).not.toThrow();
+  resetBrowserPreviewState();
+});
+
+test("MCP clients reuse the desktop repository and data paths verbatim", () => {
+  const workspace = {
+    repo_id: "test",
+    repo_root: "C:\\",
+    mcp_data_dir: "D:\\Data Folder\\repos\\test",
+  };
+  const expected = [
+    "--repo-root",
+    workspace.repo_root,
+    "--repo-id",
+    workspace.repo_id,
+    "--data-dir",
+    workspace.mcp_data_dir,
+    "mcp-stdio",
+  ];
+  for (const client of ["claude", "cursor"] as const) {
+    expect(JSON.parse(buildMcpSnippet(client, workspace)!).mcpServers.relay.args).toEqual(expected);
+  }
+  const codex = Bun.TOML.parse(buildMcpSnippet("codex", workspace)!);
+  expect(codex.mcp_servers.relay.args).toEqual(expected);
+  expect(buildMcpSnippet("claude", { ...workspace, mcp_data_dir: null })).toBeNull();
+  expect(buildMcpSnippet("codex")).toBeNull();
+});
+
+test("onboarding starts empty and preserves independent preview repositories", async () => {
+  resetBrowserPreviewState();
+  expect((await relayApi.getWorkspaceInfo()).repo_root).toBeNull();
+  expect((await relayApi.getDagSnapshot(true)).nodes).toEqual([]);
+  const path = "/preview/project";
+  expect((await relayApi.openWorkspaceRepo(path)).presets).toEqual([]);
+  const workspace = await relayApi.initWorkspaceManifest();
+  expect(workspace.presets.map((preset) => preset.name)).toEqual(["check"]);
+  await relayApi.submitTask(testSpec);
+  await relayApi.openWorkspaceRepo("/preview/other");
+  expect(await relayApi.listTasks()).toEqual([]);
+  expect((await relayApi.openWorkspaceRepo(path)).presets).toEqual(workspace.presets);
+  expect((await relayApi.listTasks()).map((task) => task.spec.task_id)).toEqual([testSpec.task_id]);
   resetBrowserPreviewState();
 });

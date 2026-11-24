@@ -1,0 +1,55 @@
+[project]
+repo_id = "pytorch-cuda-demo"
+name = "PyTorch CUDA Demo"
+smoke_preset = "smoke"
+
+[presets.smoke]
+description = "Verify PyTorch runtime, accelerator selection (CUDA/MPS/CPU), and one autograd step"
+program = "uv"
+args = ["run", "--locked", "python", "train.py", "--smoke"]
+timeout_secs = 120
+allowed_params = ["device"]
+
+[presets.train]
+description = "Train a 3-layer MLP on synthetic concentric-spiral rings and emit JSON metrics"
+program = "uv"
+args = [
+  "run",
+  "--locked",
+  "python",
+  "train.py",
+  "--epochs",
+  "40",
+  "--lr",
+  "0.005",
+  "--hidden",
+  "128",
+  "--batch_size",
+  "256",
+  "--samples",
+  "4096",
+]
+timeout_secs = 180
+allowed_params = ["epochs", "lr", "hidden", "batch_size", "samples", "seed", "device"]
+
+[presets.eval]
+description = "Quick seeded validation run across the selected accelerator"
+program = "uv"
+args = [
+  "run",
+  "--locked",
+  "python",
+  "train.py",
+  "--epochs",
+  "15",
+  "--lr",
+  "0.008",
+  "--hidden",
+  "64",
+  "--batch_size",
+  "256",
+  "--samples",
+  "2048",
+]
+timeout_secs = 120
+allowed_params = ["epochs", "lr", "hidden", "batch_size", "samples", "seed", "device"]

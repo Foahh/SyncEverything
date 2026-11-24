@@ -59,13 +59,13 @@ impl Network {
             return Ok((network, vec![host_events, client_events]));
         }
 
-        let (online_dir, offline_dir, sandbox) = match mode {
-            RuntimeMode::Host => ("host", "host-offline", sandbox),
-            _ => ("client", "client-offline", None),
+        let (store_dir, sandbox) = match mode {
+            RuntimeMode::Host => ("host", sandbox),
+            _ => ("client", None),
         };
         let standard = start_node(
             data_dir,
-            online_dir,
+            store_dir,
             engine,
             sandbox.clone(),
             NetworkProfile::StandardN0,
@@ -85,10 +85,10 @@ impl Network {
                 tracing::debug!(%error, "Standard iroh profile unavailable");
                 start_node(
                     data_dir,
-                    offline_dir,
+                    store_dir,
                     engine,
                     sandbox,
-                    NetworkProfile::LocalOnly,
+                    NetworkProfile::LanOnly,
                 )
                 .await?
             }

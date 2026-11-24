@@ -6,7 +6,7 @@ use crate::contracts::{
 };
 use crate::engine::RelayEngine;
 use crate::error::{RelayError, RelayResult};
-use crate::sandbox::{PreflightReport, WorktreeHandle, WorktreeSandbox, load_manifest};
+use crate::sandbox::{PreflightReport, WorktreeHandle, WorktreeSandbox};
 use crate::state::validate_transition;
 use crate::sync::RelayNode;
 use chrono::Utc;
@@ -350,7 +350,7 @@ impl RelayMcpContext {
         let id = task.spec.task_id;
         let result = async {
             let handle = self.worktree(task).await?;
-            let manifest = load_manifest(handle.worktree_path())?;
+            let manifest = sandbox.task_manifest(handle.worktree_path())?;
             let report = sandbox
                 .run_preflight(id, handle.worktree_path(), handle.branch_name(), &manifest)
                 .await?;
@@ -381,7 +381,7 @@ impl RelayMcpContext {
         self.start_preflight(task).await?;
         let result = async {
             let handle = self.worktree(task).await?;
-            let manifest = load_manifest(handle.worktree_path())?;
+            let manifest = sandbox.task_manifest(handle.worktree_path())?;
             let proposal = sandbox
                 .apply_and_verify_patch(
                     task.spec.task_id,
@@ -480,7 +480,7 @@ impl RelayMcpContext {
             ));
         }
 
-        let manifest = load_manifest(handle.worktree_path())?;
+        let manifest = sandbox.task_manifest(handle.worktree_path())?;
         let output = sandbox
             .run_preset(handle.worktree_path(), &manifest, &spec.command_preset, &spec.params)
             .await?;
@@ -672,7 +672,7 @@ impl RelayMcpServer {
     }
 
     #[tool(
-        description = "After a failed smoke preflight, apply a candidate fix inside the task's isolated Git worktree, re-run smoke verification, and persist the PatchProposal. Set patch_kind to 'uv_spec' with a single Python requirement string (e.g. 'scipy>=1.14') for missing modules, or 'code_diff' with a unified git diff for code fixes."
+        description = "After a failed smoke preflight, apply a candidate fix inside the task's isolated Git worktree, re-run smoke verification, and persist the PatchProposal. Set patch_kind to 'uv_spec' with a single Python requirement string (e.g. 'requests>=2.32') for missing modules, or 'code_diff' with a unified git diff for code fixes."
     )]
     async fn propose_worktree_patch(
         &self,

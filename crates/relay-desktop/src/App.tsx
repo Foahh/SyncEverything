@@ -19,6 +19,7 @@ import { useCopilotChat } from "./hooks/useCopilotChat";
 import { useRelayTheme } from "./hooks/useRelayTheme";
 import {
   useDagSnapshot,
+  useInitWorkspaceManifest,
   useLlmSettings,
   useRelayEventSync,
   useResetPreviewDemo,
@@ -61,6 +62,7 @@ export default function App() {
   const simulateEdit = useSimulateArtifactUpdate();
   const upsertNode = useUpsertDagNode();
   const resetDemo = useResetPreviewDemo();
+  const initManifest = useInitWorkspaceManifest();
 
   const selectedNode: GraphNode | null = useMemo(() => {
     if (!selectedNodeId || !dag) return null;
@@ -113,7 +115,7 @@ export default function App() {
     simulateEdit.mutate({
       oldArtifactId: latestArtifact.id,
       newCommitSha: `c4${randomHex}91a0ef`,
-      reason: "Updated src/forecast.py",
+      reason: "Simulated upstream code change",
     });
   };
 
@@ -157,7 +159,7 @@ export default function App() {
   const handleDispatchTask = async (values: DispatchTaskFormValues) => {
     await submitTask.mutateAsync({
       task_id: values.taskId,
-      repo_id: workspace?.repo_id ?? dag?.repo_id ?? "forecast-bench",
+      repo_id: workspace?.repo_id ?? dag?.repo_id ?? "default-workspace",
       base_commit_sha: dag?.head_commit_sha ?? "HEAD",
       command_preset: values.preset,
       params: values.params,
@@ -170,6 +172,11 @@ export default function App() {
   const handleOpenSettings = (tab: SettingsTab) => {
     setSettingsTab(tab);
     setSettingsModalOpen(true);
+  };
+
+  const openPairing = () => {
+    if (workspace?.repo_root) setPairModalOpen(true);
+    else handleOpenSettings("repo");
   };
 
   const handleResolveApproval = (approval: ApprovalInput, fromTab: RightRailTab) => {
@@ -193,14 +200,14 @@ export default function App() {
     <div className="flex h-screen w-screen flex-col overflow-hidden bg-background text-foreground">
       <TopTelemetryBar
         status={status}
-        repoId={workspace?.repo_id ?? dag?.repo_id ?? "forecast-bench"}
+        repoName={workspace?.repo_root ? workspace.name || workspace.repo_id : null}
         headCommitSha={dag?.head_commit_sha ?? null}
         staleCount={dag?.stale_count ?? 0}
         theme={theme}
         isCopilotOpen={rightRailOpen && rightRailTab === "agent"}
         onToggleTheme={toggleTheme}
         onToggleCopilot={handleToggleCopilot}
-        onOpenPairModal={() => setPairModalOpen(true)}
+        onOpenPairModal={openPairing}
         onOpenRunTask={() => setTaskModalOpen(true)}
         onOpenRepoSettings={() => handleOpenSettings("repo")}
         onOpenLlmSettings={() => handleOpenSettings("llm")}
@@ -211,7 +218,7 @@ export default function App() {
           status={status}
           tasks={tasks}
           onOpenRunTask={() => setTaskModalOpen(true)}
-          onOpenPairModal={() => setPairModalOpen(true)}
+          onOpenPairModal={openPairing}
           onOpenApproval={handleOpenApproval}
           onSelectEvidenceNode={handleSelectNode}
           onSwitchMode={(mode) => switchMode.mutate(mode)}
@@ -229,10 +236,17 @@ export default function App() {
           snapshot={dag}
           selectedNodeId={selectedNodeId}
           includeStale={includeStale}
+          hasRepo={Boolean(workspace?.repo_root)}
+          isGitRepo={Boolean(workspace?.is_git_repo)}
+          hasManifest={Boolean(workspace?.has_manifest)}
+          isGeneratingManifest={initManifest.isPending}
           onToggleIncludeStale={() => setIncludeStale((prev) => !prev)}
           onSelectNode={handleSelectNode}
           onOpenRecordDecision={() => setDecisionModalOpen(true)}
           onOpenDispatchTask={() => setTaskModalOpen(true)}
+          onOpenRepoSettings={() => handleOpenSettings("repo")}
+          manifestError={initManifest.error ? String(initManifest.error) : null}
+          onGenerateManifest={() => initManifest.mutate(workspace?.repo_root)}
         />
 
         <RightWorkbenchRail
@@ -272,13 +286,19 @@ export default function App() {
       <DispatchTaskModal
         isOpen={taskModalOpen}
         onOpenChange={setTaskModalOpen}
-        headCommitSha={dag?.head_commit_sha ?? "HEAD"}
+        headCommitSha={dag?.head_commit_sha ?? null}
         presets={workspace?.presets ?? []}
         onDispatch={handleDispatchTask}
         isSubmitting={submitTask.isPending}
+        onOpenRepoSettings={() => handleOpenSettings("repo")}
       />
 
-      <PairDeviceModal isOpen={pairModalOpen} onOpenChange={setPairModalOpen} />
+      <PairDeviceModal
+        key={`${workspace?.repo_root}:${status?.mode}`}
+        mode={status?.mode ?? "local_dual_sandbox"}
+        isOpen={pairModalOpen}
+        onOpenChange={setPairModalOpen}
+      />
 
       <WorkspaceSettingsModal
         isOpen={settingsModalOpen}

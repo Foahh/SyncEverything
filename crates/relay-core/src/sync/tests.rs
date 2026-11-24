@@ -438,3 +438,80 @@ async fn parse_pairing_ticket_accepts_raw_and_daemon_formats() {
 
     node.shutdown().await.unwrap();
 }
+
+#[tokio::test]
+async fn lan_only_nodes_advertise_direct_ips_without_relay_and_sync() {
+    let temp = TempDir::new();
+    let host_engine = Arc::new(RelayEngine::in_memory(REPO, None).await.unwrap());
+    let client_engine = Arc::new(RelayEngine::in_memory(REPO, None).await.unwrap());
+    client_engine.set_runtime_mode(RuntimeMode::Client).await.unwrap();
+
+    let host = RelayNode::start_with_engine(
+        &temp.join("host-lan"),
+        host_engine.clone(),
+        None,
+        NetworkProfile::LanOnly,
+    )
+    .await
+    .unwrap();
+    let client = RelayNode::start_with_engine(
+        &temp.join("client-lan"),
+        client_engine,
+        None,
+        NetworkProfile::LanOnly,
+    )
+    .await
+    .unwrap();
+
+    let host_addr = host.addr();
+    let client_addr = client.addr();
+    assert!(host_addr.relay_urls().next().is_none());
+    assert!(client_addr.relay_urls().next().is_none());
+    assert!(host_addr.ip_addrs().next().is_some());
+    assert!(client_addr.ip_addrs().next().is_some());
+
+    let pong = client.ping_peer(host_addr.clone(), "lan-client").await.unwrap();
+    assert!(pong.connected);
+    assert!(matches!(
+        pong.transport_path,
+        TransportPath::DirectLan | TransportPath::Loopback
+    ));
+
+    let delta = dag_delta(COMMIT);
+    let snapshot = client.sync_dag_delta(host_addr, delta.clone()).await.unwrap();
+    assert_delta(&snapshot, &delta, COMMIT);
+    assert_delta(&host_engine.dag_snapshot(true).await.unwrap(), &delta, COMMIT);
+
+    host.shutdown().await.unwrap();
+    client.shutdown().await.unwrap();
+}
+
+#[test]
+fn lan_ticket_keeps_dialable_ipv4_and_ipv6_only() {
+    let id = iroh::SecretKey::generate().public();
+    let valid = [
+        "192.168.1.4:7608".parse().unwrap(),
+        "[fd00::4]:7608".parse().unwrap(),
+    ];
+    let mut ticket = EndpointAddr::new(id)
+        .with_relay_url("https://relay.example.invalid".parse().unwrap());
+    for ip in valid {
+        ticket = ticket.with_ip_addr(ip);
+    }
+    for raw in [
+        "0.0.0.0:7608",
+        "[::]:7608",
+        "192.168.1.4:0",
+        "224.0.0.1:7608",
+        "[ff02::1]:7608",
+        "255.255.255.255:7608",
+        "[::ffff:255.255.255.255]:7608",
+    ] {
+        ticket = ticket.with_ip_addr(raw.parse().unwrap());
+    }
+    let direct = direct_lan_addr(&ticket);
+    assert_eq!(direct.id, id);
+    assert!(direct.relay_urls().next().is_none());
+    assert_eq!(direct.ip_addrs().count(), valid.len());
+    assert!(valid.iter().all(|ip| direct.ip_addrs().any(|addr| addr == ip)));
+}

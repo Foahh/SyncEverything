@@ -83,6 +83,16 @@ export function useOpenWorkspaceRepo() {
   });
 }
 
+export function useInitWorkspaceManifest() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (repoPath?: string | null) => relayApi.initWorkspaceManifest(repoPath),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: relayKeys.all });
+    },
+  });
+}
+
 export function useRefreshGitHead() {
   const queryClient = useQueryClient();
   return useMutation({

@@ -28,9 +28,11 @@ On a fresh desktop data directory, Relay starts in `LocalDualSandbox`. The selec
 
 For browser-only UI work, run `bun run dev` from `crates/relay-desktop` and open `http://localhost:1420`. The browser uses in-memory preview data. Use Tauri for checks that exercise native IPC, storage, or networking.
 
-## Prepare a fixture for task execution
+## Prepare a repository for task execution
 
-The checked-in fixture lives inside the Relay monorepo. The desktop requires a separate committed Git checkout with `relay.toml` at its root before it enables worktree execution. From the Relay root, use a fresh `.tmp/relay-fixture` to make a standalone copy of the fixture from `HEAD`.
+Open a Git checkout with at least one commit. If it has no `relay.toml`, the desktop can generate a starter manifest for its project type. Review the presets and commit the manifest with the project so both devices share the same configuration. Generated JavaScript preflights check the package manager. When a test or build needs installed dependencies, its project script must prepare them inside the task worktree.
+
+To use the forecasting fixture, make a standalone copy of `bench/fixture-repo` from `HEAD` in a fresh `.tmp/relay-fixture` directory.
 
 ```powershell
 New-Item -ItemType Directory -Force .tmp | Out-Null
@@ -71,7 +73,7 @@ cargo run -p relay-daemon -- --repo-root .tmp/relay-fixture mcp-http --addr 127.
 cargo run -p relay-daemon -- --repo-root .tmp/relay-fixture mcp-stdio
 ```
 
-Use `serve --local-only` to bind the P2P endpoint to loopback with relays disabled. The daemon stores its data under `.relay/` by default. Pass `--data-dir` for separate state and `--repo-root` for the checkout used by MCP worktree tools. Set the MCP client’s working directory to the Relay repository root when using the relative paths above.
+Use `serve --lan-only` to pair devices over direct IP when the LAN is available and public relay services are offline. Pass the printed pairing ticket to the other device. For two processes on the same machine, `serve --local-only` binds the P2P endpoint to loopback. Both flags affect P2P transport. The HTTP MCP listener defaults to `127.0.0.1:7608` and can be configured independently with `--mcp-addr`. The daemon stores its data under `.relay/` by default. Pass `--data-dir` for separate state and `--repo-root` for the checkout used by MCP worktree tools. Set the MCP client’s working directory to the Relay repository root when using the relative paths above.
 
 ## Verification
 

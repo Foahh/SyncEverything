@@ -71,7 +71,7 @@ pub struct StreamedChatTurn {
 }
 
 pub const COPILOT_SYSTEM_PROMPT: &str = concat!(
-    "You are the built-in Relay Agent inside the Relay cross-device workbench. ",
+    "You are the built-in SyncEverything Agent inside the SyncEverything cross-device workbench. ",
     "Respond in the same language the user writes in (Chinese or English). ",
     "Hard rules:\n",
     "1. Always call `get_dag_snapshot` before stating experiment metrics. NEVER cite or treat `stale` (Outdated) evidence metrics as valid for the current commit; explain why they are outdated and offer to re-run.\n",
@@ -175,7 +175,7 @@ pub fn copilot_tool_definitions() -> Vec<Value> {
             json!({
                 "type": "object",
                 "properties": {
-                    "preset": { "type": "string", "description": "Preset name from relay.toml (e.g. 'train_grid' or 'smoke')" },
+                    "preset": { "type": "string", "description": "Preset name declared in relay.toml (e.g. 'smoke', 'test', or 'train')" },
                     "params": {
                         "type": "object",
                         "additionalProperties": { "type": "string" },
@@ -210,7 +210,7 @@ pub fn copilot_tool_definitions() -> Vec<Value> {
             json!({
                 "type": "object",
                 "properties": {
-                    "path": { "type": "string", "description": "Repository-relative path, e.g. 'src/forecast.py' or 'relay.toml'" }
+                    "path": { "type": "string", "description": "Repository-relative path, e.g. 'relay.toml' or 'README.md'" }
                 },
                 "required": ["path"]
             }),

@@ -42,7 +42,7 @@ pub struct ProposeWorktreePatchArgs {
     pub patch_kind: String,
     #[schemars(description = "Short human-readable explanation of the root cause and fix")]
     pub summary: String,
-    #[schemars(description = "Package spec (e.g. 'scipy>=1.14') or unified git diff patch content")]
+    #[schemars(description = "Package spec (e.g. 'requests>=2.32') or unified git diff patch content")]
     pub content: String,
 }
 

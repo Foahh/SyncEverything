@@ -481,3 +481,118 @@ async fn read_repo_file_and_git_diff_enforce_repo_confinement() {
     assert!(dirty.contains("M src/app.py"));
     assert!(dirty.contains("+# modified line"));
 }
+
+#[test]
+fn generates_valid_default_manifests_for_detected_project_types() {
+    let temp = TempDir::new();
+
+    let py_dir = temp.join("Py Sample App");
+    fs::create_dir(&py_dir).unwrap();
+    fs::write(
+        py_dir.join("pyproject.toml"),
+        "[project]\nname = \"py-sample\"\ndependencies = [\"pytest\"]\n",
+    )
+    .unwrap();
+    let (py_toml, py_kind) = generate_default_manifest(&py_dir).unwrap();
+    assert_eq!(py_kind, "python-uv");
+    let py_manifest: RelayManifest = toml::from_str(&py_toml).unwrap();
+    assert_eq!(py_manifest.project.repo_id, "py-sample-app");
+    assert_eq!(py_manifest.project.smoke_preset, "smoke");
+    assert_eq!(py_manifest.presets["smoke"].program, "uv");
+    assert_eq!(py_manifest.presets["test"].program, "uv");
+
+    let rs_dir = temp.join("rust-crate");
+    fs::create_dir(&rs_dir).unwrap();
+    fs::write(rs_dir.join("Cargo.toml"), "[package]\nname = \"demo\"\n").unwrap();
+    let kind = write_default_manifest(&rs_dir).unwrap();
+    assert_eq!(kind, "rust-cargo");
+    let rs_manifest = load_manifest(&rs_dir).unwrap();
+    assert_eq!(rs_manifest.project.smoke_preset, "check");
+    assert_eq!(rs_manifest.presets["check"].program, "cargo");
+    assert_eq!(rs_manifest.presets["test"].program, "cargo");
+    assert_eq!(rs_manifest.presets["check"].timeout_secs, 900);
+    assert_eq!(rs_manifest.presets["test"].timeout_secs, 1800);
+    assert!(write_default_manifest(&rs_dir).is_err());
+
+    let js_bun_dir = temp.join("web-bun");
+    fs::create_dir(&js_bun_dir).unwrap();
+    fs::write(
+        js_bun_dir.join("package.json"),
+        r#"{"scripts":{"lint":"oxlint","test":"bun test","build":"vite build"}}"#,
+    )
+    .unwrap();
+    fs::write(js_bun_dir.join("bun.lock"), "").unwrap();
+    let (bun_toml, bun_kind) = generate_default_manifest(&js_bun_dir).unwrap();
+    assert_eq!(bun_kind, "js-ts");
+    let bun_manifest: RelayManifest = toml::from_str(&bun_toml).unwrap();
+    assert_eq!(bun_manifest.presets["smoke"].program, "bun");
+    assert_eq!(bun_manifest.presets["smoke"].args, vec!["--version"]);
+    assert_eq!(bun_manifest.presets["lint"].args, vec!["run", "lint"]);
+    assert_eq!(bun_manifest.presets["build"].args, vec!["run", "build"]);
+
+    let generic_dir = temp.join("misc");
+    fs::create_dir(&generic_dir).unwrap();
+    let (gen_toml, gen_kind) = generate_default_manifest(&generic_dir).unwrap();
+    assert_eq!(gen_kind, "generic");
+    let gen_manifest: RelayManifest = toml::from_str(&gen_toml).unwrap();
+    assert_eq!(gen_manifest.presets["smoke"].program, "git");
+}
+
+#[test]
+fn starter_creation_publishes_one_complete_manifest_and_preserves_existing_files() {
+    let temp = TempDir::new();
+    let repo = temp.join("实验仓库");
+    fs::create_dir(&repo).unwrap();
+    let expected = generate_default_manifest(&repo).unwrap().0;
+    let start = std::sync::Barrier::new(4);
+    std::thread::scope(|scope| {
+        let writers: Vec<_> = (0..4).map(|_| scope.spawn(|| {
+            start.wait();
+            write_default_manifest(&repo)
+        })).collect();
+        let successes = writers.into_iter().map(|worker| worker.join().unwrap()).filter(Result::is_ok).count();
+        assert_eq!(successes, 1);
+    });
+    assert_eq!(fs::read_to_string(repo.join("relay.toml")).unwrap(), expected);
+    assert_eq!(fs::read_dir(&repo).unwrap().count(), 1);
+    assert_ne!(slugify_repo_id("实验仓库"), slugify_repo_id("测评仓库"));
+    fs::write(repo.join("relay.toml"), "unfinished user configuration").unwrap();
+    assert!(write_default_manifest(&repo).is_err());
+    assert_eq!(fs::read_to_string(repo.join("relay.toml")).unwrap(), "unfinished user configuration");
+}
+
+#[tokio::test]
+async fn first_dispatch_can_use_a_starter_manifest_before_it_is_committed() {
+    use crate::contracts::{ApproveAndExecuteArgs, RunPreflightArgs, TaskSpec, TaskState};
+    use crate::mcp::RelayMcpServer;
+    use std::sync::Arc;
+
+    let temp = TempDir::new();
+    let repo = temp.join("new-project");
+    init_repo(&repo).await;
+    fs::write(repo.join("README.md"), "Project\n").unwrap();
+    let sha = create_initial_commit(&repo).await;
+    write_default_manifest(&repo).unwrap();
+    let sandbox = WorktreeSandbox::new(&repo, temp.join("worktrees"));
+    let engine = Arc::new(RelayEngine::in_memory("new-project", Some(repo.clone())).await.unwrap());
+    let server = RelayMcpServer::new(engine.clone(), Some(sandbox), None);
+    let id = Uuid::now_v7();
+    engine.submit_task(TaskSpec {
+        task_id: id,
+        repo_id: "new-project".into(),
+        base_commit_sha: sha,
+        command_preset: "smoke".into(),
+        params: BTreeMap::new(),
+        require_approval: false,
+        requested_by_device: "onboarding".into(),
+        user_note: None,
+    }).await.unwrap();
+    let preflight = server.handle_run_preflight(RunPreflightArgs { task_id: id.to_string() }).await.unwrap();
+    assert!(preflight.smoke_passed);
+    assert!(!preflight.worktree_path.join("relay.toml").exists());
+    server.handle_approve_and_execute(ApproveAndExecuteArgs {
+        task_id: id.to_string(), patch_id: None, approved_via_ui: None,
+    }, None).await.unwrap();
+    assert_eq!(engine.get_task(id).await.unwrap().unwrap().state, TaskState::Completed);
+    assert_eq!(git(&repo, &["status", "--short"]).await, "?? relay.toml");
+}

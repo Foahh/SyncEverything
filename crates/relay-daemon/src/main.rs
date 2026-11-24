@@ -83,8 +83,12 @@ enum Commands {
     Serve {
         #[arg(long, default_value = "127.0.0.1:7608")]
         mcp_addr: SocketAddr,
-        #[arg(long)]
+        /// Bind P2P to the IPv4 loopback interface for same-machine pairing.
+        #[arg(long, conflicts_with = "lan_only")]
         local_only: bool,
+        /// Pair using direct IP addresses with public discovery and relays disabled.
+        #[arg(long, conflicts_with = "local_only")]
+        lan_only: bool,
         /// Seconds to accept an incoming P2P pairing request (0 = 24 hours).
         #[arg(long, default_value_t = 600)]
         pairing_window_secs: u64,
@@ -161,11 +165,14 @@ impl Repository {
         };
         let id = match (id, root.as_deref()) {
             (Some(id), _) => Some(id),
-            (None, Some(root)) => manifest_repo_id(root)?,
+            (None, Some(root)) => manifest_repo_id(root)?.or_else(|| {
+                root.file_name()
+                    .map(|name| relay_core::sandbox::slugify_repo_id(&name.to_string_lossy()))
+            }),
             (None, None) => None,
         };
         Ok(Self {
-            id: id.unwrap_or_else(|| "forecast-bench".into()),
+            id: id.unwrap_or_else(|| "default-workspace".into()),
             root,
         })
     }
@@ -257,11 +264,14 @@ async fn main() -> Result<()> {
         Commands::Serve {
             mcp_addr,
             local_only,
+            lan_only,
             pairing_window_secs,
         } => {
             let llm_config = resolve_llm_config(&cli)?;
             let profile = if local_only {
                 NetworkProfile::LocalOnly
+            } else if lan_only {
+                NetworkProfile::LanOnly
             } else {
                 NetworkProfile::StandardN0
             };
@@ -282,7 +292,7 @@ async fn main() -> Result<()> {
                 )
                 .await?,
             );
-            if !local_only {
+            if profile == NetworkProfile::StandardN0 {
                 // Give the relay address time to appear while allowing offline startup.
                 let _ = tokio::time::timeout(Duration::from_secs(5), node.endpoint().online()).await;
             }
