@@ -14,6 +14,9 @@ import {
   type LlmSettingsUpdate_Deserialize,
   type LlmSettingsView_Serialize,
   type PeerStatus_Serialize,
+  type ProjectMcpConfigPreview_Serialize,
+  type ProjectMcpConfigRequest_Deserialize,
+  type ProjectMcpConfigWriteResult,
   type RecentWorkspaceEntry_Serialize,
   type RelayStateChangedEvent,
   type RuntimeMode,
@@ -24,6 +27,12 @@ import {
   type TaskSpec_Deserialize,
   type WorkspaceInfo_Serialize,
 } from "../bindings";
+import {
+  buildRelayMcpServerEntry,
+  DEFAULT_MCP_HTTP_URL,
+  mergeProjectMcpConfigJson,
+  validateMcpHttpUrl,
+} from "./mcpConfig";
 import { isTaskCancellable } from "./taskLogStream";
 import {
   MAX_RECENT_WORKSPACES,
@@ -86,6 +95,7 @@ interface MockWorkspaceState {
   taskLogs: Record<string, TaskLogSnapshot>;
   handoffs: HandoffSummary[];
   chatMessages: AgentChatMessage_Serialize[];
+  projectMcpFiles: Record<string, string>;
 }
 
 function createInitialMockState(): MockWorkspaceState {
@@ -136,6 +146,7 @@ function createInitialMockState(): MockWorkspaceState {
     taskLogs: {},
     handoffs: [],
     chatMessages: [],
+    projectMcpFiles: {},
   };
 }
 
@@ -932,6 +943,68 @@ export const relayApi = {
       activeMockChatAbort = null;
     }
     mockState.chatMessages = [];
+  },
+
+  async previewProjectMcpConfig(
+    request: ProjectMcpConfigRequest_Deserialize,
+  ): Promise<ProjectMcpConfigPreview_Serialize> {
+    if (isTauriRuntime()) {
+      return commands.previewProjectMcpConfig(request);
+    }
+    const repoRoot = mockState.workspace.repo_root?.trim();
+    if (!repoRoot) {
+      throw new Error("Open a local Git repository first.");
+    }
+    if (request.transport === "streamable_http") {
+      const checked = validateMcpHttpUrl(request.http_url ?? DEFAULT_MCP_HTTP_URL);
+      if (!checked.ok) throw new Error(checked.error);
+    }
+    const clientId = request.client === "claude_code" ? "claude" : "cursor";
+    const relativePath = request.client === "claude_code" ? ".mcp.json" : ".cursor/mcp.json";
+    const relayEntry = buildRelayMcpServerEntry(clientId, mockState.workspace, {
+      transport: request.transport,
+      httpUrl: request.http_url ?? DEFAULT_MCP_HTTP_URL,
+    });
+    if (!relayEntry) {
+      throw new Error("Unable to construct MCP server configuration.");
+    }
+    const existingContent = Object.hasOwn(mockState.projectMcpFiles, relativePath)
+      ? mockState.projectMcpFiles[relativePath]
+      : null;
+    const merged = mergeProjectMcpConfigJson(existingContent, relayEntry, relativePath);
+    const sep = repoRoot.includes("\\") ? "\\" : "/";
+    const normalizedRoot = repoRoot.replace(/[\\/]+$/, "");
+    const targetPath = `${normalizedRoot}${sep}${relativePath.replaceAll("/", sep)}`;
+    return {
+      client: request.client,
+      transport: request.transport,
+      relative_path: relativePath,
+      target_path: targetPath,
+      file_exists: existingContent !== null,
+      status: merged.status,
+      existing_content: existingContent,
+      merged_content: merged.mergedContent,
+      preserved_server_names: merged.preservedServerNames,
+    };
+  },
+
+  async writeProjectMcpConfig(
+    request: ProjectMcpConfigRequest_Deserialize,
+  ): Promise<ProjectMcpConfigWriteResult> {
+    if (isTauriRuntime()) {
+      return commands.writeProjectMcpConfig(request);
+    }
+    const preview = await relayApi.previewProjectMcpConfig(request);
+    mockState.projectMcpFiles[preview.relative_path] = preview.merged_content;
+    return {
+      client: preview.client,
+      transport: preview.transport,
+      relative_path: preview.relative_path,
+      target_path: preview.target_path,
+      created: !preview.file_exists,
+      status: preview.status,
+      written_content: preview.merged_content,
+    };
   },
 
   async subscribeAgentChatEvents(

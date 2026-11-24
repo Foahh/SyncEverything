@@ -4,6 +4,7 @@ import type {
   GraphEdge,
   GraphNode,
   LlmSettingsUpdate_Deserialize,
+  ProjectMcpConfigRequest_Deserialize,
   RuntimeMode,
   TaskSpec_Deserialize,
 } from "../bindings";
@@ -293,5 +294,19 @@ export function useResetPreviewDemo() {
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: relayKeys.all });
     },
+  });
+}
+
+export function usePreviewProjectMcpConfig() {
+  return useMutation({
+    mutationFn: (request: ProjectMcpConfigRequest_Deserialize) =>
+      relayApi.previewProjectMcpConfig(request),
+  });
+}
+
+export function useWriteProjectMcpConfig() {
+  return useMutation({
+    mutationFn: (request: ProjectMcpConfigRequest_Deserialize) =>
+      relayApi.writeProjectMcpConfig(request),
   });
 }

@@ -1,3 +1,4 @@
+mod mcp_files;
 pub mod recent_workspaces;
 mod runtime;
 
@@ -97,13 +98,13 @@ pub struct LlmSettingsUpdate {
 }
 
 #[derive(Default)]
-struct RuntimeManager {
+pub(crate) struct RuntimeManager {
     current: RwLock<Option<Arc<DesktopRuntime>>>,
     lifecycle: Mutex<()>,
 }
 
 impl RuntimeManager {
-    async fn get_or_init(&self, app: &AppHandle) -> Result<Arc<DesktopRuntime>, String> {
+    pub(crate) async fn get_or_init(&self, app: &AppHandle) -> Result<Arc<DesktopRuntime>, String> {
         if let Some(runtime) = self.current.read().await.clone() {
             return Ok(runtime);
         }
@@ -608,6 +609,8 @@ pub fn specta_builder() -> Builder<tauri::Wry> {
             send_chat_message,
             cancel_chat_turn,
             clear_chat_messages,
+            mcp_files::preview_project_mcp_config,
+            mcp_files::write_project_mcp_config,
         ])
         .events(collect_events![
             RelayStateChangedEvent,

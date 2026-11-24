@@ -34,6 +34,8 @@ export const commands = {
 	sendChatMessage: (prompt: string, options?: InvokeOptions) => __TAURI_INVOKE<AgentChatMessage_Serialize>("send_chat_message", { prompt }, options),
 	cancelChatTurn: (options?: InvokeOptions) => __TAURI_INVOKE<boolean>("cancel_chat_turn", undefined, options),
 	clearChatMessages: (options?: InvokeOptions) => __TAURI_INVOKE<null>("clear_chat_messages", undefined, options),
+	previewProjectMcpConfig: (request: ProjectMcpConfigRequest_Deserialize, options?: InvokeOptions) => __TAURI_INVOKE<ProjectMcpConfigPreview_Serialize>("preview_project_mcp_config", { request }, options),
+	writeProjectMcpConfig: (request: ProjectMcpConfigRequest_Deserialize, options?: InvokeOptions) => __TAURI_INVOKE<ProjectMcpConfigWriteResult>("write_project_mcp_config", { request }, options),
 };
 
 /** Events */
@@ -257,6 +259,8 @@ export type LlmSettingsView_Serialize = {
 	reasoning_effort: string | null,
 };
 
+export type McpTransportMode = "stdio" | "streamable_http";
+
 export type NodeKind = { kind: "decision"; rationale: string; constraints: string[] } | { kind: "artifact"; git_commit_sha: string; env_fingerprint: string; working_tree_dirty: boolean; changed_files: string[] } | { kind: "evidence"; task_id: string; preset: string; metrics_json: JsonValue; log_blob_hash: string };
 
 export type PatchKind = "dependency_spec" | "code_diff";
@@ -304,6 +308,62 @@ export type PresetInfo = {
 	args: string[],
 	allowed_params: string[],
 };
+
+export type ProjectMcpClient = "claude_code" | "cursor";
+
+export type ProjectMcpConfigPreview = ProjectMcpConfigPreview_Serialize | ProjectMcpConfigPreview_Deserialize;
+
+export type ProjectMcpConfigPreview_Deserialize = {
+	client: ProjectMcpClient,
+	transport: McpTransportMode,
+	relative_path: string,
+	target_path: string,
+	file_exists: boolean,
+	status: ProjectMcpFileStatus,
+	existing_content?: string | null,
+	merged_content: string,
+	preserved_server_names: string[],
+};
+
+export type ProjectMcpConfigPreview_Serialize = {
+	client: ProjectMcpClient,
+	transport: McpTransportMode,
+	relative_path: string,
+	target_path: string,
+	file_exists: boolean,
+	status: ProjectMcpFileStatus,
+	existing_content: string | null,
+	merged_content: string,
+	preserved_server_names: string[],
+};
+
+export type ProjectMcpConfigRequest = ProjectMcpConfigRequest_Serialize | ProjectMcpConfigRequest_Deserialize;
+
+export type ProjectMcpConfigRequest_Deserialize = {
+	client: ProjectMcpClient,
+	transport: McpTransportMode,
+	/**  Optional Streamable HTTP endpoint URL. When `None`, defaults to `http://127.0.0.1:7608/mcp`. */
+	http_url?: string | null,
+};
+
+export type ProjectMcpConfigRequest_Serialize = {
+	client: ProjectMcpClient,
+	transport: McpTransportMode,
+	/**  Optional Streamable HTTP endpoint URL. When `None`, defaults to `http://127.0.0.1:7608/mcp`. */
+	http_url: string | null,
+};
+
+export type ProjectMcpConfigWriteResult = {
+	client: ProjectMcpClient,
+	transport: McpTransportMode,
+	relative_path: string,
+	target_path: string,
+	created: boolean,
+	status: ProjectMcpFileStatus,
+	written_content: string,
+};
+
+export type ProjectMcpFileStatus = "create_new" | "add_server" | "update_server" | "unchanged";
 
 /**  Specta-safe recent workspace descriptor returned to the desktop UI. */
 export type RecentWorkspaceEntry = RecentWorkspaceEntry_Serialize | RecentWorkspaceEntry_Deserialize;
