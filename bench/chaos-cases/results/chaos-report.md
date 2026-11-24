@@ -1,18 +1,20 @@
-# Relay Chaos Suite Report (Track 4)
+# Relay Chaos Suite Report (Track 4 — Scripted)
 
-- Generated: 2026-11-24T03:33:35+0800
+- Generated: 2026-11-24T13:39:03+0800
 - Cases: 8 · Passed: 8 · Failed: 0
+- MCP Tools Covered: 8/8 (approve_and_execute_task, check_env_diff, get_dag_snapshot, inspect_sync_status, list_handoffs, propose_worktree_patch, read_evidence_log, run_preflight_in_worktree)
+- P2P Loopback Gate (`sandbox-dual`): **PASS** (RTT=n/a, duration=2117.4 ms)
 
-| Case | Fault | Result | Duration (ms) |
-|---|---|---|---|
-| `chaos-01-missing-dep` | `missing_dependency` | PASS | 1367.1 |
-| `chaos-02-upstream-edit` | `upstream_code_edit` | PASS | 1082.9 |
-| `chaos-03-same-line-conflict` | `same_line_conflict` | PASS | 1056.5 |
-| `chaos-04-mid-run-disconnect` | `mid_run_disconnect` | PASS | 15237.9 |
-| `chaos-05-runtime-exception` | `runtime_exception` | PASS | 1145.0 |
-| `chaos-06-corrupted-lock` | `corrupted_env_lock` | PASS | 1039.7 |
-| `chaos-07-stale-evidence-trap` | `stale_evidence_trap` | PASS | 1126.9 |
-| `chaos-08-duplicate-replay` | `duplicate_task_replay` | PASS | 830.2 |
+| Case | Fault | Result | Tool Recall | Duration (ms) |
+|---|---|---|---:|---:|
+| `chaos-01-missing-dep` | `missing_dependency` | PASS | 1.00 | 6149.1 |
+| `chaos-02-upstream-edit` | `upstream_code_edit` | PASS | 1.00 | 4153.2 |
+| `chaos-03-same-line-conflict` | `same_line_conflict` | PASS | 1.00 | 3987.9 |
+| `chaos-04-mid-run-disconnect` | `mid_run_disconnect` | PASS | 1.00 | 11346.6 |
+| `chaos-05-runtime-exception` | `runtime_exception` | PASS | 1.00 | 3991.2 |
+| `chaos-06-corrupted-lock` | `corrupted_env_lock` | PASS | 1.00 | 3777.7 |
+| `chaos-07-stale-evidence-trap` | `stale_evidence_trap` | PASS | 1.00 | 3644.7 |
+| `chaos-08-duplicate-replay` | `duplicate_task_replay` | PASS | 1.00 | 3046.3 |
 
 ## chaos-01-missing-dep — Missing Python Dependency Auto-Healing
 
@@ -56,6 +58,7 @@
 
 | Assertion | Metric | Expected | Actual | Result |
 |---|---|---|---|---|
+| preflight_name_error_detected | `preflight_name_error_detected` | true | true | PASS |
 | smoke_verified_after_fix | `proposal_smoke_verified` | true | true | PASS |
 | host_main_tree_untouched | `main_worktree_dirty` | false | false | PASS |
 | grid_metrics_match_fixture | `host_metrics_best_window` | 28 | 28 | PASS |

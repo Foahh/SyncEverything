@@ -10,6 +10,7 @@
   },
   "user_prompt": "Hand off the 3-window forecast grid experiment (7, 14, 28) to the Windows host and report best MAE.",
   "expected_tool_trace": [
+    "check_env_diff",
     "run_preflight_in_worktree",
     "propose_worktree_patch",
     "approve_and_execute_task"

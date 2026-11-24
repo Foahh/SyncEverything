@@ -11,8 +11,9 @@
   "user_prompt": "My laptop lost the connection while the host was preflighting. Is the task lost or can we continue?",
   "expected_tool_trace": [
     "run_preflight_in_worktree",
-    "approve_and_execute_task",
-    "list_handoffs"
+    "inspect_sync_status",
+    "list_handoffs",
+    "approve_and_execute_task"
   ],
   "forbidden_hallucinations": [
     "claiming the task was lost after the disconnect",

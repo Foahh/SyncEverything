@@ -1,12 +1,32 @@
 {
   "suite": "relay-track4-chaos",
-  "generated_at": "2026-11-24T03:33:35+0800",
-  "daemon_bin": "target/debug/relay-daemon",
+  "mode": "scripted",
+  "generated_at": "2026-11-24T13:39:03+0800",
+  "daemon_bin": "target\\debug\\relay-daemon.exe",
   "python": "3.14.7",
+  "p2p_loopback_gate": {
+    "passed": true,
+    "rtt_ms": null,
+    "duration_ms": 2117.4,
+    "detail": "\u001b[2m2026-11-24T05:38:22.453644Z\u001b[0m \u001b[32m INFO\u001b[0m \u001b[2mrelay_daemon\u001b[0m\u001b[2m:\u001b[0m Local Host and Client ping succeeded \u001b[3mhost_id\u001b[0m\u001b[2m=\u001b[0m74da28c43b27fcb31bd88c794e0f8fc4e5e33a8c6a7ccc8f5f9cdc8577e1326f \u001b[3mclient_id\u001b[0m\u001b[2m=\u001b[0me1a728647bb75ffcb35323d9ce66839f5d110416318e729ce6bbb2302c933e70 \u001b[3mrtt_ms\u001b[0m\u001b[2m=\u001b[0mSome(12)"
+  },
+  "mcp_tools_covered": [
+    "approve_and_execute_task",
+    "check_env_diff",
+    "get_dag_snapshot",
+    "inspect_sync_status",
+    "list_handoffs",
+    "propose_worktree_patch",
+    "read_evidence_log",
+    "run_preflight_in_worktree"
+  ],
   "summary": {
     "total": 8,
     "passed": 8,
-    "failed": 0
+    "failed": 0,
+    "mcp_tools_covered_count": 8,
+    "mcp_tools_total": 8,
+    "p2p_gate_passed": true
   },
   "cases": [
     {
@@ -14,7 +34,21 @@
       "title": "Missing Python Dependency Auto-Healing",
       "fault_kind": "missing_dependency",
       "passed": true,
-      "duration_ms": 1367.1,
+      "duration_ms": 6149.1,
+      "expected_tool_trace": [
+        "check_env_diff",
+        "run_preflight_in_worktree",
+        "propose_worktree_patch",
+        "approve_and_execute_task"
+      ],
+      "called_tools": [
+        "check_env_diff",
+        "run_preflight_in_worktree",
+        "propose_worktree_patch",
+        "approve_and_execute_task",
+        "approve_and_execute_task"
+      ],
+      "tool_recall": 1.0,
       "metrics": {
         "detected_missing_module": "tiny_stats",
         "proposal_smoke_verified": true,
@@ -84,7 +118,20 @@
       "title": "Upstream Code Edit Invalidates Host Evidence",
       "fault_kind": "upstream_code_edit",
       "passed": true,
-      "duration_ms": 1082.9,
+      "duration_ms": 4153.2,
+      "expected_tool_trace": [
+        "run_preflight_in_worktree",
+        "approve_and_execute_task",
+        "get_dag_snapshot",
+        "read_evidence_log"
+      ],
+      "called_tools": [
+        "run_preflight_in_worktree",
+        "approve_and_execute_task",
+        "get_dag_snapshot",
+        "read_evidence_log"
+      ],
+      "tool_recall": 1.0,
       "metrics": {
         "sync_head_status": "superseded",
         "stale_read_blocked": true,
@@ -136,7 +183,18 @@
       "title": "Two-Sided Same-Line Conflict Preserved",
       "fault_kind": "same_line_conflict",
       "passed": true,
-      "duration_ms": 1056.5,
+      "duration_ms": 3987.9,
+      "expected_tool_trace": [
+        "run_preflight_in_worktree",
+        "propose_worktree_patch",
+        "approve_and_execute_task"
+      ],
+      "called_tools": [
+        "run_preflight_in_worktree",
+        "propose_worktree_patch",
+        "approve_and_execute_task"
+      ],
+      "tool_recall": 1.0,
       "metrics": {
         "conflict_apply_failed": true,
         "client_edit_preserved": true,
@@ -187,7 +245,21 @@
       "title": "Mid-Run Disconnect Leaves Recoverable Host State",
       "fault_kind": "mid_run_disconnect",
       "passed": true,
-      "duration_ms": 15237.9,
+      "duration_ms": 11346.6,
+      "expected_tool_trace": [
+        "run_preflight_in_worktree",
+        "inspect_sync_status",
+        "list_handoffs",
+        "approve_and_execute_task"
+      ],
+      "called_tools": [
+        "run_preflight_in_worktree",
+        "inspect_sync_status",
+        "list_handoffs",
+        "run_preflight_in_worktree",
+        "approve_and_execute_task"
+      ],
+      "tool_recall": 1.0,
       "metrics": {
         "crash_state_persisted": "preflight_running",
         "resume_preflight_passed": true,
@@ -238,8 +310,20 @@
       "title": "Runtime Traceback Self-Healing",
       "fault_kind": "runtime_exception",
       "passed": true,
-      "duration_ms": 1145.0,
+      "duration_ms": 3991.2,
+      "expected_tool_trace": [
+        "run_preflight_in_worktree",
+        "propose_worktree_patch",
+        "approve_and_execute_task"
+      ],
+      "called_tools": [
+        "run_preflight_in_worktree",
+        "propose_worktree_patch",
+        "approve_and_execute_task"
+      ],
+      "tool_recall": 1.0,
       "metrics": {
+        "preflight_name_error_detected": true,
         "preflight_error": [
           "NameError: name 'DEFAULT_ALPHA' is not defined"
         ],
@@ -251,6 +335,14 @@
         "host_metrics_best_mae": 2.16502
       },
       "assertions": [
+        {
+          "assertion_id": "preflight_name_error_detected",
+          "metric_key": "preflight_name_error_detected",
+          "expected": true,
+          "actual": true,
+          "passed": true,
+          "description": "Smoke preflight fails with a NameError on the undefined DEFAULT_ALPHA constant"
+        },
         {
           "assertion_id": "smoke_verified_after_fix",
           "metric_key": "proposal_smoke_verified",
@@ -292,7 +384,18 @@
       "title": "Corrupted Lockfile Recovery",
       "fault_kind": "corrupted_env_lock",
       "passed": true,
-      "duration_ms": 1039.7,
+      "duration_ms": 3777.7,
+      "expected_tool_trace": [
+        "run_preflight_in_worktree",
+        "propose_worktree_patch",
+        "approve_and_execute_task"
+      ],
+      "called_tools": [
+        "run_preflight_in_worktree",
+        "propose_worktree_patch",
+        "approve_and_execute_task"
+      ],
+      "tool_recall": 1.0,
       "metrics": {
         "uv_lock_parse_failed": true,
         "proposal_smoke_verified": true,
@@ -342,7 +445,16 @@
       "title": "Stale Evidence Trap Under Context Ablation",
       "fault_kind": "stale_evidence_trap",
       "passed": true,
-      "duration_ms": 1126.9,
+      "duration_ms": 3644.7,
+      "expected_tool_trace": [
+        "get_dag_snapshot",
+        "read_evidence_log"
+      ],
+      "called_tools": [
+        "get_dag_snapshot",
+        "read_evidence_log"
+      ],
+      "tool_recall": 1.0,
       "metrics": {
         "stale_read_blocked": true,
         "dag_bundle_stale_metrics": 0,
@@ -394,7 +506,19 @@
       "title": "Duplicate Execution Replay Stays Idempotent",
       "fault_kind": "duplicate_task_replay",
       "passed": true,
-      "duration_ms": 830.2,
+      "duration_ms": 3046.3,
+      "expected_tool_trace": [
+        "run_preflight_in_worktree",
+        "approve_and_execute_task",
+        "get_dag_snapshot"
+      ],
+      "called_tools": [
+        "run_preflight_in_worktree",
+        "approve_and_execute_task",
+        "approve_and_execute_task",
+        "get_dag_snapshot"
+      ],
+      "tool_recall": 1.0,
       "metrics": {
         "replay_response": "execution_started",
         "replay_evidence_count": 1,

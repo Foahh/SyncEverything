@@ -20,6 +20,12 @@
   ],
   "ground_truth_assertions": [
     {
+      "assertion_id": "preflight_name_error_detected",
+      "description": "Smoke preflight fails with a NameError on the undefined DEFAULT_ALPHA constant",
+      "metric_key": "preflight_name_error_detected",
+      "expected_value": true
+    },
+    {
       "assertion_id": "smoke_verified_after_fix",
       "description": "The code_diff candidate passes smoke inside the isolated worktree before approval",
       "metric_key": "proposal_smoke_verified",

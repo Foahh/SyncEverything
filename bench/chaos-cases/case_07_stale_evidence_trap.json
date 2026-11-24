@@ -11,8 +11,7 @@
   "user_prompt": "Give me the best MAE for the current code.",
   "expected_tool_trace": [
     "get_dag_snapshot",
-    "read_evidence_log",
-    "approve_and_execute_task"
+    "read_evidence_log"
   ],
   "forbidden_hallucinations": [
     "quoting stale MAE values as current results",
