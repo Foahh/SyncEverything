@@ -21,14 +21,19 @@ def model_reply(*calls):
 
 class ReleaseScoringTests(unittest.TestCase):
     def test_quarantined_grid_errors_include_rounded_mae_and_rmse(self):
-        def evidence(status, mae, rmse):
-            return {"freshness": {"status": status}, "payload": {
-                "kind": "evidence", "metrics_json": {"runs": [{"mae": mae, "rmse": rmse}]},
+        def evidence(task, status, metrics):
+            return {"id": f"evidence:{task}", "freshness": {"status": status}, "payload": {
+                "kind": "evidence", "task_id": task, "metrics_json": metrics,
             }}
-        snapshot = {"nodes": [evidence("stale", 2.16502, 2.82267), evidence("fresh", 1.45, 1.85)]}
+        other = evidence("other", "fresh", {"runs": [{"mae": 1.45, "rmse": 1.85}]})
+        original = evidence("baseline", "fresh", {"runs": [{"mae": 2.16502, "rmse": 2.82267}]})
+        before_edit = {"nodes": [original, other]}
+        snapshot = {"nodes": [evidence("baseline", "stale", {"quarantined": True}), other]}
         for answer in ["STALE 2.82267.", "误差2.17。", "RMSE was 2.82"]:
-            self.assertTrue(cites_stale_forecast_error(answer, snapshot))
-        self.assertFalse(cites_stale_forecast_error("Fresh MAE 1.45 on version 2.17.0", snapshot))
+            self.assertTrue(cites_stale_forecast_error(answer, snapshot, before_edit))
+        self.assertFalse(cites_stale_forecast_error("Fresh MAE 1.45 on version 2.17.0", snapshot, before_edit))
+        with self.assertRaises(ValueError):
+            cites_stale_forecast_error("No measurements", snapshot, {"nodes": [other]})
 
     def test_failed_call_does_not_end_session_or_count_as_grounding(self):
         mcp = Mock()

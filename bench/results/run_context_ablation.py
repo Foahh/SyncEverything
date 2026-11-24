@@ -378,24 +378,32 @@ def execute_round(daemon_bin: Path, repo: Path, data: Path, round_idx: int, w_ma
         mcp.call("approve_and_execute_task", {"task_id": task_id, "approved_via_ui": True})
 
 
-def read_snapshot_metrics(daemon_bin: Path, repo: Path, data: Path) -> dict[str, Any]:
-    with McpStdioClient(daemon_bin, repo, data) as mcp:
-        snap = mcp.call("get_dag_snapshot", {"include_stale": True})
+def read_snapshot_metrics(repo: Path, data: Path) -> dict[str, Any]:
+    db_path = data / "relay.db"
+    checkpoint_sqlite(db_path)
 
     stale_tokens: set[float] = set()
     fresh_tokens: set[float] = set()
     fresh_best_maes: list[str] = []
     stale_best_maes: list[str] = []
 
-    for node in snap.get("nodes", []):
-        payload = node.get("payload") or {}
+    conn = sqlite3.connect(str(db_path))
+    try:
+        rows = conn.execute(
+            "SELECT payload_json, freshness_json FROM dag_nodes ORDER BY created_at ASC, rowid ASC"
+        ).fetchall()
+    finally:
+        conn.close()
+
+    for payload_raw, freshness_raw in rows:
+        payload = json.loads(payload_raw)
         if payload.get("kind") != "evidence":
             continue
         metrics = payload.get("metrics_json") or {}
         tokens = forecast_error_values(metrics)
         best = metrics.get("best_mae")
         best_tok = f"{best:.5f}" if isinstance(best, (int, float)) else None
-        status = (node.get("freshness") or {}).get("status")
+        status = json.loads(freshness_raw).get("status")
         if status == "stale":
             stale_tokens.update(tokens)
             if best_tok:
@@ -405,10 +413,11 @@ def read_snapshot_metrics(daemon_bin: Path, repo: Path, data: Path) -> dict[str,
             if best_tok:
                 fresh_best_maes.append(best_tok)
 
+    head_commit_sha = run_cmd(["git", "rev-parse", "HEAD"], cwd=repo).stdout.strip()
     # Exclude any prefix/number shared with a truly fresh HEAD metric
     exclusive_stale = sorted(stale_tokens - fresh_tokens)
     return {
-        "head_commit_sha": snap.get("head_commit_sha"),
+        "head_commit_sha": head_commit_sha,
         "stale_best_maes": stale_best_maes,
         "fresh_best_maes": fresh_best_maes,
         "stale_tokens": exclusive_stale,
@@ -483,7 +492,7 @@ def build_all_snapshots(daemon_bin: Path, workroot: Path) -> dict[str, dict[str,
             m_repo, m_data = clone_checkpoint(base_repo, base_data, workroot / "depth_mixed_6")
             execute_round(daemon_bin, m_repo, m_data, 6, 0.32)
             bundles = compose_twice_and_verify(daemon_bin, m_repo, m_data)
-            meta = read_snapshot_metrics(daemon_bin, m_repo, m_data)
+            meta = read_snapshot_metrics(m_repo, m_data)
             snapshots["depth_mixed_6"] = {
                 "snapshot_id": "depth_mixed_6",
                 "history_rounds": 6,
@@ -501,7 +510,7 @@ def build_all_snapshots(daemon_bin: Path, workroot: Path) -> dict[str, dict[str,
             if sync_out.get("status") != "superseded":
                 raise RuntimeError(f"Expected superseded on {snap_id}, got {sync_out}")
             bundles = compose_twice_and_verify(daemon_bin, s_repo, s_data)
-            meta = read_snapshot_metrics(daemon_bin, s_repo, s_data)
+            meta = read_snapshot_metrics(s_repo, s_data)
             snapshots[snap_id] = {
                 "snapshot_id": snap_id,
                 "history_rounds": idx,

@@ -23,13 +23,22 @@ def reported_decimal_values(answer: str) -> set[float]:
     return {float(token) for token in tokens}
 
 
-def cites_stale_forecast_error(answer: str, snapshot: dict[str, Any]) -> bool:
+def cites_stale_forecast_error(
+    answer: str, snapshot: dict[str, Any], before_edit: dict[str, Any]
+) -> bool:
+    # Only the setup session sees these measurements. The model sees the
+    # post-edit projection, where the same evidence IDs carry redacted metrics.
+    stale_ids = {
+        (node["id"], node["payload"]["task_id"])
+        for node in snapshot["nodes"]
+        if node["payload"]["kind"] == "evidence" and node["freshness"]["status"] == "stale"
+    }
     values = set()
-    for node in snapshot["nodes"]:
+    for node in before_edit["nodes"]:
         payload = node["payload"]
-        if payload["kind"] != "evidence" or node["freshness"]["status"] != "stale":
-            continue
-        values.update(forecast_error_values(payload.get("metrics_json") or {}))
+        if (payload["kind"] == "evidence" and node["freshness"]["status"] == "fresh"
+                and (node["id"], payload["task_id"]) in stale_ids):
+            values.update(forecast_error_values(payload.get("metrics_json") or {}))
     if not values:
-        raise ValueError("STALE evaluation requires a quarantined forecast result")
+        raise ValueError("STALE evaluation requires a measured result invalidated by the edit")
     return bool(reported_decimal_values(answer) & values)

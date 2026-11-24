@@ -609,13 +609,13 @@ def compute_recall(expected: list[str], called: list[str]) -> float:
     return round(hits / len(expected), 3)
 
 
-def check_stale_hallucination(answer: str, snapshot: dict[str, Any]) -> bool:
+def check_stale_hallucination(answer: str, snapshot: dict[str, Any], before_edit: dict[str, Any]) -> bool:
     lower = answer.lower()
     acknowledged_stale = any(
         kw in lower
         for kw in ("stale", "outdated", "superseded", "invalid", "re-run", "rerun", "no fresh", "no valid", "过期", "陈旧", "失效", "重跑")
     )
-    cites_old_mae = cites_stale_forecast_error(answer, snapshot)
+    cites_old_mae = cites_stale_forecast_error(answer, snapshot, before_edit)
     return (not acknowledged_stale) or cites_old_mae
 
 
@@ -1516,6 +1516,7 @@ def llm_upstream_edit(ctx: dict[str, Any], case: dict[str, Any], llm_cfg: dict[s
         )
         if is_err or resp is None:
             raise RuntimeError(f"baseline setup failed: {text}")
+        before_edit = dag_snapshot(setup_daemon, track=False)
 
     forecast = repo / "src" / "forecast.py"
     write_text(
@@ -1566,7 +1567,7 @@ def llm_upstream_edit(ctx: dict[str, Any], case: dict[str, Any], llm_cfg: dict[s
         "called_tools": agent_run["called_tools"],
         "expected_llm_tools": ["get_dag_snapshot"],
         "agent_run": agent_run,
-        "stale_hallucination": check_stale_hallucination(agent_run["final_answer"], snapshot),
+        "stale_hallucination": check_stale_hallucination(agent_run["final_answer"], snapshot, before_edit),
     }
 
 
@@ -1742,6 +1743,7 @@ def llm_stale_evidence_trap(ctx: dict[str, Any], case: dict[str, Any], llm_cfg: 
         )
         if is_err or resp is None:
             raise RuntimeError(f"baseline setup failed: {text}")
+        before_edit = dag_snapshot(setup_daemon, track=False)
 
     forecast = repo / "src" / "forecast.py"
     write_text(
@@ -1792,7 +1794,7 @@ def llm_stale_evidence_trap(ctx: dict[str, Any], case: dict[str, Any], llm_cfg: 
         "called_tools": agent_run["called_tools"],
         "expected_llm_tools": ["get_dag_snapshot"],
         "agent_run": agent_run,
-        "stale_hallucination": check_stale_hallucination(agent_run["final_answer"], snapshot),
+        "stale_hallucination": check_stale_hallucination(agent_run["final_answer"], snapshot, before_edit),
     }
 
 

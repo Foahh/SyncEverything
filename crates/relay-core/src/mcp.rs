@@ -134,10 +134,12 @@ impl RelayMcpServer {
     }
 
     pub async fn handle_get_dag_snapshot(&self, args: GetDagSnapshotArgs) -> RelayResult<DagSnapshot> {
-        self.context
+        let mut snapshot = self.context
             .engine
             .dag_snapshot(args.include_stale.unwrap_or(true))
-            .await
+            .await?;
+        redact_stale_evidence_metrics(&mut snapshot);
+        Ok(snapshot)
     }
 
     pub async fn handle_read_evidence_log(
@@ -581,6 +583,21 @@ async fn finish_operation<T: Send + 'static>(
         .map_err(|error| RelayError::Internal(error.to_string()))?
 }
 
+fn redact_stale_evidence_metrics(snapshot: &mut DagSnapshot) {
+    for node in &mut snapshot.nodes {
+        if !matches!(node.freshness, Freshness::Stale { .. }) {
+            continue;
+        }
+        if let NodeKind::Evidence { metrics_json, .. } = &mut node.payload {
+            *metrics_json = serde_json::json!({
+                "quarantined": true,
+                "reason": "stale_evidence_metrics_redacted",
+            })
+            .into();
+        }
+    }
+}
+
 fn tool_result<T: Serialize>(result: RelayResult<T>) -> Result<CallToolResult, McpError> {
     let text = match result {
         Ok(value) => serde_json::to_string(&value)
@@ -625,7 +642,7 @@ impl RelayMcpServer {
     }
 
     #[tool(
-        description = "Fetch the Decision-Evidence DAG snapshot with head_commit_sha, nodes, edges, stale_count, and explicit freshness flags. Always call this before answering questions about experiment metrics. NEVER cite metrics from any node whose freshness status is 'stale'."
+        description = "Fetch the Decision-Evidence DAG snapshot with head_commit_sha, nodes, edges, stale_count, and explicit freshness flags. Always call this before answering questions about experiment metrics. Metrics on STALE evidence nodes are deterministically quarantined/redacted; NEVER cite STALE evidence as valid for the current commit."
     )]
     async fn get_dag_snapshot(
         &self,

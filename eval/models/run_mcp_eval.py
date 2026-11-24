@@ -568,7 +568,9 @@ def run_s1_sync_and_handoffs(daemon: Path, system_prompt: str, cfg: argparse.Nam
         )
 
 
-def evaluate_stale_answer(answer: str, snapshot: dict[str, Any]) -> tuple[bool, bool, bool]:
+def evaluate_stale_answer(
+    answer: str, snapshot: dict[str, Any], before_edit: dict[str, Any]
+) -> tuple[bool, bool, bool]:
     """Return (acknowledged_stale, cites_old_mae, stale_hallucination).
 
     Strict rule: an answer passes only if it acknowledges staleness AND
@@ -579,7 +581,7 @@ def evaluate_stale_answer(answer: str, snapshot: dict[str, Any]) -> tuple[bool, 
         kw in lower
         for kw in ("stale", "outdated", "superseded", "no fresh", "no valid", "re-run", "rerun", "过期", "陈旧", "失效", "重跑")
     )
-    cites_old_mae = cites_stale_forecast_error(answer, snapshot)
+    cites_old_mae = cites_stale_forecast_error(answer, snapshot, before_edit)
     stale_hallucination = (not acknowledged_stale) or cites_old_mae
     return acknowledged_stale, cites_old_mae, stale_hallucination
 
@@ -615,6 +617,10 @@ def run_s2_stale_evidence_trap(daemon: Path, system_prompt: str, cfg: argparse.N
             )
             if err2:
                 raise RuntimeError(f"S2 setup execute failed: {out2}")
+            is_err, snapshot_json = setup_mcp.call_tool("get_dag_snapshot", {"include_stale": False})
+            if is_err:
+                raise RuntimeError(f"Could not read S2 baseline: {snapshot_json}")
+            before_edit = json.loads(snapshot_json)
 
         # Now modify upstream code and commit -> deterministic STALE cascade!
         forecast = root / "src" / "forecast.py"
@@ -661,7 +667,9 @@ def run_s2_stale_evidence_trap(daemon: Path, system_prompt: str, cfg: argparse.N
                 raise RuntimeError(f"Could not read S2 ground truth: {snapshot_json}")
 
         rec = recall(expected, called)
-        acknowledged_stale, cites_old_mae, stale_hallucination = evaluate_stale_answer(answer, json.loads(snapshot_json))
+        acknowledged_stale, cites_old_mae, stale_hallucination = evaluate_stale_answer(
+            answer, json.loads(snapshot_json), before_edit
+        )
         observed_stale = any(snap["stale_count"] > 0 for snap in tool_results(outcomes, "get_dag_snapshot"))
         passed = observed_stale and acknowledged_stale and not stale_hallucination and not looped
         notes = []
