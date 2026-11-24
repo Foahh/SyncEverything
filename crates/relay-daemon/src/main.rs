@@ -161,11 +161,14 @@ impl Repository {
         };
         let id = match (id, root.as_deref()) {
             (Some(id), _) => Some(id),
-            (None, Some(root)) => manifest_repo_id(root)?,
+            (None, Some(root)) => manifest_repo_id(root)?.or_else(|| {
+                root.file_name()
+                    .map(|name| sanitize_repo_id(&name.to_string_lossy()))
+            }),
             (None, None) => None,
         };
         Ok(Self {
-            id: id.unwrap_or_else(|| "forecast-bench".into()),
+            id: id.unwrap_or_else(|| "default-workspace".into()),
             root,
         })
     }
@@ -179,6 +182,26 @@ impl Repository {
             .filter(|root| root.join(".git").exists() && load_manifest(root).is_ok())
             .map(|root| WorktreeSandbox::new(root, data_dir.join("worktrees")));
         Ok((Arc::new(engine), sandbox))
+    }
+}
+
+fn sanitize_repo_id(raw: &str) -> String {
+    let cleaned: String = raw
+        .trim()
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_') {
+                ch
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    let trimmed = cleaned.trim_matches(|ch| ch == '-' || ch == '_');
+    if trimmed.is_empty() {
+        "default-workspace".into()
+    } else {
+        trimmed.to_owned()
     }
 }
 

@@ -169,8 +169,13 @@ function RepositorySettingsTab({ workspace }: { workspace: WorkspaceInfo_Seriali
         <div className="flex items-center justify-between gap-2">
           <div className="flex min-w-0 items-center gap-2">
             <FolderGit2 className="size-4 shrink-0 text-primary" />
-            <span lang="en" className="truncate text-xs leading-snug font-semibold text-foreground">
-              {workspace?.name ?? workspace?.repo_id ?? "forecast-bench"}
+            <span
+              lang={workspace?.repo_root ? "en" : undefined}
+              className="truncate text-xs leading-snug font-semibold text-foreground"
+            >
+              {workspace?.repo_root
+                ? workspace.name || workspace.repo_id
+                : t("modals.workspace.noRepoSelected")}
             </span>
           </div>
           <Badge

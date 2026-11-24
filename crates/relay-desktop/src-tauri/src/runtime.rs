@@ -28,14 +28,13 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
-use tauri::AppHandle;
+use tauri::{AppHandle, Manager};
 use tauri_specta::Event;
 use tokio::sync::{Mutex, RwLock, watch};
 use tokio::time::{self, MissedTickBehavior};
 use uuid::Uuid;
 
-const DEFAULT_REPO_ID: &str = "forecast-bench";
-const FIXTURE_PATH: &str = "bench/fixture-repo";
+const DEFAULT_REPO_ID: &str = "default-workspace";
 const PAIRING_WINDOW: Duration = Duration::from_secs(120);
 const PEER_SYNC_INTERVAL: Duration = Duration::from_secs(3);
 const GIT_WATCH_INTERVAL: Duration = Duration::from_secs(2);
@@ -64,17 +63,7 @@ impl DesktopRuntime {
         app: AppHandle,
         explicit_repo_root: Option<PathBuf>,
     ) -> RelayResult<Arc<Self>> {
-        let cwd = env::current_dir().ok();
-        let starts = cwd
-            .as_deref()
-            .into_iter()
-            .chain([Path::new(env!("CARGO_MANIFEST_DIR"))]);
-        let ancestors: Vec<_> = starts.flat_map(Path::ancestors).collect();
-        let workspace_dir = ancestors
-            .iter()
-            .copied()
-            .find(|dir| dir.join(FIXTURE_PATH).join("relay.toml").is_file());
-        let base_data_dir = resolve_base_data_dir(workspace_dir.or(cwd.as_deref())).await?;
+        let base_data_dir = resolve_base_data_dir(&app).await?;
 
         let repo_root = if let Some(explicit) = explicit_repo_root {
             let abs = std::path::absolute(explicit)?;
@@ -93,20 +82,11 @@ impl DesktopRuntime {
                 )));
             }
             Some(std::path::absolute(env_root)?)
-        } else if let Some(saved) = load_workspace_prefs(&base_data_dir)
-            .repo_root
-            .map(PathBuf::from)
-            .filter(|path| path.is_dir())
-        {
-            Some(saved)
         } else {
-            workspace_dir
-                .map(|dir| dir.join(FIXTURE_PATH))
-                .or_else(|| {
-                    ancestors
-                        .iter()
-                        .find_map(|dir| dir.join("relay.toml").is_file().then(|| dir.to_path_buf()))
-                })
+            load_workspace_prefs(&base_data_dir)
+                .repo_root
+                .map(PathBuf::from)
+                .filter(|path| path.is_dir())
         };
 
         let workspace_info = inspect_workspace(repo_root.as_deref());
@@ -893,11 +873,11 @@ fn inspect_workspace(repo_root: Option<&Path>) -> WorkspaceInfo {
     let Some(root) = repo_root else {
         return WorkspaceInfo {
             repo_id: DEFAULT_REPO_ID.into(),
-            name: "Relay Workspace".into(),
+            name: String::new(),
             repo_root: None,
             is_git_repo: false,
             has_manifest: false,
-            smoke_preset: "smoke".into(),
+            smoke_preset: String::new(),
             presets: Vec::new(),
         };
     };
@@ -931,12 +911,12 @@ fn inspect_workspace(repo_root: Option<&Path>) -> WorkspaceInfo {
                 .map(|name| name.to_string_lossy().into_owned())
                 .unwrap_or_else(|| DEFAULT_REPO_ID.into());
             WorkspaceInfo {
-                repo_id: DEFAULT_REPO_ID.into(),
+                repo_id: sanitize_repo_dir(&fallback_name),
                 name: fallback_name,
                 repo_root: Some(root.to_string_lossy().into_owned()),
                 is_git_repo,
                 has_manifest: false,
-                smoke_preset: "smoke".into(),
+                smoke_preset: String::new(),
                 presets: Vec::new(),
             }
         }
@@ -1015,20 +995,11 @@ fn env_path(name: &str) -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
-async fn resolve_base_data_dir(parent: Option<&Path>) -> RelayResult<PathBuf> {
+async fn resolve_base_data_dir(app: &AppHandle) -> RelayResult<PathBuf> {
     let dir = if let Some(dir) = env_path("RELAY_DATA_DIR") {
         dir
-    } else if let Some(parent) = parent {
-        let dir = parent.join(".relay").join("desktop");
-        match tokio::fs::create_dir_all(&dir).await {
-            Ok(()) => return Ok(std::path::absolute(dir)?),
-            Err(error) => tracing::debug!(
-                %error,
-                path = %dir.display(),
-                "Workspace data directory unavailable"
-            ),
-        }
-        env::temp_dir().join("relay-desktop")
+    } else if let Ok(local_dir) = app.path().app_local_data_dir() {
+        local_dir.join("relay-desktop")
     } else {
         env::temp_dir().join("relay-desktop")
     };

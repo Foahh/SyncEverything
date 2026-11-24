@@ -1,6 +1,5 @@
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Separator } from "@/components/ui/separator";
 import { cn } from "@/lib/utils";
 import {
   ArrowRight,
@@ -10,10 +9,8 @@ import {
   Cpu,
   Link2,
   Play,
-  RotateCcw,
   Settings2,
   Sparkles,
-  Zap,
 } from "lucide-react";
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
@@ -215,7 +212,7 @@ export function LeftRail({
         </section>
       </div>
 
-      {/* Discreet footer popover for Device Role & Developer Tools */}
+      {/* Discreet footer popover for Device Role (& Dev Tools in local development only) */}
       <div className="border-t border-border bg-muted/40 p-2.5">
         <button
           type="button"
@@ -257,36 +254,36 @@ export function LeftRail({
               </div>
             </div>
 
-            <Separator />
-
-            <div className="flex flex-col gap-1.5">
-              <div className="text-[10.5px] font-medium text-muted-foreground">
-                {t("sidebar.devTools")}
-              </div>
-              <Button
-                variant="outline"
-                size="default"
-                className="w-full justify-start"
-                disabled={isSimulatingEdit}
-                onClick={onTriggerUpstreamEdit}
-              >
-                <Zap data-icon="inline-start" className="text-amber-500" />
-                <span className="relay-text-trim leading-none">
-                  {t("sidebar.simulateCodeChange")}
-                </span>
-              </Button>
-              {!isTauriRuntime() && (
+            {import.meta.env.DEV && (
+              <div className="flex flex-col gap-1.5 border-t border-border pt-2.5">
+                <div className="text-[10.5px] font-medium text-muted-foreground">
+                  {t("sidebar.devTools")}
+                </div>
                 <Button
-                  variant="ghost"
+                  variant="outline"
                   size="default"
                   className="w-full justify-start"
-                  onClick={onResetDemo}
+                  disabled={isSimulatingEdit}
+                  onClick={onTriggerUpstreamEdit}
                 >
-                  <RotateCcw data-icon="inline-start" />
-                  <span className="relay-text-trim leading-none">{t("sidebar.resetPreview")}</span>
+                  <span className="relay-text-trim leading-none">
+                    {t("sidebar.simulateCodeChange")}
+                  </span>
                 </Button>
-              )}
-            </div>
+                {!isTauriRuntime() && (
+                  <Button
+                    variant="ghost"
+                    size="default"
+                    className="w-full justify-start"
+                    onClick={onResetDemo}
+                  >
+                    <span className="relay-text-trim leading-none">
+                      {t("sidebar.resetPreview")}
+                    </span>
+                  </Button>
+                )}
+              </div>
+            )}
           </div>
         )}
       </div>

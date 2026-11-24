@@ -116,7 +116,7 @@ export default function App() {
     simulateEdit.mutate({
       oldArtifactId: latestArtifact.id,
       newCommitSha: `c4${randomHex}91a0ef`,
-      reason: "Updated src/forecast.py",
+      reason: "Simulated upstream code change",
     });
   };
 
@@ -166,7 +166,7 @@ export default function App() {
   const handleDispatchTask = (values: DispatchTaskFormValues) => {
     submitTask.mutate({
       task_id: crypto.randomUUID(),
-      repo_id: workspace?.repo_id ?? dag?.repo_id ?? "forecast-bench",
+      repo_id: workspace?.repo_id ?? dag?.repo_id ?? "default-workspace",
       base_commit_sha: dag?.head_commit_sha ?? "HEAD",
       command_preset: values.preset,
       params: values.params,
@@ -209,7 +209,7 @@ export default function App() {
     <div className="flex h-screen w-screen flex-col overflow-hidden bg-background text-foreground">
       <TopTelemetryBar
         status={status}
-        repoId={workspace?.repo_id ?? dag?.repo_id ?? "forecast-bench"}
+        repoName={workspace?.repo_root ? workspace.name || workspace.repo_id : null}
         headCommitSha={dag?.head_commit_sha ?? null}
         staleCount={dag?.stale_count ?? 0}
         theme={theme}
@@ -287,10 +287,11 @@ export default function App() {
       <DispatchTaskModal
         isOpen={taskModalOpen}
         onOpenChange={setTaskModalOpen}
-        headCommitSha={dag?.head_commit_sha ?? "HEAD"}
+        headCommitSha={dag?.head_commit_sha ?? null}
         presets={workspace?.presets ?? []}
         onDispatch={handleDispatchTask}
         isSubmitting={submitTask.isPending}
+        onOpenRepoSettings={() => handleOpenSettings("repo")}
       />
 
       <PairDeviceModal isOpen={pairModalOpen} onOpenChange={setPairModalOpen} />

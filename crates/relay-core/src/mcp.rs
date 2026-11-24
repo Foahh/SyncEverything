@@ -665,7 +665,7 @@ impl RelayMcpServer {
     }
 
     #[tool(
-        description = "After a failed smoke preflight, apply a candidate fix inside the task's isolated Git worktree, re-run smoke verification, and persist the PatchProposal. Set patch_kind to 'uv_spec' with a single Python requirement string (e.g. 'scipy>=1.14') for missing modules, or 'code_diff' with a unified git diff for code fixes."
+        description = "After a failed smoke preflight, apply a candidate fix inside the task's isolated Git worktree, re-run smoke verification, and persist the PatchProposal. Set patch_kind to 'uv_spec' with a single Python requirement string (e.g. 'requests>=2.32') for missing modules, or 'code_diff' with a unified git diff for code fixes."
     )]
     async fn propose_worktree_patch(
         &self,

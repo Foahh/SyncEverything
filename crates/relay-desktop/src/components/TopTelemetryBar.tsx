@@ -19,7 +19,7 @@ import { setRelayLocale, type RelayLocale } from "../i18n";
 
 interface TopTelemetryBarProps {
   status: PeerStatus_Serialize | undefined;
-  repoId: string;
+  repoName: string | null;
   headCommitSha: string | null;
   staleCount: number;
   theme: "light" | "dark";
@@ -34,7 +34,7 @@ interface TopTelemetryBarProps {
 
 export function TopTelemetryBar({
   status,
-  repoId,
+  repoName,
   headCommitSha,
   staleCount,
   theme,
@@ -90,8 +90,11 @@ export function TopTelemetryBar({
           className="min-w-0 gap-2 px-2"
         >
           <GitBranch data-icon="inline-start" className="text-muted-foreground" />
-          <span lang="en" className="truncate text-xs leading-snug font-medium text-foreground">
-            {repoId}
+          <span
+            lang={repoName ? "en" : undefined}
+            className="truncate text-xs leading-snug font-medium text-foreground"
+          >
+            {repoName ?? t("topbar.noRepo")}
           </span>
           {headCommitSha && (
             <span

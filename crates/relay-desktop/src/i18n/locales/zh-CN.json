@@ -1,6 +1,6 @@
 {
   "app": {
-    "name": "Relay"
+    "name": "SyncEverything"
   },
   "topbar": {
     "pairDevice": "配对设备",
@@ -14,6 +14,7 @@
     "switchLang": "切换语言",
     "openSettings": "工作区与 AI 设置",
     "switchRepo": "切换本地仓库",
+    "noRepo": "打开仓库",
     "transport": {
       "direct_lan": "局域网",
       "relay": "中继直通",
@@ -31,7 +32,7 @@
     "noRuns": "还没有任务，点上方「交给主机运行」开始。",
     "reviewFix": "查看修复建议",
     "viewResult": "查看结果",
-    "settingsButton": "设备与开发选项",
+    "settingsButton": "设备角色",
     "modeLabel": "当前设备角色",
     "mode": {
       "client": "笔记本",
@@ -40,7 +41,7 @@
     },
     "devTools": "开发测试工具",
     "simulateCodeChange": "模拟代码变更",
-    "resetPreview": "重置示例数据"
+    "resetPreview": "重置预览状态"
   },
   "taskState": {
     "queued": "排队中",
@@ -107,10 +108,10 @@
     "tabAgent": "Agent",
     "tabDetails": "详情",
     "newChat": "新建对话",
-    "emptyTitle": "Relay Agent",
+    "emptyTitle": "SyncEverything Agent",
     "emptyDesc": "直接查询当前图谱与最新结果、提交白名单实验任务，或协助排查报错与修复。",
     "thinking": "思考中…",
-    "inputLabel": "向 Relay Agent 提问",
+    "inputLabel": "向 SyncEverything Agent 提问",
     "placeholder": "询问最新指标、代码变更，或让 Agent 运行预设任务…",
     "send": "发送消息",
     "stop": "停止生成",
@@ -125,7 +126,7 @@
     "suggestions": {
       "checkOutdated": "检查当前有哪些实验结果已过期",
       "inspectEnv": "查看主机同步状态和 Python 环境差异",
-      "runAndCheck": "运行 train_grid 实验并排查报错"
+      "runAndCheck": "检查项目图谱并运行一个可用预设任务"
     },
     "tools": {
       "inspect_sync_status": "查询设备同步状态",
@@ -148,7 +149,7 @@
       "title": "记一笔思路",
       "subtitle": "记录修改原因，换设备后 AI 助手依然清楚你的上下文。",
       "titleLabel": "标题",
-      "titlePlaceholder": "例如：把平滑系数 alpha 调到 0.45 观察周期误差",
+      "titlePlaceholder": "例如：改用 Cosine 学习率衰减策略观察收敛速度",
       "whyLabel": "详细说明",
       "whyPlaceholder": "为什么这样改？有什么需要注意的？",
       "rulesLabel": "约束（可选，逗号分隔）",
@@ -160,16 +161,14 @@
       "title": "交给主机运行",
       "subtitle": "选择项目 relay.toml 中配置的预设任务在主机执行。",
       "presetLabel": "选择任务",
-      "presetGridTitle": "多窗口参数扫描",
-      "presetGridDesc": "运行 7 / 14 / 28 三组窗口并记录误差",
-      "presetSmokeTitle": "快速预检",
-      "presetSmokeDesc": "1 秒内检查环境与脚本是否可正常运行",
-      "windowsLabel": "窗口列表",
-      "alphaLabel": "平滑系数 (alpha)",
+      "paramPlaceholder": "可选覆盖（留空使用 relay.toml 默认值）",
       "paramsLabel": "任务参数",
       "noParamsHint": "该预设任务无需额外参数。",
+      "noPresetsTitle": "尚未配置任务预设",
+      "noPresetsDesc": "请先打开包含 relay.toml 的本地 Git 仓库，或在仓库设置中一键生成默认 relay.toml。",
+      "openRepoSettings": "打开仓库设置",
       "noteLabel": "任务备注（可选）",
-      "notePlaceholder": "例如：对比昨天基线 MAE",
+      "notePlaceholder": "例如：对比上一提交的指标结果",
       "askBeforeFix": "遇到报错生成修复方案时，先让我确认再应用",
       "cancel": "取消",
       "submit": "开始运行"
@@ -184,7 +183,7 @@
       "copyBtn": "复制配对码",
       "copiedBtn": "已复制",
       "pasteLabel": "粘贴主机配对码",
-      "pastePlaceholder": "粘贴 Relay Desktop 或 `relay-daemon serve` 输出的 JSON 配对码…",
+      "pastePlaceholder": "粘贴 SyncEverything 或 `relay-daemon serve` 输出的 JSON 配对码…",
       "connectBtn": "立即连接",
       "connectedSuccess": "配对成功，正在同步工作区。",
       "invalidCode": "连接失败，请确认配对码完整且未超过有效期。",
@@ -196,8 +195,9 @@
       "repoTab": "代码仓库",
       "llmTab": "AI 模型",
       "currentRepo": "当前仓库",
+      "noRepoSelected": "尚未打开本地仓库",
       "watchingGit": "自动监听 Git HEAD",
-      "notGitRepo": "只读示例（无 .git）",
+      "notGitRepo": "非 Git 仓库（缺少 .git）",
       "presetsDiscovered": "relay.toml 任务预设",
       "noPresets": "relay.toml 中未发现任务预设。",
       "repoPathLabel": "本地 Git 仓库目录",
