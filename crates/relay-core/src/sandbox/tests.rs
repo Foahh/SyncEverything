@@ -425,3 +425,56 @@ async fn read_repo_file_and_git_diff_enforce_repo_confinement() {
     assert!(dirty.contains("M src/app.py"));
     assert!(dirty.contains("+# modified line"));
 }
+
+#[test]
+fn generates_valid_default_manifests_for_detected_project_types() {
+    let temp = TempDir::new();
+
+    let py_dir = temp.join("Py Sample App");
+    fs::create_dir(&py_dir).unwrap();
+    fs::write(
+        py_dir.join("pyproject.toml"),
+        "[project]\nname = \"py-sample\"\ndependencies = [\"pytest\"]\n",
+    )
+    .unwrap();
+    let (py_toml, py_kind) = generate_default_manifest(&py_dir).unwrap();
+    assert_eq!(py_kind, "python-uv");
+    let py_manifest: RelayManifest = toml::from_str(&py_toml).unwrap();
+    assert_eq!(py_manifest.project.repo_id, "py-sample-app");
+    assert_eq!(py_manifest.project.smoke_preset, "smoke");
+    assert_eq!(py_manifest.presets["smoke"].program, "uv");
+    assert_eq!(py_manifest.presets["test"].program, "uv");
+
+    let rs_dir = temp.join("rust-crate");
+    fs::create_dir(&rs_dir).unwrap();
+    fs::write(rs_dir.join("Cargo.toml"), "[package]\nname = \"demo\"\n").unwrap();
+    let kind = write_default_manifest(&rs_dir).unwrap();
+    assert_eq!(kind, "rust-cargo");
+    let rs_manifest = load_manifest(&rs_dir).unwrap();
+    assert_eq!(rs_manifest.project.smoke_preset, "check");
+    assert_eq!(rs_manifest.presets["check"].program, "cargo");
+    assert_eq!(rs_manifest.presets["test"].program, "cargo");
+    assert!(write_default_manifest(&rs_dir).is_err());
+
+    let js_bun_dir = temp.join("web-bun");
+    fs::create_dir(&js_bun_dir).unwrap();
+    fs::write(
+        js_bun_dir.join("package.json"),
+        r#"{"scripts":{"lint":"oxlint","test":"bun test","build":"vite build"}}"#,
+    )
+    .unwrap();
+    fs::write(js_bun_dir.join("bun.lock"), "").unwrap();
+    let (bun_toml, bun_kind) = generate_default_manifest(&js_bun_dir).unwrap();
+    assert_eq!(bun_kind, "js-ts");
+    let bun_manifest: RelayManifest = toml::from_str(&bun_toml).unwrap();
+    assert_eq!(bun_manifest.presets["smoke"].program, "bun");
+    assert_eq!(bun_manifest.presets["smoke"].args, vec!["run", "lint"]);
+    assert_eq!(bun_manifest.presets["build"].args, vec!["run", "build"]);
+
+    let generic_dir = temp.join("misc");
+    fs::create_dir(&generic_dir).unwrap();
+    let (gen_toml, gen_kind) = generate_default_manifest(&generic_dir).unwrap();
+    assert_eq!(gen_kind, "generic");
+    let gen_manifest: RelayManifest = toml::from_str(&gen_toml).unwrap();
+    assert_eq!(gen_manifest.presets["smoke"].program, "git");
+}

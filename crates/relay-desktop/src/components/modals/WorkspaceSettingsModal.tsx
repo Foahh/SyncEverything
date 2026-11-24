@@ -15,15 +15,19 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { cn } from "@/lib/utils";
 import {
   AlertCircle,
+  Check,
   CheckCircle2,
+  Copy,
   Cpu,
   Eye,
   EyeOff,
+  FilePlus2,
   FolderGit2,
   FolderOpen,
   RefreshCw,
   SlidersHorizontal,
   Sparkles,
+  Terminal,
   Trash2,
 } from "lucide-react";
 import { useState, type FormEvent } from "react";
@@ -35,6 +39,7 @@ import type {
   WorkspaceInfo_Serialize,
 } from "../../bindings";
 import {
+  useInitWorkspaceManifest,
   useLlmSettings,
   useOpenWorkspaceRepo,
   useRefreshGitHead,
@@ -43,7 +48,9 @@ import {
 } from "../../lib/queries";
 import { isTauriRuntime, relayApi } from "../../lib/relayApi";
 
-export type SettingsTab = "repo" | "llm";
+export type SettingsTab = "repo" | "llm" | "mcp";
+
+type McpClientId = "claude" | "cursor" | "codex";
 
 interface WorkspaceSettingsModalProps {
   isOpen: boolean;
@@ -74,10 +81,47 @@ const TIER_DEFAULTS: Record<InferenceTier, { baseUrl: string; model: string }> =
 
 const TIER_ORDER: InferenceTier[] = ["host_local_ollama", "cloud_open_ai_compat", "edge_fast_path"];
 
+const MCP_CLIENTS: Array<{ id: McpClientId; label: string; configPath: string }> = [
+  { id: "claude", label: "Claude Code", configPath: ".mcp.json / ~/.claude.json" },
+  { id: "cursor", label: "Cursor", configPath: ".cursor/mcp.json" },
+  { id: "codex", label: "Codex CLI", configPath: "~/.codex/config.toml" },
+];
+
 function errorMessage(err: unknown, fallback: string): string {
   if (err instanceof Error && err.message) return err.message;
   if (typeof err === "string" && err.trim()) return err;
   return fallback;
+}
+
+function buildMcpSnippet(client: McpClientId, repoRoot: string | null): string {
+  const effectiveRoot = (repoRoot?.trim() || "/path/to/your/repo").replace(/[\\/]+$/, "");
+  const sep = effectiveRoot.includes("\\") ? "\\" : "/";
+  const dataDir = `${effectiveRoot}${sep}.relay`;
+
+  if (client === "codex") {
+    return [
+      "[mcp_servers.relay]",
+      'command = "relay-daemon"',
+      "args = [",
+      `  "--repo-root", ${JSON.stringify(effectiveRoot)},`,
+      `  "--data-dir", ${JSON.stringify(dataDir)},`,
+      '  "mcp-stdio",',
+      "]",
+    ].join("\n");
+  }
+
+  return JSON.stringify(
+    {
+      mcpServers: {
+        relay: {
+          command: "relay-daemon",
+          args: ["--repo-root", effectiveRoot, "--data-dir", dataDir, "mcp-stdio"],
+        },
+      },
+    },
+    null,
+    2,
+  );
 }
 
 function StatusBanner({ feedback }: { feedback: FeedbackState | null }) {
@@ -114,6 +158,7 @@ function RepositorySettingsTab({ workspace }: { workspace: WorkspaceInfo_Seriali
   const [feedback, setFeedback] = useState<FeedbackState | null>(null);
 
   const openRepo = useOpenWorkspaceRepo();
+  const initManifest = useInitWorkspaceManifest();
   const refreshGit = useRefreshGitHead();
   const isDesktop = isTauriRuntime();
 
@@ -148,6 +193,18 @@ function RepositorySettingsTab({ workspace }: { workspace: WorkspaceInfo_Seriali
     });
   };
 
+  const handleGenerateManifest = () => {
+    setFeedback(null);
+    initManifest.mutate(undefined, {
+      onSuccess: () => {
+        setFeedback({ ok: true, text: t("modals.workspace.manifestGenerated") });
+      },
+      onError: (err) => {
+        setFeedback({ ok: false, text: errorMessage(err, "Could not generate relay.toml.") });
+      },
+    });
+  };
+
   const handleSyncGit = () => {
     setFeedback(null);
     refreshGit.mutate(undefined, {
@@ -162,6 +219,9 @@ function RepositorySettingsTab({ workspace }: { workspace: WorkspaceInfo_Seriali
       },
     });
   };
+
+  const needsManifest =
+    Boolean(workspace?.repo_root) && Boolean(workspace?.is_git_repo) && !workspace?.has_manifest;
 
   return (
     <div className="flex flex-col gap-4">
@@ -224,6 +284,26 @@ function RepositorySettingsTab({ workspace }: { workspace: WorkspaceInfo_Seriali
             </span>
           )}
         </div>
+
+        {needsManifest && (
+          <div className="flex items-center justify-between gap-2 rounded-md border border-dashed border-primary/40 bg-background/80 px-2.5 py-2">
+            <span className="text-[11px] leading-snug text-muted-foreground">
+              {t("modals.workspace.missingManifestHint")}
+            </span>
+            <Button
+              type="button"
+              size="xs"
+              disabled={initManifest.isPending}
+              onClick={handleGenerateManifest}
+              className="shrink-0"
+            >
+              <FilePlus2 data-icon="inline-start" />
+              <span className="relay-text-trim leading-none">
+                {t("modals.workspace.generateManifestBtn")}
+              </span>
+            </Button>
+          </div>
+        )}
       </div>
 
       <form onSubmit={handleOpenRepo} className="flex flex-col gap-3">
@@ -529,6 +609,92 @@ function LlmSettingsTab({ initial }: { initial: LlmSettingsView_Serialize }) {
   );
 }
 
+function McpConfigTab({ repoRoot }: { repoRoot: string | null }) {
+  const { t } = useTranslation();
+  const [client, setClient] = useState<McpClientId>("claude");
+  const [copied, setCopied] = useState(false);
+
+  const selectedClient = MCP_CLIENTS.find((item) => item.id === client) ?? MCP_CLIENTS[0];
+  const snippet = buildMcpSnippet(client, repoRoot);
+
+  const handleCopy = async () => {
+    await navigator.clipboard.writeText(snippet);
+    setCopied(true);
+    window.setTimeout(() => setCopied(false), 1800);
+  };
+
+  return (
+    <div className="flex flex-col gap-3.5">
+      <p className="text-xs leading-relaxed text-muted-foreground">
+        {t("modals.workspace.mcpDesc")}
+      </p>
+
+      <div className="grid grid-cols-3 gap-2">
+        {MCP_CLIENTS.map((item) => {
+          const active = item.id === client;
+          return (
+            <button
+              key={item.id}
+              type="button"
+              onClick={() => {
+                setClient(item.id);
+                setCopied(false);
+              }}
+              className={cn(
+                "cursor-pointer rounded-lg border px-2.5 py-2 text-left transition-all",
+                active
+                  ? "border-primary bg-primary/8 ring-1 ring-primary/25"
+                  : "border-border bg-muted/40 hover:border-foreground/20",
+              )}
+            >
+              <div className="flex items-center gap-1.5 text-xs font-semibold text-foreground">
+                <Terminal className="size-3.5 shrink-0 text-primary" />
+                <span lang="en" className="relay-text-trim truncate leading-none">
+                  {item.label}
+                </span>
+              </div>
+              <div
+                lang="en"
+                className="font-mono-tech mt-1 truncate text-[10px] text-muted-foreground"
+              >
+                {item.configPath}
+              </div>
+            </button>
+          );
+        })}
+      </div>
+
+      <div className="flex flex-col gap-1.5">
+        <div className="flex items-center justify-between text-[11px] text-muted-foreground">
+          <span>
+            {t("modals.workspace.mcpFileLabel")}{" "}
+            <span lang="en" className="font-mono-tech text-foreground">
+              {selectedClient.configPath}
+            </span>
+          </span>
+        </div>
+        <pre
+          lang="en"
+          className="font-mono-tech max-h-48 overflow-auto rounded-md border border-border bg-muted/60 p-3 text-[11px] leading-relaxed text-foreground"
+        >
+          {snippet}
+        </pre>
+      </div>
+
+      <Button type="button" size="lg" className="w-full" onClick={() => void handleCopy()}>
+        {copied ? <Check data-icon="inline-start" /> : <Copy data-icon="inline-start" />}
+        <span className="relay-text-trim leading-none">
+          {copied ? t("modals.workspace.mcpCopiedBtn") : t("modals.workspace.mcpCopyBtn")}
+        </span>
+      </Button>
+
+      <p className="text-[11px] leading-relaxed text-muted-foreground">
+        {t("modals.workspace.mcpHttpHint")}
+      </p>
+    </div>
+  );
+}
+
 export function WorkspaceSettingsModal({
   isOpen,
   onOpenChange,
@@ -556,23 +722,25 @@ export function WorkspaceSettingsModal({
 
         <Tabs
           value={activeTab}
-          onValueChange={(value) => onTabChange(value === "llm" ? "llm" : "repo")}
+          onValueChange={(value) =>
+            onTabChange(value === "llm" || value === "mcp" ? value : "repo")
+          }
           className="gap-3"
         >
-          <TabsList className="grid w-full grid-cols-2">
+          <TabsList className="grid w-full grid-cols-3">
             <TabsTrigger value="repo">
               <span className="relay-text-trim leading-none">{t("modals.workspace.repoTab")}</span>
             </TabsTrigger>
             <TabsTrigger value="llm">
               <span className="relay-text-trim leading-none">{t("modals.workspace.llmTab")}</span>
             </TabsTrigger>
+            <TabsTrigger value="mcp">
+              <span className="relay-text-trim leading-none">{t("modals.workspace.mcpTab")}</span>
+            </TabsTrigger>
           </TabsList>
 
           <TabsContent value="repo">
-            <RepositorySettingsTab
-              key={workspace?.repo_root ?? "default-repo"}
-              workspace={workspace}
-            />
+            <RepositorySettingsTab key={workspace?.repo_root ?? "no-repo"} workspace={workspace} />
           </TabsContent>
 
           <TabsContent value="llm">
@@ -582,6 +750,10 @@ export function WorkspaceSettingsModal({
                 initial={llmSettings}
               />
             )}
+          </TabsContent>
+
+          <TabsContent value="mcp">
+            <McpConfigTab repoRoot={workspace?.repo_root ?? null} />
           </TabsContent>
         </Tabs>
 

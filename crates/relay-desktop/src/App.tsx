@@ -18,6 +18,7 @@ import { useCopilotChat } from "./hooks/useCopilotChat";
 import { useRelayTheme } from "./hooks/useRelayTheme";
 import {
   useDagSnapshot,
+  useInitWorkspaceManifest,
   useLlmSettings,
   useRelayEventSync,
   useResetPreviewDemo,
@@ -60,6 +61,7 @@ export default function App() {
   const simulateEdit = useSimulateArtifactUpdate();
   const upsertNode = useUpsertDagNode();
   const resetDemo = useResetPreviewDemo();
+  const initManifest = useInitWorkspaceManifest();
 
   const selectedNode: GraphNode | null = useMemo(() => {
     if (!selectedNodeId || !dag) return null;
@@ -245,10 +247,17 @@ export default function App() {
           snapshot={dag}
           selectedNodeId={selectedNodeId}
           includeStale={includeStale}
+          hasRepo={Boolean(workspace?.repo_root)}
+          isGitRepo={Boolean(workspace?.is_git_repo)}
+          hasManifest={Boolean(workspace?.has_manifest)}
+          isGeneratingManifest={initManifest.isPending}
           onToggleIncludeStale={() => setIncludeStale((prev) => !prev)}
           onSelectNode={handleSelectNode}
           onOpenRecordDecision={() => setDecisionModalOpen(true)}
           onOpenDispatchTask={() => setTaskModalOpen(true)}
+          onOpenRepoSettings={() => handleOpenSettings("repo")}
+          onOpenPairModal={() => setPairModalOpen(true)}
+          onGenerateManifest={() => initManifest.mutate(undefined)}
         />
 
         <RightWorkbenchRail

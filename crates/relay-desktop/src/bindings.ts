@@ -10,6 +10,7 @@ export const commands = {
 	getWorkspaceInfo: (options?: InvokeOptions) => __TAURI_INVOKE<WorkspaceInfo_Serialize>("get_workspace_info", undefined, options),
 	pickRepositoryFolder: (options?: InvokeOptions) => __TAURI_INVOKE<string | null>("pick_repository_folder", undefined, options),
 	openWorkspaceRepo: (repoPath: string, options?: InvokeOptions) => __TAURI_INVOKE<WorkspaceInfo_Serialize>("open_workspace_repo", { repoPath }, options),
+	initWorkspaceManifest: (repoPath: string | null, options?: InvokeOptions) => __TAURI_INVOKE<WorkspaceInfo_Serialize>("init_workspace_manifest", { repoPath }, options),
 	refreshGitHead: (options?: InvokeOptions) => __TAURI_INVOKE<boolean>("refresh_git_head", undefined, options),
 	getLlmSettings: (options?: InvokeOptions) => __TAURI_INVOKE<LlmSettingsView_Serialize>("get_llm_settings", undefined, options),
 	saveLlmSettings: (update: LlmSettingsUpdate_Deserialize, options?: InvokeOptions) => __TAURI_INVOKE<LlmSettingsView_Serialize>("save_llm_settings", { update }, options),

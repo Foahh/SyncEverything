@@ -860,12 +860,9 @@ pub(crate) fn validate_user_repo(path: &Path) -> RelayResult<PathBuf> {
             "Selected folder is not a Git repository (missing .git). Run `git init` first.".into(),
         ));
     }
-    if !abs.join("relay.toml").is_file() {
-        return Err(RelayError::Internal(
-            "Selected repository is missing relay.toml at its root.".into(),
-        ));
+    if abs.join("relay.toml").is_file() {
+        let _ = load_manifest(&abs)?;
     }
-    let _ = load_manifest(&abs)?;
     Ok(abs)
 }
 

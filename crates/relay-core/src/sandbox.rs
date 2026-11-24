@@ -23,6 +23,208 @@ pub fn load_manifest(repo_root: &Path) -> RelayResult<RelayManifest> {
     Ok(toml::from_str(&raw)?)
 }
 
+/// Generate a starter `relay.toml` manifest by inspecting project files in `repo_root`.
+/// Returns `(toml_content, detected_kind)`.
+pub fn generate_default_manifest(repo_root: &Path) -> RelayResult<(String, String)> {
+    if !repo_root.is_dir() {
+        return Err(RelayError::Internal(format!(
+            "Repository path is not a directory: {}",
+            repo_root.display()
+        )));
+    }
+    let dir_name = repo_root
+        .file_name()
+        .map(|name| name.to_string_lossy().trim().to_owned())
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| "Workspace".into());
+    let repo_id = slugify_repo_id(&dir_name);
+    let id_lit = toml_string_literal(&repo_id);
+    let name_lit = toml_string_literal(&dir_name);
+
+    let (smoke_preset, detected_kind, presets_body) = if repo_root.join("pyproject.toml").is_file() {
+        let pyproject_raw = std::fs::read_to_string(repo_root.join("pyproject.toml")).unwrap_or_default();
+        let has_pytest = repo_root.join("tests").is_dir()
+            || pyproject_raw.to_ascii_lowercase().contains("pytest");
+        let second_preset = if has_pytest {
+            concat!(
+                "\n[presets.test]\n",
+                "description = \"Run pytest suite in uv environment\"\n",
+                "program = \"uv\"\n",
+                "args = [\"run\", \"pytest\", \"-q\"]\n",
+                "timeout_secs = 300\n",
+                "allowed_params = []\n",
+            )
+        } else {
+            concat!(
+                "\n[presets.check]\n",
+                "description = \"Verify uv Python runtime\"\n",
+                "program = \"uv\"\n",
+                "args = [\"run\", \"python\", \"--version\"]\n",
+                "timeout_secs = 60\n",
+                "allowed_params = []\n",
+            )
+        };
+        let body = format!(
+            concat!(
+                "[presets.smoke]\n",
+                "description = \"Quick Python environment check via uv\"\n",
+                "program = \"uv\"\n",
+                "args = [\"run\", \"python\", \"-c\", \"import sys; print(sys.version)\"]\n",
+                "timeout_secs = 60\n",
+                "allowed_params = []\n",
+                "{}"
+            ),
+            second_preset
+        );
+        ("smoke", "python-uv", body)
+    } else if repo_root.join("Cargo.toml").is_file() {
+        let body = concat!(
+            "[presets.check]\n",
+            "description = \"Compile-check the Cargo workspace\"\n",
+            "program = \"cargo\"\n",
+            "args = [\"check\"]\n",
+            "timeout_secs = 300\n",
+            "allowed_params = []\n\n",
+            "[presets.test]\n",
+            "description = \"Run Cargo tests\"\n",
+            "program = \"cargo\"\n",
+            "args = [\"test\"]\n",
+            "timeout_secs = 300\n",
+            "allowed_params = []\n",
+        )
+        .to_owned();
+        ("check", "rust-cargo", body)
+    } else if repo_root.join("package.json").is_file() {
+        let pm = if repo_root.join("bun.lock").is_file() || repo_root.join("bun.lockb").is_file() {
+            "bun"
+        } else if repo_root.join("pnpm-lock.yaml").is_file() {
+            "pnpm"
+        } else if repo_root.join("yarn.lock").is_file() {
+            "yarn"
+        } else {
+            "npm"
+        };
+        let scripts = std::fs::read_to_string(repo_root.join("package.json"))
+            .ok()
+            .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+            .and_then(|val| val.get("scripts").cloned())
+            .and_then(|val| val.as_object().cloned())
+            .unwrap_or_default();
+        let smoke_args = if scripts.contains_key("lint") {
+            "[\"run\", \"lint\"]"
+        } else if scripts.contains_key("typecheck") {
+            "[\"run\", \"typecheck\"]"
+        } else {
+            "[\"--version\"]"
+        };
+        let mut body = format!(
+            "[presets.smoke]\n\
+             description = \"Quick project sanity check\"\n\
+             program = {pm_lit}\n\
+             args = {smoke_args}\n\
+             timeout_secs = 120\n\
+             allowed_params = []\n",
+            pm_lit = toml_string_literal(pm),
+        );
+        if scripts.contains_key("test") {
+            body.push_str(&format!(
+                "\n[presets.test]\n\
+                 description = \"Run project tests\"\n\
+                 program = {pm_lit}\n\
+                 args = [\"run\", \"test\"]\n\
+                 timeout_secs = 300\n\
+                 allowed_params = []\n",
+                pm_lit = toml_string_literal(pm),
+            ));
+        }
+        if scripts.contains_key("build") {
+            body.push_str(&format!(
+                "\n[presets.build]\n\
+                 description = \"Build the project\"\n\
+                 program = {pm_lit}\n\
+                 args = [\"run\", \"build\"]\n\
+                 timeout_secs = 300\n\
+                 allowed_params = []\n",
+                pm_lit = toml_string_literal(pm),
+            ));
+        }
+        ("smoke", "js-ts", body)
+    } else {
+        let body = concat!(
+            "[presets.smoke]\n",
+            "description = \"Inspect repository Git status\"\n",
+            "program = \"git\"\n",
+            "args = [\"status\", \"--short\"]\n",
+            "timeout_secs = 30\n",
+            "allowed_params = []\n",
+        )
+        .to_owned();
+        ("smoke", "generic", body)
+    };
+
+    let content = format!(
+        "[project]\nrepo_id = {id_lit}\nname = {name_lit}\nsmoke_preset = {}\n\n{presets_body}",
+        toml_string_literal(smoke_preset),
+    );
+    let _: RelayManifest = toml::from_str(&content)?;
+    Ok((content, detected_kind.to_owned()))
+}
+
+/// Write a starter `relay.toml` into `repo_root` without overwriting an existing file.
+/// Returns the detected project kind (`python-uv`, `rust-cargo`, `js-ts`, or `generic`).
+pub fn write_default_manifest(repo_root: &Path) -> RelayResult<String> {
+    let target = repo_root.join("relay.toml");
+    if target.exists() {
+        return Err(RelayError::Internal(
+            "relay.toml already exists in this repository".into(),
+        ));
+    }
+    let (content, kind) = generate_default_manifest(repo_root)?;
+    std::fs::write(&target, content)?;
+    Ok(kind)
+}
+
+fn slugify_repo_id(raw: &str) -> String {
+    let mut slug = String::new();
+    let mut prev_dash = false;
+    for ch in raw.chars() {
+        if ch.is_ascii_alphanumeric() {
+            slug.push(ch.to_ascii_lowercase());
+            prev_dash = false;
+        } else if !prev_dash && !slug.is_empty() {
+            slug.push('-');
+            prev_dash = true;
+        }
+    }
+    let trimmed = slug.trim_matches('-');
+    if trimmed.is_empty() {
+        "workspace".to_owned()
+    } else {
+        trimmed.to_owned()
+    }
+}
+
+fn toml_string_literal(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len() + 2);
+    escaped.push('"');
+    for ch in value.chars() {
+        match ch {
+            '\\' => escaped.push_str("\\\\"),
+            '"' => escaped.push_str("\\\""),
+            '\n' => escaped.push_str("\\n"),
+            '\r' => escaped.push_str("\\r"),
+            '\t' => escaped.push_str("\\t"),
+            c if c.is_control() => {
+                use std::fmt::Write;
+                let _ = write!(escaped, "\\u{:04X}", c as u32);
+            }
+            c => escaped.push(c),
+        }
+    }
+    escaped.push('"');
+    escaped
+}
+
 /// Resolve a named preset against the whitelist in relay.toml.
 pub fn resolve_preset<'a>(
     manifest: &'a RelayManifest,

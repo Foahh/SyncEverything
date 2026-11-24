@@ -317,6 +317,35 @@ export const relayApi = {
     return structuredClone(mockState.workspace);
   },
 
+  async initWorkspaceManifest(repoPath?: string | null): Promise<WorkspaceInfo_Serialize> {
+    if (isTauriRuntime()) {
+      return commands.initWorkspaceManifest(repoPath ?? null);
+    }
+    const effectivePath = (repoPath ?? mockState.workspace.repo_root ?? "").trim();
+    if (!effectivePath) {
+      throw new Error("Open a local Git repository first.");
+    }
+    const slug = effectivePath.split(/[\\/]/).filter(Boolean).pop() ?? "workspace";
+    mockState.workspace = {
+      repo_id: slug,
+      name: slug,
+      repo_root: effectivePath,
+      is_git_repo: true,
+      has_manifest: true,
+      smoke_preset: "check",
+      presets: [
+        {
+          name: "check",
+          description: "Quick workspace sanity check",
+          program: "git",
+          args: ["status", "--short"],
+          allowed_params: [],
+        },
+      ],
+    };
+    return structuredClone(mockState.workspace);
+  },
+
   async refreshGitHead(): Promise<boolean> {
     if (isTauriRuntime()) {
       return commands.refreshGitHead();
