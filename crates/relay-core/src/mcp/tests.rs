@@ -305,6 +305,36 @@ async fn mcp_end_to_end_preflight_patch_approval_and_stale_block() {
     let error = &stale.content[0].as_text().unwrap().text;
     assert!(error.contains("STALE"));
     assert!(!error.contains("0.25"));
+
+    let stale_snapshot = server
+        .handle_get_dag_snapshot(GetDagSnapshotArgs { include_stale: Some(true) })
+        .await;
+    assert_eq!(stale_snapshot.stale_count, 1);
+    let stale_node = stale_snapshot.nodes.iter().find(|node| node.id == node_id).unwrap();
+    assert!(matches!(stale_node.freshness, Freshness::Stale { .. }));
+    let NodeKind::Evidence { metrics_json: redacted_metrics, .. } = &stale_node.payload else {
+        panic!("expected evidence payload");
+    };
+    assert_eq!(
+        *redacted_metrics,
+        serde_json::json!({
+            "quarantined": true,
+            "reason": "stale_evidence_metrics_redacted",
+        })
+        .into()
+    );
+    let serialized_stale = serde_json::to_string(&stale_snapshot).unwrap();
+    assert!(serialized_stale.contains("stale_evidence_metrics_redacted"));
+    assert!(!serialized_stale.contains("0.25"));
+    assert!(!serialized_stale.contains("smoke passed"));
+
+    let raw_snapshot = fixture.engine.dag_snapshot(true).await;
+    let raw_node = raw_snapshot.nodes.iter().find(|node| node.id == node_id).unwrap();
+    let NodeKind::Evidence { metrics_json: raw_metrics, .. } = &raw_node.payload else {
+        panic!("expected evidence payload");
+    };
+    assert_eq!(*raw_metrics, serde_json::json!({"alpha": 0.25, "smoke": "smoke passed"}).into());
+
     let filtered = server
         .handle_get_dag_snapshot(GetDagSnapshotArgs { include_stale: Some(false) })
         .await;

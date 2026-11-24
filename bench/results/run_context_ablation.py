@@ -394,20 +394,30 @@ def extract_metric_tokens(metrics_json: dict[str, Any]) -> tuple[list[str], str 
 
 
 def read_snapshot_metrics(daemon_bin: Path, repo: Path, data: Path) -> dict[str, Any]:
-    with McpStdioClient(daemon_bin, repo, data) as mcp:
-        snap = mcp.call("get_dag_snapshot", {"include_stale": True})
+    _ = daemon_bin
+    db_path = data / "relay.db"
+    checkpoint_sqlite(db_path)
 
     stale_tokens: set[str] = set()
     fresh_tokens: set[str] = set()
     fresh_best_maes: list[str] = []
     stale_best_maes: list[str] = []
 
-    for node in snap.get("nodes", []):
-        payload = node.get("payload") or {}
+    conn = sqlite3.connect(str(db_path))
+    try:
+        rows = conn.execute(
+            "SELECT payload_json, freshness_json FROM dag_nodes ORDER BY created_at ASC, rowid ASC"
+        ).fetchall()
+    finally:
+        conn.close()
+
+    for payload_raw, freshness_raw in rows:
+        payload = json.loads(payload_raw)
         if payload.get("kind") != "evidence":
             continue
+        freshness = json.loads(freshness_raw)
         tokens, best_tok = extract_metric_tokens(payload.get("metrics_json") or {})
-        status = (node.get("freshness") or {}).get("status")
+        status = freshness.get("status")
         if status == "stale":
             stale_tokens.update(tokens)
             if best_tok:
@@ -417,10 +427,11 @@ def read_snapshot_metrics(daemon_bin: Path, repo: Path, data: Path) -> dict[str,
             if best_tok:
                 fresh_best_maes.append(best_tok)
 
+    head_commit_sha = run_cmd(["git", "rev-parse", "HEAD"], cwd=repo).stdout.strip()
     # Exclude any prefix/number shared with a truly fresh HEAD metric
     exclusive_stale = sorted(tok for tok in stale_tokens if tok not in fresh_tokens)
     return {
-        "head_commit_sha": snap.get("head_commit_sha"),
+        "head_commit_sha": head_commit_sha,
         "stale_best_maes": stale_best_maes,
         "fresh_best_maes": fresh_best_maes,
         "stale_tokens": exclusive_stale,

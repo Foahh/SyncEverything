@@ -14,7 +14,7 @@ Exposed over both **Stdio** (`relay-daemon mcp-stdio`, compatible with Claude Co
 | `inspect_sync_status` | `{}` | Returns current runtime mode, local/peer `NodeId`, transport path (`DirectLan` / `Relay` / `Offline`), last synced commit, and pending outbox count. |
 | `list_handoffs` | `{ limit?: u32 }` | Lists recent cross-device handoff records with base commit SHA, summary note, and active task states. |
 | `check_env_diff` | `{ commit_sha: String }` | Compares target commit's `pyproject.toml` / `uv.lock` fingerprint against the Host environment fingerprint. |
-| `get_dag_snapshot` | `{ include_stale?: bool }` | Returns full Decision-Evidence DAG (`nodes`, `edges`, `stale_count`). Explicitly flags every `STALE` evidence node so agents never cite outdated metrics. |
+| `get_dag_snapshot` | `{ include_stale?: bool }` | Returns the Decision-Evidence DAG (`nodes`, `edges`, `stale_count`) with explicit `STALE` freshness flags and deterministically quarantines/redacts `metrics_json` on `STALE` evidence nodes at the MCP boundary so agents never cite outdated metrics. |
 | `read_evidence_log` | `{ node_id: String, max_lines?: u32 }` | Reads artifact/evidence metrics and truncated log blob; returns a prominent warning header if the evidence node is `STALE`. |
 
 ### Isolated Sandbox & Self-Healing Tools
