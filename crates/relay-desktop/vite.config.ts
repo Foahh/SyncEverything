@@ -10,9 +10,21 @@ export default defineConfig({
   resolve: {
     alias: {
       "@": path.resolve(import.meta.dirname, "./src"),
+      // React Flow imports the standalone memo-cache shim. React 19 ships the same entry point.
+      "react-compiler-runtime": "react/compiler-runtime",
     },
   },
   clearScreen: false,
+  build: {
+    rolldownOptions: {
+      output: {
+        strictExecutionOrder: true,
+        codeSplitting: {
+          groups: [{ name: "vendor", test: /node_modules/, entriesAware: true, maxSize: 500_000 }],
+        },
+      },
+    },
+  },
   envPrefix: ["VITE_", "TAURI_ENV_"],
   server: {
     port: 1420,
