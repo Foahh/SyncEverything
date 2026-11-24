@@ -37,6 +37,8 @@ pub struct LlmEndpointConfig {
     pub api_key_env: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub api_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<String>,
 }
 
 /// Safe summary sent to desktop UI without exposing raw API secrets.
@@ -48,6 +50,7 @@ pub struct LlmSettingsView {
     pub api_key_env: Option<String>,
     pub has_api_key: bool,
     pub api_key_hint: Option<String>,
+    pub reasoning_effort: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Type)]
@@ -67,6 +70,7 @@ impl Default for LlmEndpointConfig {
             model: "qwen3.5:4b".to_string(),
             api_key_env: None,
             api_key: None,
+            reasoning_effort: None,
         }
     }
 }
@@ -109,7 +113,32 @@ impl LlmEndpointConfig {
                 _ => {}
             }
         }
+        if let Ok(effort) = std::env::var("RELAY_LLM_REASONING_EFFORT")
+            && !effort.trim().is_empty()
+        {
+            cfg.reasoning_effort = Some(effort.trim().to_owned());
+        }
         cfg
+    }
+
+    /// Resolve the `reasoning_effort` value sent on `/chat/completions`.
+    /// Local Ollama and Edge tiers default to `"none"` for fast, reliable tool calling unless overridden.
+    pub fn effective_reasoning_effort(&self) -> Option<&str> {
+        if let Some(explicit) = self
+            .reasoning_effort
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            if explicit.eq_ignore_ascii_case("auto") || explicit.eq_ignore_ascii_case("default") {
+                return None;
+            }
+            return Some(explicit);
+        }
+        match self.tier {
+            InferenceTier::HostLocalOllama | InferenceTier::EdgeFastPath => Some("none"),
+            InferenceTier::CloudOpenAiCompat => None,
+        }
     }
 
     pub fn redacted_view(&self) -> LlmSettingsView {
@@ -134,6 +163,7 @@ impl LlmEndpointConfig {
             api_key_env: self.api_key_env.clone(),
             has_api_key: resolved.is_some(),
             api_key_hint,
+            reasoning_effort: self.reasoning_effort.clone(),
         }
     }
 }
@@ -198,6 +228,7 @@ pub struct LlmClient {
     models_endpoint: Url,
     model: String,
     api_key: Option<String>,
+    reasoning_effort: Option<String>,
 }
 
 impl LlmClient {
@@ -232,6 +263,7 @@ impl LlmClient {
                 })
                 .transpose()?,
         };
+        let reasoning_effort = config.effective_reasoning_effort().map(str::to_owned);
         let client = Client::builder().timeout(timeout).build().map_err(llm_error)?;
         Ok(Self {
             client,
@@ -240,6 +272,7 @@ impl LlmClient {
             models_endpoint,
             model: config.model,
             api_key,
+            reasoning_effort,
         })
     }
 
@@ -249,7 +282,7 @@ impl LlmClient {
     ) -> RelayResult<ChatCompletionResponse> {
         self.request_completion(messages, false)
             .await
-            .map_err(llm_error)
+            .map_err(CompletionError::into_relay_error)
     }
 
     /// Lightweight connectivity check against `/models`, falling back to a 1-token chat ping.
@@ -352,17 +385,63 @@ impl LlmClient {
         &self,
         messages: &[ChatMessage],
         json_output: bool,
-    ) -> reqwest::Result<ChatCompletionResponse> {
+    ) -> Result<ChatCompletionResponse, CompletionError> {
         let mut body = json!({"model": self.model, "messages": messages, "stream": false});
         if json_output {
             body["response_format"] = json!({"type": "json_object"});
         }
-        let mut request = self.client.post(self.endpoint.clone()).json(&body);
-        if let Some(key) = &self.api_key {
-            request = request.bearer_auth(key);
+        if let Some(effort) = &self.reasoning_effort {
+            body["reasoning_effort"] = json!(effort);
         }
-        request.send().await?.error_for_status()?.json().await
+        for attempt in 0..2 {
+            let mut request = self.client.post(self.endpoint.clone()).json(&body);
+            if let Some(key) = &self.api_key {
+                request = request.bearer_auth(key);
+            }
+            let response = request.send().await.map_err(CompletionError::Transport)?;
+            let status = response.status();
+            if status.is_success() {
+                return response.json().await.map_err(CompletionError::Transport);
+            }
+            let err_body = response.text().await.unwrap_or_default();
+            if attempt == 0 && is_retryable_ollama_xml_500(status, &err_body) {
+                tracing::warn!(
+                    model = %self.model,
+                    "Retrying /chat/completions once after Ollama HTTP 500 XML parse error"
+                );
+                continue;
+            }
+            let detail: String = err_body.chars().take(280).collect();
+            return Err(CompletionError::Http { status, detail });
+        }
+        unreachable!("request_completion retry loop always returns on attempt 1")
     }
+}
+
+enum CompletionError {
+    Transport(reqwest::Error),
+    Http { status: StatusCode, detail: String },
+}
+
+impl CompletionError {
+    fn is_connect_or_timeout(&self) -> bool {
+        matches!(self, Self::Transport(error) if error.is_connect() || error.is_timeout())
+    }
+
+    fn into_relay_error(self) -> RelayError {
+        match self {
+            Self::Transport(error) => llm_error(error),
+            Self::Http { status, detail } => RelayError::Llm(format!("HTTP {status}: {detail}")),
+        }
+    }
+}
+
+pub(crate) fn is_retryable_ollama_xml_500(status: StatusCode, body: &str) -> bool {
+    if status != StatusCode::INTERNAL_SERVER_ERROR {
+        return false;
+    }
+    let lower = body.to_ascii_lowercase();
+    lower.contains("xml syntax error") || lower.contains("unexpected eof")
 }
 
 fn llm_error(error: reqwest::Error) -> RelayError {
@@ -435,7 +514,7 @@ impl SelfHealingAgent {
         let response = match self.llm.request_completion(&messages, true).await {
             Ok(response) => response,
             Err(error) => {
-                if (error.is_connect() || error.is_timeout())
+                if error.is_connect_or_timeout()
                     && let Some(module) = preflight.detected_missing_module.as_deref()
                     && let Some(package) = package_for_module(module)
                 {
@@ -449,7 +528,7 @@ impl SelfHealingAgent {
                         source: "deterministic_fallback".into(),
                     });
                 }
-                return Err(llm_error(error));
+                return Err(error.into_relay_error());
             }
         };
         let content = response

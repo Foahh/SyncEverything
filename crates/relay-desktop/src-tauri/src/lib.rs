@@ -72,6 +72,8 @@ pub struct LlmSettingsUpdate {
     pub api_key_env: Option<String>,
     /// `None` keeps any stored key; `Some("")` clears it; `Some(key)` replaces it.
     pub api_key: Option<String>,
+    #[serde(default)]
+    pub reasoning_effort: Option<String>,
 }
 
 #[derive(Default)]

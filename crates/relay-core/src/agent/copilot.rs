@@ -290,29 +290,48 @@ impl LlmClient {
             "stream": true,
             "temperature": 0.1,
         });
+        if let Some(effort) = &self.reasoning_effort {
+            body["reasoning_effort"] = json!(effort);
+        }
         if !tools.is_empty() {
             body["tools"] = Value::Array(tools.to_vec());
             body["tool_choice"] = json!("auto");
         }
 
-        let mut request = self.client.post(self.endpoint.clone()).json(&body);
-        if let Some(key) = &self.api_key {
-            request = request.bearer_auth(key);
-        }
-
-        let mut response = request.send().await.map_err(super::llm_error)?;
-        if !response.status().is_success() {
-            let status = response.status();
-            let err_body = response.text().await.unwrap_or_default();
-            // Some OpenAI-compatible gateways reject `stream: true` when `tools` are supplied; retry once non-streaming.
-            if status.as_u16() == 400 && !tools.is_empty() {
-                return self
-                    .non_streaming_chat_with_tools(messages, tools, cancel, &mut on_delta)
-                    .await;
+        let mut response = {
+            let mut attempt = 0;
+            loop {
+                if cancel.load(Ordering::Relaxed) {
+                    return Err(RelayError::Llm("cancelled".into()));
+                }
+                let mut request = self.client.post(self.endpoint.clone()).json(&body);
+                if let Some(key) = &self.api_key {
+                    request = request.bearer_auth(key);
+                }
+                let resp = request.send().await.map_err(super::llm_error)?;
+                if resp.status().is_success() {
+                    break resp;
+                }
+                let status = resp.status();
+                let err_body = resp.text().await.unwrap_or_default();
+                if attempt == 0 && super::is_retryable_ollama_xml_500(status, &err_body) {
+                    tracing::warn!(
+                        model = %self.model,
+                        "Retrying streaming chat once after Ollama HTTP 500 XML parse error"
+                    );
+                    attempt += 1;
+                    continue;
+                }
+                // Some OpenAI-compatible gateways reject `stream: true` when `tools` are supplied; retry once non-streaming.
+                if status.as_u16() == 400 && !tools.is_empty() {
+                    return self
+                        .non_streaming_chat_with_tools(messages, tools, cancel, &mut on_delta)
+                        .await;
+                }
+                let detail: String = err_body.chars().take(280).collect();
+                return Err(RelayError::Llm(format!("HTTP {status}: {detail}")));
             }
-            let detail: String = err_body.chars().take(280).collect();
-            return Err(RelayError::Llm(format!("HTTP {status}: {detail}")));
-        }
+        };
 
         let is_sse = response
             .headers()
@@ -389,23 +408,39 @@ impl LlmClient {
             "stream": false,
             "temperature": 0.1,
         });
+        if let Some(effort) = &self.reasoning_effort {
+            body["reasoning_effort"] = json!(effort);
+        }
         if !tools.is_empty() {
             body["tools"] = Value::Array(tools.to_vec());
             body["tool_choice"] = json!("auto");
         }
-        let mut request = self.client.post(self.endpoint.clone()).json(&body);
-        if let Some(key) = &self.api_key {
-            request = request.bearer_auth(key);
-        }
-        let response = request.send().await.map_err(super::llm_error)?;
-        if !response.status().is_success() {
+        for attempt in 0..2 {
+            if cancel.load(Ordering::Relaxed) {
+                return Err(RelayError::Llm("cancelled".into()));
+            }
+            let mut request = self.client.post(self.endpoint.clone()).json(&body);
+            if let Some(key) = &self.api_key {
+                request = request.bearer_auth(key);
+            }
+            let response = request.send().await.map_err(super::llm_error)?;
+            if response.status().is_success() {
+                let payload: Value = response.json().await.map_err(super::llm_error)?;
+                return parse_non_streaming_turn(&payload, on_delta);
+            }
             let status = response.status();
             let err_body = response.text().await.unwrap_or_default();
+            if attempt == 0 && super::is_retryable_ollama_xml_500(status, &err_body) {
+                tracing::warn!(
+                    model = %self.model,
+                    "Retrying non-streaming chat once after Ollama HTTP 500 XML parse error"
+                );
+                continue;
+            }
             let detail: String = err_body.chars().take(280).collect();
             return Err(RelayError::Llm(format!("HTTP {status}: {detail}")));
         }
-        let payload: Value = response.json().await.map_err(super::llm_error)?;
-        parse_non_streaming_turn(&payload, on_delta)
+        unreachable!("non_streaming_chat_with_tools retry loop always returns on attempt 1")
     }
 }
 

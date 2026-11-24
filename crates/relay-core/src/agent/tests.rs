@@ -226,10 +226,12 @@ async fn llm_client_probe_and_config_persistence_work() {
         model: "qwen3.5:9b".into(),
         api_key_env: None,
         api_key: Some("sk-test-secret-1234".into()),
+        reasoning_effort: Some("low".into()),
     };
     let view = cfg.redacted_view();
     assert!(view.has_api_key);
     assert_eq!(view.api_key_hint.as_deref(), Some("sk-••••1234"));
+    assert_eq!(view.reasoning_effort.as_deref(), Some("low"));
 
     let tmp_path = std::env::temp_dir()
         .join(format!("relay-llm-cfg-{}", Uuid::now_v7()))
@@ -536,4 +538,139 @@ async fn engine_persists_chat_history_and_resolves_approvals() {
 
     engine.clear_chat_messages().await.unwrap();
     assert!(engine.list_chat_messages(50).await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn llm_client_applies_local_default_no_think_and_allows_override() {
+    let local_default = LlmEndpointConfig::default();
+    assert_eq!(local_default.effective_reasoning_effort(), Some("none"));
+
+    let edge_default = LlmEndpointConfig {
+        tier: InferenceTier::EdgeFastPath,
+        ..LlmEndpointConfig::default()
+    };
+    assert_eq!(edge_default.effective_reasoning_effort(), Some("none"));
+
+    let cloud_default = LlmEndpointConfig {
+        tier: InferenceTier::CloudOpenAiCompat,
+        ..LlmEndpointConfig::default()
+    };
+    assert_eq!(cloud_default.effective_reasoning_effort(), None);
+
+    let local_override = LlmEndpointConfig {
+        reasoning_effort: Some("medium".into()),
+        ..LlmEndpointConfig::default()
+    };
+    assert_eq!(local_override.effective_reasoning_effort(), Some("medium"));
+
+    let local_auto = LlmEndpointConfig {
+        reasoning_effort: Some("auto".into()),
+        ..LlmEndpointConfig::default()
+    };
+    assert_eq!(local_auto.effective_reasoning_effort(), None);
+
+    // Verify request body actually carries reasoning_effort="none" on HostLocalOllama default.
+    let (url, server) = mock_completion("fast".into()).await;
+    let messages = [ChatMessage { role: "user".into(), content: "hi".into() }];
+    endpoint(url).chat_completion(&messages).await.unwrap();
+    let body = server.await.unwrap();
+    assert_eq!(body["reasoning_effort"], "none");
+
+    // Verify CloudOpenAiCompat omits reasoning_effort unless explicitly configured.
+    let (url2, server2) = mock_completion("cloud".into()).await;
+    let cloud_client = LlmClient::new(
+        LlmEndpointConfig {
+            tier: InferenceTier::CloudOpenAiCompat,
+            base_url: url2,
+            ..LlmEndpointConfig::default()
+        },
+        Duration::from_secs(5),
+    )
+    .unwrap();
+    cloud_client.chat_completion(&messages).await.unwrap();
+    let body2 = server2.await.unwrap();
+    assert!(body2.get("reasoning_effort").is_none());
+}
+
+#[tokio::test]
+async fn llm_client_retries_once_on_ollama_xml_500() {
+    use std::sync::atomic::AtomicBool;
+
+    // 1. Non-streaming chat_completion retries once on Ollama XML syntax error 500.
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        for attempt in 0..2 {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 8192];
+            let _ = socket.read(&mut buf).await.unwrap();
+            if attempt == 0 {
+                let err_body = r#"{"error":{"message":"XML syntax error on line 29: unexpected EOF"}}"#;
+                let resp = format!(
+                    "HTTP/1.1 500 Internal Server Error\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{err_body}",
+                    err_body.len()
+                );
+                socket.write_all(resp.as_bytes()).await.unwrap();
+            } else {
+                let ok_body = json!({
+                    "choices": [{"message": {"role": "assistant", "content": "recovered"}}]
+                })
+                .to_string();
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{ok_body}",
+                    ok_body.len()
+                );
+                socket.write_all(resp.as_bytes()).await.unwrap();
+            }
+        }
+    });
+    let reply = endpoint(format!("http://{addr}/v1"))
+        .chat_completion(&[ChatMessage { role: "user".into(), content: "ping".into() }])
+        .await
+        .unwrap();
+    assert_eq!(reply.choices[0].message.content.as_deref(), Some("recovered"));
+    server.await.unwrap();
+
+    // 2. stream_chat_with_tools also retries once on Ollama XML 500.
+    let listener2 = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr2 = listener2.local_addr().unwrap();
+    let server2 = tokio::spawn(async move {
+        for attempt in 0..2 {
+            let (mut socket, _) = listener2.accept().await.unwrap();
+            let mut buf = [0u8; 8192];
+            let _ = socket.read(&mut buf).await.unwrap();
+            if attempt == 0 {
+                let err_body = "XML syntax error on line 12: unexpected EOF";
+                let resp = format!(
+                    "HTTP/1.1 500 Internal Server Error\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{err_body}",
+                    err_body.len()
+                );
+                socket.write_all(resp.as_bytes()).await.unwrap();
+            } else {
+                let ok_body = json!({
+                    "choices": [{"message": {"role": "assistant", "content": "stream-ok"}}]
+                })
+                .to_string();
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{ok_body}",
+                    ok_body.len()
+                );
+                socket.write_all(resp.as_bytes()).await.unwrap();
+            }
+        }
+    });
+    let cancel = AtomicBool::new(false);
+    let mut streamed = String::new();
+    let turn = endpoint(format!("http://{addr2}/v1"))
+        .stream_chat_with_tools(
+            &[json!({"role": "user", "content": "hi"})],
+            &[],
+            &cancel,
+            |delta| streamed.push_str(delta),
+        )
+        .await
+        .unwrap();
+    assert_eq!(turn.content, "stream-ok");
+    assert_eq!(streamed, "stream-ok");
+    server2.await.unwrap();
 }

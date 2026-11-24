@@ -107,6 +107,7 @@ function createInitialMockState(): MockWorkspaceState {
       api_key_env: null,
       has_api_key: false,
       api_key_hint: null,
+      reasoning_effort: null,
     },
     dag: {
       repo_id: "default-workspace",
@@ -449,6 +450,7 @@ export const relayApi = {
       api_key_env: update.api_key_env?.trim() || null,
       has_api_key: hasKey || Boolean(update.api_key_env?.trim()),
       api_key_hint: hint,
+      reasoning_effort: update.reasoning_effort?.trim() || null,
     };
     return structuredClone(mockState.llm);
   },

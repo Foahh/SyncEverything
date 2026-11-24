@@ -263,6 +263,15 @@
       "hideKey": "Hide API key",
       "apiKeyEnvLabel": "Or read key from environment variable (optional)",
       "apiKeyEnvPlaceholder": "e.g., DEEPSEEK_API_KEY or OPENAI_API_KEY",
+      "reasoningEffortLabel": "Reasoning effort",
+      "reasoningEffortHint": "Local Ollama and Edge tiers default to Off (none) for faster tool calling unless overridden.",
+      "reasoningEffortOption": {
+        "default": "Auto",
+        "none": "Off",
+        "low": "Low",
+        "medium": "Medium",
+        "high": "High"
+      },
       "testBtn": "Test Connection",
       "testingBtn": "Testing…",
       "saveBtn": "Save Settings",

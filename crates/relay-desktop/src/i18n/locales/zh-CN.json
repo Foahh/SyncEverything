@@ -263,6 +263,15 @@
       "hideKey": "隐藏 API Key",
       "apiKeyEnvLabel": "或从环境变量读取密钥（可选）",
       "apiKeyEnvPlaceholder": "例如：DEEPSEEK_API_KEY 或 OPENAI_API_KEY",
+      "reasoningEffortLabel": "思考强度（Reasoning Effort）",
+      "reasoningEffortHint": "本地 Ollama 与端侧轻量模式默认关闭思考（none）以提升工具调用速度，可按需覆盖。",
+      "reasoningEffortOption": {
+        "default": "自动",
+        "none": "关闭",
+        "low": "低",
+        "medium": "中",
+        "high": "高"
+      },
       "testBtn": "测试连通性",
       "testingBtn": "测试中…",
       "saveBtn": "保存设置",

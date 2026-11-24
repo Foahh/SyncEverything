@@ -137,6 +137,9 @@ export type DagSnapshot_Deserialize = {
 	nodes: GraphNode[],
 	edges: GraphEdge[],
 	stale_count: number,
+	fresh_evidence_count: number,
+	stale_evidence_count: number,
+	metric_authority_note?: string | null,
 	captured_at: string,
 };
 
@@ -146,6 +149,9 @@ export type DagSnapshot_Serialize = {
 	nodes: GraphNode[],
 	edges: GraphEdge[],
 	stale_count: number,
+	fresh_evidence_count: number,
+	stale_evidence_count: number,
+	metric_authority_note: string | null,
 	captured_at: string,
 };
 
@@ -207,6 +213,7 @@ export type LlmSettingsUpdate_Deserialize = {
 	api_key_env?: string | null,
 	/**  `None` keeps any stored key; `Some("")` clears it; `Some(key)` replaces it. */
 	api_key?: string | null,
+	reasoning_effort?: string | null,
 };
 
 export type LlmSettingsUpdate_Serialize = {
@@ -216,6 +223,7 @@ export type LlmSettingsUpdate_Serialize = {
 	api_key_env: string | null,
 	/**  `None` keeps any stored key; `Some("")` clears it; `Some(key)` replaces it. */
 	api_key: string | null,
+	reasoning_effort: string | null,
 };
 
 /**  Safe summary sent to desktop UI without exposing raw API secrets. */
@@ -229,6 +237,7 @@ export type LlmSettingsView_Deserialize = {
 	api_key_env?: string | null,
 	has_api_key: boolean,
 	api_key_hint?: string | null,
+	reasoning_effort?: string | null,
 };
 
 /**  Safe summary sent to desktop UI without exposing raw API secrets. */
@@ -239,11 +248,12 @@ export type LlmSettingsView_Serialize = {
 	api_key_env: string | null,
 	has_api_key: boolean,
 	api_key_hint: string | null,
+	reasoning_effort: string | null,
 };
 
 export type NodeKind = { kind: "decision"; rationale: string; constraints: string[] } | { kind: "artifact"; git_commit_sha: string; env_fingerprint: string; working_tree_dirty: boolean; changed_files: string[] } | { kind: "evidence"; task_id: string; preset: string; metrics_json: JsonValue; log_blob_hash: string };
 
-export type PatchKind = "uv_spec" | "code_diff";
+export type PatchKind = "uv_spec" | "file_edits";
 
 export type PatchProposal = {
 	patch_id: string,

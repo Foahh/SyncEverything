@@ -237,12 +237,17 @@ impl DesktopRuntime {
             .api_key_env
             .map(|s| s.trim().to_owned())
             .filter(|s| !s.is_empty());
+        let reasoning_effort = update
+            .reasoning_effort
+            .map(|s| s.trim().to_owned())
+            .filter(|s| !s.is_empty());
         LlmEndpointConfig {
             tier: update.tier,
             base_url: update.base_url.trim().to_owned(),
             model: update.model.trim().to_owned(),
             api_key_env,
             api_key,
+            reasoning_effort,
         }
     }
 
