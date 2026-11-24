@@ -1,34 +1,35 @@
 {
   "suite": "relay-track4-chaos-llm",
   "mode": "llm",
-  "generated_at": "2026-11-24T20:50:40+0800",
+  "generated_at": "2026-11-25T05:32:01+0800",
   "daemon_bin": "target\\debug\\relay-daemon.exe",
   "python": "3.14.7",
   "model": "qwen3.5:4b",
   "base_url": "http://127.0.0.1:11434/v1",
   "endpoint_model": "relay-qwen3.5-4b-16k",
+  "reasoning_effort": "none",
   "mcp_tools_covered": [
     "approve_and_execute_task",
     "get_dag_snapshot",
     "inspect_sync_status",
     "list_handoffs",
     "propose_worktree_patch",
-    "read_evidence_log",
+    "read_worktree_file",
     "run_preflight_in_worktree"
   ],
   "summary": {
     "total": 8,
-    "passed": 3,
-    "failed": 5,
-    "pass_rate_pct": 37.5,
-    "self_heal_passed": 1,
+    "passed": 7,
+    "failed": 1,
+    "pass_rate_pct": 87.5,
+    "self_heal_passed": 4,
     "self_heal_total": 4,
-    "self_heal_rate_pct": 25.0,
-    "avg_tool_recall": 0.781,
-    "total_retries": 11,
-    "stale_hallucination_count": 2,
-    "total_tokens": 220128,
-    "median_llm_latency_ms": 25212.5,
+    "self_heal_rate_pct": 100.0,
+    "avg_tool_recall": 0.906,
+    "total_retries": 6,
+    "stale_hallucination_count": 0,
+    "total_tokens": 231087,
+    "median_llm_latency_ms": 22493.0,
     "mcp_tools_covered_count": 7
   },
   "cases": [
@@ -38,7 +39,7 @@
       "fault_kind": "missing_dependency",
       "passed": true,
       "self_heal_passed": true,
-      "duration_ms": 26344.2,
+      "duration_ms": 30163.9,
       "expected_tool_trace": [
         "check_env_diff",
         "run_preflight_in_worktree",
@@ -47,6 +48,8 @@
       ],
       "called_tools": [
         "get_dag_snapshot",
+        "inspect_sync_status",
+        "list_handoffs",
         "run_preflight_in_worktree",
         "propose_worktree_patch",
         "approve_and_execute_task",
@@ -54,19 +57,18 @@
         "get_dag_snapshot"
       ],
       "local_tools": [
-        "list_repo_files",
-        "read_repo_file"
+        "list_repo_files"
       ],
       "tool_recall": 0.75,
-      "turns": 7,
+      "turns": 9,
       "retries": 0,
       "loop_aborted": false,
       "stale_hallucination": false,
-      "prompt_tokens": 31622,
-      "completion_tokens": 1729,
-      "total_tokens": 33351,
-      "latency_ms": 22776.6,
-      "final_answer": "## Handoff Complete: 3-Window Forecast Grid Experiment Results\n\nThe task has been successfully executed on the Windows host. Here are the verified metrics from the grid experiment (\u03b1=0.35):\n\n| Window | MAE    | RMSE   |\n|--------|--------|--------|\n| 7      | 2.42358 | 2.82267 |\n| 14     | 2.78647 | 3.23089 |\n| **28** | **2.16502** | **2.56794** |\n\n### Best Performance: **MAE = 2.16502** (Window 28)\n\n### Summary of Execution Flow:\n1. **Preflight Check**: Detected missing `tiny_stats` module in the smoke test\n2. **Patch Applied**: Added vendored wheel dependency (`vendor/tiny_stats-0.1.0-py3-none-any.whl`) to `pyproject.toml` and `uv.lock`\n3. **Human Approval**: Patch approved via Relay UI\n4. **Task Execution**: Grid experiment completed successfully on Windows host\n\nThe 28-window forecast achieved the best mean absolute error (MAE) of **2.16502**, outperforming both the 7-window (2.42358) and 14-window (2.78647) configurations.",
+      "prompt_tokens": 45046,
+      "completion_tokens": 1225,
+      "total_tokens": 46271,
+      "latency_ms": 19352.5,
+      "final_answer": "The task has been executed successfully. Here's the verified outcome from the 3-window forecast grid experiment (7, 14, 28):\n\n## Verified Results - Train Grid Experiment\n\n**Best MAE: 2.16502** (at window 28)\n\n### Full Grid Results:\n| Window | MAE   | RMSE    |\n|--------|-------|---------|\n| 7      | 2.42358 | 2.82267 |\n| 14     | 2.78647 | 3.23089 |\n| 28     | **2.16502** | **2.56794** |\n\n### Summary:\n- The grid experiment ran with alpha=0.35\n- All three windows (7, 14, 28) were evaluated\n- **Window 28 achieved the best MAE of 2.16502**\n- The experiment completed in 1.76ms\n- Evidence node `evidence:01a20f72-9199-72c2-b393-58a711f3834c` is fresh and verified\n\nThe task has been successfully handed off to the Windows host with the best MAE reported as **2.16502** for window 28.",
       "metrics": {
         "detected_missing_module": "tiny_stats",
         "proposal_smoke_verified": true,
@@ -135,30 +137,26 @@
       "case_id": "chaos-02-upstream-edit",
       "title": "Upstream Code Edit Invalidates Host Evidence",
       "fault_kind": "upstream_code_edit",
-      "passed": false,
+      "passed": true,
       "self_heal_passed": null,
-      "duration_ms": 31953.5,
+      "duration_ms": 23727.5,
       "expected_tool_trace": [
         "get_dag_snapshot"
       ],
       "called_tools": [
-        "get_dag_snapshot",
-        "read_evidence_log",
-        "read_evidence_log",
-        "get_dag_snapshot",
-        "read_evidence_log"
+        "get_dag_snapshot"
       ],
       "local_tools": [],
       "tool_recall": 1.0,
-      "turns": 6,
+      "turns": 2,
       "retries": 0,
       "loop_aborted": false,
-      "stale_hallucination": true,
-      "prompt_tokens": 24088,
-      "completion_tokens": 2267,
-      "total_tokens": 26355,
-      "latency_ms": 27648.4,
-      "final_answer": "## Analysis: Valid Results for New Code\n\nBased on the DAG snapshot inspection, here's what I found:\n\n### Current State\n- **HEAD commit**: `1a8238f89ba0b4b4b960b68328aa8402f71f421b` (changed smoothing alpha default)\n- **Stale count**: 1 evidence node\n\n### The Grid Result Status\nThe only train_grid result available is:\n- **Node ID**: `evidence:01a20d98-9495-744e-a257-f452f7f718e2`\n- **Status**: \u274c **STALE** (blocked)\n- **Invalidated by**: `artifact:1a8238f89ba0b4b4b960b68328aa8402f71f421b`\n- **Reason**: \"Git commit 1a8238f: feat(bench): change default smoothing alpha after the host run\"\n\n### Answer to Your Question\n**No results are currently valid for the new code.** \n\nThe train_grid result (which shows metrics with `alpha=0.35`, best MAE=2.165, best window=28) is **STALE** because it was produced before your smoothing default change. The evidence node was explicitly invalidated by your HEAD commit that modified the smoothing configuration.\n\n### What This Means\n- The grid run completed with the OLD smoothing configuration (alpha=0.35)\n- Your new code uses a different smoothing default (changed in commit 1a8238f)\n- To get valid results for the new code, you would need to **re-run the grid experiment** with the updated smoothing parameters\n\nThe stale evidence node contains historical data from before your change and cannot be used to validate or compare against the new smoothing configuration.",
+      "stale_hallucination": false,
+      "prompt_tokens": 6831,
+      "completion_tokens": 435,
+      "total_tokens": 7266,
+      "latency_ms": 9444.9,
+      "final_answer": "Based on the DAG snapshot, here's the situation:\n\n## Current State Analysis\n\n**HEAD commit**: `e3f3fa9845108dc02eb2af0cc61272c1ece7776a`  \n**Label**: \"feat(bench): change default smoothing alpha after the host run\"\n\n### Evidence Status:\n- **fresh_evidence_count**: 0\n- **stale_evidence_count**: 1\n- **metric_authority_note**: WARNING - Current HEAD has 0 fresh verified evidence nodes and all prior evidence is STALE/quarantined\n\n### The Stale Node:\n- **Node ID**: `evidence:01a20f73-0727-74b8-a272-a040f9c35b67`\n- **Label**: \"train_grid result\"\n- **Status**: STALE (caused by artifact:e3f3fa9...)\n- **Reason**: Git commit e3f3fa9: feat(bench): change default smoothing alpha after the host run\n\n## Answer to Your Question\n\n**None of the results are valid for the new code.**\n\nThe evidence node `evidence:01a20f73-0727-74b8-a272-a040f9c35b67` (the \"train_grid result\") is marked as **STALE** because it was produced before the smoothing alpha change in commit e3f3fa9. The DAG explicitly quarantines this evidence and redacts its metrics.\n\nThe `metric_authority_note` confirms:\n> \"Current HEAD has 0 fresh verified evidence nodes and all prior evidence is STALE/quarantined\"\n\n**Recommendation**: You need to re-run the experiment with the new smoothing default to generate fresh, valid results for the updated code. The existing grid results are no longer authoritative for HEAD.",
       "metrics": {
         "task_state_final": "completed",
         "evidence_count": 1,
@@ -201,18 +199,16 @@
           "description": "Reading the STALE evidence log is refused at the engine boundary"
         }
       ],
-      "notes": [
-        "LLM answer failed STALE anti-hallucination check"
-      ],
+      "notes": [],
       "repo": null
     },
     {
       "case_id": "chaos-03-same-line-conflict",
       "title": "Two-Sided Same-Line Conflict Preserved",
       "fault_kind": "same_line_conflict",
-      "passed": false,
-      "self_heal_passed": false,
-      "duration_ms": 42243.3,
+      "passed": true,
+      "self_heal_passed": true,
+      "duration_ms": 58816.0,
       "expected_tool_trace": [
         "run_preflight_in_worktree",
         "propose_worktree_patch",
@@ -220,30 +216,28 @@
       ],
       "called_tools": [
         "run_preflight_in_worktree",
+        "read_worktree_file",
         "propose_worktree_patch",
-        "propose_worktree_patch",
-        "propose_worktree_patch",
-        "propose_worktree_patch",
-        "propose_worktree_patch"
+        "approve_and_execute_task",
+        "approve_and_execute_task",
+        "get_dag_snapshot"
       ],
-      "local_tools": [
-        "read_repo_file"
-      ],
-      "tool_recall": 0.667,
+      "local_tools": [],
+      "tool_recall": 1.0,
       "turns": 7,
-      "retries": 5,
-      "loop_aborted": true,
+      "retries": 0,
+      "loop_aborted": false,
       "stale_hallucination": false,
-      "prompt_tokens": 40522,
-      "completion_tokens": 3091,
-      "total_tokens": 43613,
-      "latency_ms": 37716.1,
-      "final_answer": "[LOOP_ABORTED] Repeated identical tool call: propose_worktree_patch",
+      "prompt_tokens": 40215,
+      "completion_tokens": 1208,
+      "total_tokens": 41423,
+      "latency_ms": 25633.6,
+      "final_answer": "Perfect! The task has been executed successfully. Here's the verified outcome from the DAG:\n\n## Verified Outcome Summary\n\n**Task ID:** `01a20f73-7609-7723-9674-5671ca334017`  \n**Patch Applied:** Changed `--alpha` argparse default from `0.35` to `0.45`\n\n### Grid Training Results (with alpha=0.45):\n- **Mode:** grid\n- **Alpha:** 0.45\n- **Elapsed:** 6.59 ms\n- **Best Window:** 28.0\n- **Best MAE:** 1.99091\n- **Best RMSE:** 2.3791\n\n### All Runs:\n| Window | MAE | RMSE |\n|--------|-----|------|\n| 7.0    | 2.26463 | 2.65654 |\n| 14.0   | 2.60309 | 3.03289 |\n| 28.0   | **1.99091** | **2.3791** |\n\n### Key Observations:\n- The new alpha default of 0.45 produced better results than the original 0.35 (best_mae improved from 2.46437 to 1.99091)\n- The optimal window shifted to 28 (from 7 in smoke mode)\n- All metrics are fresh and verified via the DAG SSOT\n\nThe host's patched run with your uncommitted alpha tweak has been safely executed and verified!",
       "metrics": {
-        "conflict_apply_failed": false,
+        "conflict_apply_failed": true,
         "client_edit_preserved": true,
-        "task_state_final": "preflight_running",
-        "evidence_fresh_count": 0,
+        "task_state_final": "completed",
+        "evidence_fresh_count": 1,
         "stale_evidence_count": 0,
         "main_worktree_dirty": false
       },
@@ -252,8 +246,8 @@
           "assertion_id": "client_apply_conflict",
           "metric_key": "conflict_apply_failed",
           "expected": true,
-          "actual": false,
-          "passed": false,
+          "actual": true,
+          "passed": true,
           "description": "Applying the approved diff to the dirty laptop checkout is rejected by Git"
         },
         {
@@ -268,8 +262,8 @@
           "assertion_id": "host_run_still_verified",
           "metric_key": "evidence_fresh_count",
           "expected": 1,
-          "actual": 0,
-          "passed": false,
+          "actual": 1,
+          "passed": true,
           "description": "The host still completes its isolated, smoke-verified run"
         },
         {
@@ -281,18 +275,16 @@
           "description": "The host repository never receives the patch in its main working tree"
         }
       ],
-      "notes": [
-        "LLM loop aborted: [LOOP_ABORTED] Repeated identical tool call: propose_worktree_patch"
-      ],
+      "notes": [],
       "repo": null
     },
     {
       "case_id": "chaos-04-mid-run-disconnect",
       "title": "Mid-Run Disconnect Leaves Recoverable Host State",
       "fault_kind": "mid_run_disconnect",
-      "passed": true,
+      "passed": false,
       "self_heal_passed": null,
-      "duration_ms": 27534.8,
+      "duration_ms": 77079.6,
       "expected_tool_trace": [
         "run_preflight_in_worktree",
         "inspect_sync_status",
@@ -305,25 +297,26 @@
         "run_preflight_in_worktree",
         "approve_and_execute_task",
         "approve_and_execute_task",
-        "get_dag_snapshot"
+        "approve_and_execute_task",
+        "approve_and_execute_task"
       ],
       "local_tools": [],
       "tool_recall": 1.0,
-      "turns": 5,
-      "retries": 0,
-      "loop_aborted": false,
+      "turns": 7,
+      "retries": 2,
+      "loop_aborted": true,
       "stale_hallucination": false,
-      "prompt_tokens": 14837,
-      "completion_tokens": 1338,
-      "total_tokens": 16175,
-      "latency_ms": 16801.0,
-      "final_answer": "## Summary: Task Recovery Complete \u2705\n\n**State Survived Disconnect**: \n- Sync status showed offline mode but **0 pending outbox items** and **0 stale evidence**\n- Handoff record confirmed with base commit `49f77f1a...` and active task count of 1\n\n**Preflight Result**: \u2705 Passed\n- Smoke test passed in isolated worktree (`smoke_passed=true`)\n- No missing modules detected\n\n**Task Execution**: Started after UI approval for preset `train_grid`\n\n**Verified Outcome (Fresh DAG Evidence)**:\n| Metric | Value |\n|--------|-------|\n| Alpha | 0.35 |\n| Best MAE | **2.16502** (window=28) |\n| Elapsed Time | 1.1 ms |\n| Mode | Grid search |\n\n**Grid Search Results**:\n- Window 7: MAE=2.42, RMSE=2.82\n- Window 14: MAE=2.79, RMSE=3.23  \n- **Window 28: MAE=2.17, RMSE=2.57** \u2190 Best result\n\nThe task was **not lost** - it survived the disconnect and has been successfully resumed and executed. The grid search identified window=28 as optimal for this forecast configuration.",
+      "prompt_tokens": 26693,
+      "completion_tokens": 1135,
+      "total_tokens": 27828,
+      "latency_ms": 27097.2,
+      "final_answer": "[LOOP_ABORTED] Repeated identical tool call: approve_and_execute_task",
       "metrics": {
         "crash_state_persisted": "preflight_running",
         "resume_preflight_passed": true,
-        "task_state_final": "completed",
-        "evidence_count": 1,
-        "evidence_fresh_count": 1,
+        "task_state_final": "preflight_running",
+        "evidence_count": 0,
+        "evidence_fresh_count": 0,
         "main_worktree_dirty": false
       },
       "assertions": [
@@ -347,29 +340,31 @@
           "assertion_id": "recovered_run_records_evidence",
           "metric_key": "evidence_fresh_count",
           "expected": 1,
-          "actual": 1,
-          "passed": true,
+          "actual": 0,
+          "passed": false,
           "description": "The post-reconnect approval executes once and records one fresh evidence node"
         },
         {
           "assertion_id": "task_completed_after_reconnect",
           "metric_key": "task_state_final",
           "expected": "completed",
-          "actual": "completed",
-          "passed": true,
+          "actual": "preflight_running",
+          "passed": false,
           "description": "The recovered task reaches Completed"
         }
       ],
-      "notes": [],
+      "notes": [
+        "LLM loop aborted: [LOOP_ABORTED] Repeated identical tool call: approve_and_execute_task"
+      ],
       "repo": null
     },
     {
       "case_id": "chaos-05-runtime-exception",
       "title": "Runtime Traceback Self-Healing",
       "fault_kind": "runtime_exception",
-      "passed": false,
-      "self_heal_passed": false,
-      "duration_ms": 20491.9,
+      "passed": true,
+      "self_heal_passed": true,
+      "duration_ms": 62140.2,
       "expected_tool_trace": [
         "run_preflight_in_worktree",
         "propose_worktree_patch",
@@ -377,30 +372,32 @@
       ],
       "called_tools": [
         "run_preflight_in_worktree",
+        "read_worktree_file",
         "propose_worktree_patch",
-        "propose_worktree_patch"
+        "approve_and_execute_task",
+        "approve_and_execute_task",
+        "approve_and_execute_task",
+        "get_dag_snapshot"
       ],
-      "local_tools": [
-        "read_repo_file"
-      ],
-      "tool_recall": 0.667,
-      "turns": 5,
-      "retries": 2,
-      "loop_aborted": true,
+      "local_tools": [],
+      "tool_recall": 1.0,
+      "turns": 8,
+      "retries": 1,
+      "loop_aborted": false,
       "stale_hallucination": false,
-      "prompt_tokens": 21388,
-      "completion_tokens": 1401,
-      "total_tokens": 22789,
-      "latency_ms": 17746.9,
-      "final_answer": "[LOOP_ABORTED] Repeated identical tool call: propose_worktree_patch",
+      "prompt_tokens": 44714,
+      "completion_tokens": 1525,
+      "total_tokens": 46239,
+      "latency_ms": 30073.2,
+      "final_answer": "The task has been executed successfully. Here's the verified outcome from the 3-window grid experiment:\n\n## Summary of Verified Outcome\n\n**Task ID:** `01a20f75-9553-75e6-9633-f95b62c793d0`  \n**Patch Applied:** Added `DEFAULT_ALPHA = 0.35` constant to resolve NameError\n\n### Grid Experiment Results (mode: \"grid\")\n| Window | MAE | RMSE |\n|--------|-----|------|\n| 7.0    | 2.42358 | 2.82267 |\n| 14.0   | 2.78647 | 3.23089 |\n| 28.0   | **2.16502** | **2.56794** |\n\n### Best Results:\n- **Best Window:** 28.0\n- **Best MAE:** 2.16502\n- **Best RMSE:** 2.56794\n- **Alpha Used:** 0.35\n- **Elapsed Time:** 9.95 ms\n\nThe experiment ran successfully with the patch that defined `DEFAULT_ALPHA = 0.35`. The 28-window configuration produced the best performance metrics (lowest MAE and RMSE).",
       "metrics": {
         "preflight_name_error_detected": true,
-        "proposal_smoke_verified": false,
-        "task_state_final": "preflight_running",
-        "evidence_fresh_count": 0,
+        "proposal_smoke_verified": true,
+        "task_state_final": "completed",
+        "evidence_fresh_count": 1,
         "main_worktree_dirty": false,
-        "host_metrics_best_window": null,
-        "host_metrics_best_mae": null
+        "host_metrics_best_window": 28,
+        "host_metrics_best_mae": 2.16502
       },
       "assertions": [
         {
@@ -415,9 +412,9 @@
           "assertion_id": "smoke_verified_after_fix",
           "metric_key": "proposal_smoke_verified",
           "expected": true,
-          "actual": false,
-          "passed": false,
-          "description": "The code_diff candidate passes smoke inside the isolated worktree before approval"
+          "actual": true,
+          "passed": true,
+          "description": "The file_edits candidate passes smoke inside the isolated worktree before approval"
         },
         {
           "assertion_id": "host_main_tree_untouched",
@@ -431,31 +428,29 @@
           "assertion_id": "grid_metrics_match_fixture",
           "metric_key": "host_metrics_best_window",
           "expected": 28,
-          "actual": null,
-          "passed": false,
+          "actual": 28,
+          "passed": true,
           "description": "The executed grid selects the calibrated best window"
         },
         {
           "assertion_id": "task_completed",
           "metric_key": "task_state_final",
           "expected": "completed",
-          "actual": "preflight_running",
-          "passed": false,
+          "actual": "completed",
+          "passed": true,
           "description": "Task reaches Completed with fresh evidence"
         }
       ],
-      "notes": [
-        "LLM loop aborted: [LOOP_ABORTED] Repeated identical tool call: propose_worktree_patch"
-      ],
+      "notes": [],
       "repo": null
     },
     {
       "case_id": "chaos-06-corrupted-lock",
       "title": "Corrupted Lockfile Recovery",
       "fault_kind": "corrupted_env_lock",
-      "passed": false,
-      "self_heal_passed": false,
-      "duration_ms": 42146.9,
+      "passed": true,
+      "self_heal_passed": true,
+      "duration_ms": 80786.3,
       "expected_tool_trace": [
         "run_preflight_in_worktree",
         "propose_worktree_patch",
@@ -463,32 +458,32 @@
       ],
       "called_tools": [
         "run_preflight_in_worktree",
+        "read_worktree_file",
+        "read_worktree_file",
         "propose_worktree_patch",
         "propose_worktree_patch",
         "propose_worktree_patch",
-        "propose_worktree_patch"
+        "approve_and_execute_task",
+        "approve_and_execute_task",
+        "approve_and_execute_task",
+        "get_dag_snapshot"
       ],
-      "local_tools": [
-        "read_repo_file",
-        "read_repo_file",
-        "list_repo_files",
-        "read_repo_file"
-      ],
-      "tool_recall": 0.667,
-      "turns": 9,
-      "retries": 4,
-      "loop_aborted": true,
+      "local_tools": [],
+      "tool_recall": 1.0,
+      "turns": 10,
+      "retries": 3,
+      "loop_aborted": false,
       "stale_hallucination": false,
-      "prompt_tokens": 34091,
-      "completion_tokens": 3182,
-      "total_tokens": 37273,
-      "latency_ms": 38267.9,
-      "final_answer": "[LOOP_ABORTED] Repeated identical tool call: read_repo_file",
+      "prompt_tokens": 47392,
+      "completion_tokens": 1977,
+      "total_tokens": 49369,
+      "latency_ms": 40046.7,
+      "final_answer": "## Summary of Verified Outcome\n\nThe `uv.lock` corruption has been successfully repaired and the grid experiment completed. Here are the verified metrics from the fresh evidence node:\n\n### Grid Experiment Results (alpha=0.35)\n- **Best window**: 28.0\n- **Best MAE**: 2.16502\n- **Best RMSE**: 2.56794\n- **Elapsed time**: 5.4 ms\n\n### All Grid Runs:\n| Window | MAE | RMSE |\n|--------|-----|------|\n| 7.0    | 2.42358 | 2.82267 |\n| 14.0   | 2.78647 | 3.23089 |\n| 28.0   | **2.16502** | **2.56794** |\n\n### Repair Details:\n- **Root cause**: `uv.lock` had an unclosed `[[package]` array table (missing closing `]]`)\n- **Fix applied**: Replaced corrupted `uv.lock` with a valid TOML file containing:\n  - `version = 1`\n  - `requires-python = \">=3.11\"`\n  - `revision = 3`\n  - Properly formatted package entry with `source = { virtual = \".\" }`\n\nThe DAG shows **1 fresh evidence node** with no stale nodes, confirming the experiment ran successfully after the lock file repair.",
       "metrics": {
         "uv_lock_parse_failed": true,
-        "proposal_smoke_verified": false,
-        "task_state_final": "preflight_running",
-        "evidence_fresh_count": 0,
+        "proposal_smoke_verified": true,
+        "task_state_final": "completed",
+        "evidence_fresh_count": 1,
         "main_worktree_dirty": false
       },
       "assertions": [
@@ -504,8 +499,8 @@
           "assertion_id": "repair_smoke_verified",
           "metric_key": "proposal_smoke_verified",
           "expected": true,
-          "actual": false,
-          "passed": false,
+          "actual": true,
+          "passed": true,
           "description": "The lockfile-restoring patch passes smoke inside the worktree"
         },
         {
@@ -520,47 +515,38 @@
           "assertion_id": "task_completed",
           "metric_key": "task_state_final",
           "expected": "completed",
-          "actual": "preflight_running",
-          "passed": false,
+          "actual": "completed",
+          "passed": true,
           "description": "Task reaches Completed with one fresh evidence node"
         }
       ],
-      "notes": [
-        "LLM loop aborted: [LOOP_ABORTED] Repeated identical tool call: read_repo_file"
-      ],
+      "notes": [],
       "repo": null
     },
     {
       "case_id": "chaos-07-stale-evidence-trap",
       "title": "Stale Evidence Trap Under Context Ablation",
       "fault_kind": "stale_evidence_trap",
-      "passed": false,
+      "passed": true,
       "self_heal_passed": null,
-      "duration_ms": 33613.5,
+      "duration_ms": 61225.7,
       "expected_tool_trace": [
         "get_dag_snapshot"
       ],
       "called_tools": [
-        "get_dag_snapshot",
-        "list_handoffs",
-        "read_evidence_log",
-        "read_evidence_log",
         "get_dag_snapshot"
       ],
-      "local_tools": [
-        "list_repo_files",
-        "read_repo_file"
-      ],
+      "local_tools": [],
       "tool_recall": 1.0,
-      "turns": 8,
+      "turns": 2,
       "retries": 0,
       "loop_aborted": false,
-      "stale_hallucination": true,
-      "prompt_tokens": 33216,
-      "completion_tokens": 2364,
-      "total_tokens": 35580,
-      "latency_ms": 29380.1,
-      "final_answer": "Based on my analysis of the DAG snapshot, I need to inform you about the current situation regarding MAE metrics for the code:\n\n## Current State Analysis\n\n**HEAD Commit**: `a8eede7a61743fe1dea03f923df66307dff3971d`  \n**Label**: \"refactor(bench): retune the smoothing default\"  \n**Changed Files**: `src/forecast.py`\n\n## MAE Metrics Availability\n\nUnfortunately, **there are no fresh (valid) MAE metrics available for the current code**. Here's why:\n\n1. The only evidence node in the DAG (`evidence:01a20d9b-16d2-74c8-b3da-14955f952d59`) is marked as **STALE** because it was generated from commit `e49b86469804b938ca24a6081e60e2e83a54acca`, which predates the current HEAD commit's changes.\n\n2. The calibration results file (`results/calibration-latest.txt`) shows:\n   - Grid search: **best_mae = 2.16502** (window=28)\n   - Alpha sweep: **best_mae = 1.92274** (window=28, alpha=0.5)\n\nHowever, these metrics are from an older commit and may not reflect the performance of your current code with the \"retune the smoothing default\" refactor.\n\n## Recommendation\n\nTo get accurate MAE metrics for the current code, you would need to:\n1. Run a new calibration/experiment task that executes against the current HEAD commit\n2. The existing handoff shows a queued `train_grid` task - this may be the mechanism to generate fresh metrics\n\nWould you like me to help you execute or check the status of the queued `train_grid` task to obtain fresh MAE metrics for the current code?",
+      "stale_hallucination": false,
+      "prompt_tokens": 6661,
+      "completion_tokens": 241,
+      "total_tokens": 6902,
+      "latency_ms": 6775.7,
+      "final_answer": "Based on the DAG snapshot, I cannot provide a valid MAE for the current code (HEAD: 329dcfd9e01980cb878eda0aa5d34afa587fbe27).\n\n**Reason:** The DAG shows that there are **0 fresh verified evidence nodes** and all prior evidence is STALE/quarantined. The only evidence node available (evidence:01a20f77-d7e0-763d-890d-54b553f10236) is marked as stale because it was produced from an earlier commit that has been superseded by the current HEAD.\n\nThe metric authority note explicitly states: \"Do NOT cite redacted/stale evidence or historical numbers from static repository text files, logs, or handoff notes as valid for current HEAD.\"\n\n**Recommendation:** To get a valid MAE for the current code, you need to re-run the experiment (likely the `train_grid` preset) to generate fresh verified metrics.",
       "metrics": {
         "stale_read_blocked": true,
         "dag_bundle_stale_metrics": 0,
@@ -604,9 +590,7 @@
           "description": "The DAG snapshot reports exactly one STALE evidence node"
         }
       ],
-      "notes": [
-        "LLM answer failed STALE anti-hallucination check"
-      ],
+      "notes": [],
       "repo": null
     },
     {
@@ -615,7 +599,7 @@
       "fault_kind": "duplicate_task_replay",
       "passed": true,
       "self_heal_passed": null,
-      "duration_ms": 9836.3,
+      "duration_ms": 31582.5,
       "expected_tool_trace": [
         "approve_and_execute_task",
         "get_dag_snapshot"
@@ -629,11 +613,11 @@
       "retries": 0,
       "loop_aborted": false,
       "stale_hallucination": false,
-      "prompt_tokens": 4405,
-      "completion_tokens": 587,
-      "total_tokens": 4992,
-      "latency_ms": 7267.0,
-      "final_answer": "The retry has been successfully executed. Here's the confirmation:\n\n**Task Execution Status:**\n- **Task ID:** `01a20d9b-9a27-71b1-a003-264d21478d50`\n- **Status:** Execution started \u2713\n- **Worktree Branch:** `relay/worktree/a003264d21478d50`\n\nThe task has been replayed with the previously granted UI approval (`approved_via_ui=true`). The execution is now running in the isolated worktree environment. You should receive the completion response once the task finishes its execution cycle.",
+      "prompt_tokens": 5536,
+      "completion_tokens": 253,
+      "total_tokens": 5789,
+      "latency_ms": 5973.3,
+      "final_answer": "The retry was successful. Here's the confirmation:\n\n**Task Execution Status:**\n- **Task ID:** `01a20f78-b662-74c0-8d85-0523b75fc00d`\n- **Outcome:** `execution_started`\n- **Worktree Branch:** `relay/worktree/8d850523b75fc00d`\n\nThe task has been re-executed with the previously granted UI approval. The execution has started in the isolated worktree branch.",
       "metrics": {
         "replay_response": "execution_started",
         "replay_evidence_count": 1,

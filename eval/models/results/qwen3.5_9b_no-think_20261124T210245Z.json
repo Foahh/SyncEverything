@@ -1,0 +1,110 @@
+{
+  "model": "qwen3.5:9b (no-think)",
+  "base_url": "http://127.0.0.1:11434/v1",
+  "dry_run": false,
+  "scoring_version": 3,
+  "timestamp_utc": "2026-11-24T21:02:45Z",
+  "endpoint_model": "relay-qwen3.5-9b-16k",
+  "reasoning_effort": "none",
+  "summary": {
+    "passed_scenarios": 4,
+    "total_scenarios": 4,
+    "pass_rate_pct": 100.0,
+    "avg_tool_recall": 1.0,
+    "stale_hallucination_rate_pct": 0.0,
+    "loop_abort_rate_pct": 0.0,
+    "self_heal_passed": true,
+    "median_latency_ms": 15691.2,
+    "total_tokens": 55898
+  },
+  "scenarios": [
+    {
+      "scenario_id": "S1_sync_and_handoffs",
+      "passed": true,
+      "expected_tools": [
+        "inspect_sync_status",
+        "list_handoffs"
+      ],
+      "called_tools": [
+        "inspect_sync_status",
+        "list_handoffs"
+      ],
+      "tool_recall": 1.0,
+      "stale_hallucination": false,
+      "loop_aborted": false,
+      "self_heal_verified": null,
+      "turns": 2,
+      "latency_ms": 15385.7,
+      "prompt_tokens": 5758,
+      "completion_tokens": 328,
+      "final_answer": "### Relay Sync Status & Handoff Summary\n\n**Runtime Mode:** `host`  \n**Transport Path:** `offline`  \n**Connected:** `false`  \n**Last Synced Commit:** `8977fa2a9782e3e50cb88128e4cbdd156b3beba9`  \n**Pending Outbox Count:** `0`\n\n---\n\n### Recent Handoffs (1 total)\n\n| handoff_id | repo_id | source_device | base_commit_sha | summary | active_task_count | stale_evidence_count | created_at |\n|------------|---------|---------------|-----------------|---------|-------------------|----------------------|------------|\n| `01a20f5c-9639-7094-ae56-7cb607b975b4` | `forecast-bench` | `cli` | `8977fa2a9782e3e50cb88128e4cbdd156b3beba9` | Initial smoke check | 1 | 0 | 2026-11-24T21:00:55.737131200Z |\n\n**Total Handoffs:** `1`",
+      "notes": []
+    },
+    {
+      "scenario_id": "S2_stale_evidence_trap",
+      "passed": true,
+      "expected_tools": [
+        "get_dag_snapshot"
+      ],
+      "called_tools": [
+        "get_dag_snapshot"
+      ],
+      "tool_recall": 1.0,
+      "stale_hallucination": false,
+      "loop_aborted": false,
+      "self_heal_verified": null,
+      "turns": 2,
+      "latency_ms": 15996.8,
+      "prompt_tokens": 6891,
+      "completion_tokens": 310,
+      "final_answer": "Based on the **sole authoritative source (DAG snapshot)** for the current HEAD commit `77d0de725f0df9027cc1738c72330af94f76488b`:\n\n- **Fresh evidence count**: 0\n- **Stale evidence count**: 1\n- **Metric authority note**: *\"WARNING: Current HEAD has 0 fresh verified evidence nodes and all prior evidence is STALE/quarantined. This DAG snapshot is the sole authoritative source of experiment metrics (SSOT). Do NOT cite redacted/stale evidence or historical numbers from static repository text files, logs, or handoff notes as valid for current HEAD; explicitly report that no fresh verified metrics exist for HEAD and recommend re-running the experiment.\"*\n\n**Conclusion**: There are **no verified fresh MAE metrics** applicable to the current HEAD commit. The only existing evidence node (`evidence:01a20f5c-d719-7454-9454-6d8804858b52`) is marked as `stale` and its metrics are redacted/quarantined due to the recent artifact change (shift forecast blend to 0.4 MA / 0.6 EWMA).\n\n**Recommendation**: Re-run the experiment to generate fresh verified metrics for the current HEAD.",
+      "notes": []
+    },
+    {
+      "scenario_id": "S3_env_diff_diagnosis",
+      "passed": true,
+      "expected_tools": [
+        "check_env_diff"
+      ],
+      "called_tools": [
+        "check_env_diff"
+      ],
+      "tool_recall": 1.0,
+      "stale_hallucination": false,
+      "loop_aborted": false,
+      "self_heal_verified": null,
+      "turns": 2,
+      "latency_ms": 8987.9,
+      "prompt_tokens": 5709,
+      "completion_tokens": 172,
+      "final_answer": "The Host environment is out of sync with commit `31f1ccf365e97b351c808e021fdcf9d2675ed6d0`. \n\n**Missing Python package:**\n- `scipy`\n\nThe repository's `uv.lock` expects `scipy`, but it is not installed in the Host environment. You may need to add this dependency to your project or install it manually if you're working outside of Relay's managed workflow.",
+      "notes": []
+    },
+    {
+      "scenario_id": "S4_code_defect_self_heal",
+      "passed": true,
+      "expected_tools": [
+        "run_preflight_in_worktree",
+        "propose_worktree_patch",
+        "approve_and_execute_task"
+      ],
+      "called_tools": [
+        "run_preflight_in_worktree",
+        "read_worktree_file",
+        "propose_worktree_patch",
+        "approve_and_execute_task",
+        "approve_and_execute_task"
+      ],
+      "tool_recall": 1.0,
+      "stale_hallucination": false,
+      "loop_aborted": false,
+      "self_heal_verified": true,
+      "turns": 6,
+      "latency_ms": 56876.9,
+      "prompt_tokens": 35378,
+      "completion_tokens": 1352,
+      "final_answer": "The task execution requires human approval. Here's the summary:\n\n**Task**: `01a20f5d-5b8c-7750-9812-e20f273c98be`  \n**Base Commit**: `5a13d60e6bbc736bb256144fde62f71db34c7bc3`\n\n**Workflow Steps Taken**:\n1. \u2705 Ran preflight in isolated worktree \u2014 smoke failed with `NameError: name 'DEFAULT_ALPHA' is not defined`\n2. \u2705 Inspected error snippets and read worktree file to locate the issue\n3. \u2705 Proposed patch (`patch_kind: \"file_edits\"`) adding `DEFAULT_ALPHA = 0.35` at module level\n4. \u2705 Smoke verification passed after patch application\n5. \u23f8\ufe0f **Awaiting human approval** for execution\n\n**Pending Patch**:\n- **Patch ID**: `01a20f5d-e747-7246-add8-882c68a72906`\n- **Summary**: Add `DEFAULT_ALPHA = 0.35` module-level constant to `src/forecast.py` to fix NameError at line 108\n- **Diff Preview**: Adds `DEFAULT_ALPHA = 0.35` after the imports section\n\nPlease approve this patch to proceed with executing the task.",
+      "notes": []
+    }
+  ]
+}

@@ -1,0 +1,111 @@
+{
+  "model": "qwen3.5:4b",
+  "base_url": "http://127.0.0.1:11434/v1",
+  "dry_run": false,
+  "scoring_version": 3,
+  "timestamp_utc": "2026-11-24T20:59:29Z",
+  "endpoint_model": "relay-qwen3.5-4b-16k",
+  "summary": {
+    "passed_scenarios": 4,
+    "total_scenarios": 4,
+    "pass_rate_pct": 100.0,
+    "avg_tool_recall": 1.0,
+    "stale_hallucination_rate_pct": 0.0,
+    "loop_abort_rate_pct": 0.0,
+    "self_heal_passed": true,
+    "median_latency_ms": 12171.3,
+    "total_tokens": 80876
+  },
+  "scenarios": [
+    {
+      "scenario_id": "S1_sync_and_handoffs",
+      "passed": true,
+      "expected_tools": [
+        "inspect_sync_status",
+        "list_handoffs"
+      ],
+      "called_tools": [
+        "inspect_sync_status",
+        "list_handoffs"
+      ],
+      "tool_recall": 1.0,
+      "stale_hallucination": false,
+      "loop_aborted": false,
+      "self_heal_verified": null,
+      "turns": 2,
+      "latency_ms": 12194.8,
+      "prompt_tokens": 5902,
+      "completion_tokens": 896,
+      "final_answer": "## Relay Sync Status & Handoffs Report\n\n### Sync Status\n| Field | Value |\n|-------|-------|\n| **Runtime Mode** | `host` |\n| **Transport Path** | `offline` |\n| **Connected** | `false` |\n| **Last Synced Commit** | `350a769f6a4ad7b1ad5b31f25419ef4ac448fb9e` |\n| **Pending Outbox Count** | `0` |\n\n### Recent Handoffs (Total: 1)\n| Handoff ID | Repo ID | Source Device | Base Commit SHA | Summary | Active Tasks | Stale Evidence | Created At |\n|------------|---------|---------------|-----------------|---------|--------------|----------------|------------|\n| `01a20f59-d4c8-7702-9829-6766ca2007d2` | `forecast-bench` | `cli` | `350a769f6a4ad7b1ad5b31f25419ef4ac448fb9e` | Initial smoke check | 1 | 0 | `2026-11-24T20:57:55.144953800Z` |\n\n### Summary\n- **Runtime Mode**: Host (local execution)\n- **Connectivity**: Currently offline with no remote connection\n- **Sync Status**: Last synced commit matches the handoff base commit (`350a769f...`)\n- **Handoffs**: 1 recent cross-device handoff exists for `forecast-bench` repo with 1 active task and no stale evidence\n\nThe system is running in host mode but currently offline. The single handoff shows an initial smoke check task with no pending issues.",
+      "notes": []
+    },
+    {
+      "scenario_id": "S2_stale_evidence_trap",
+      "passed": true,
+      "expected_tools": [
+        "get_dag_snapshot"
+      ],
+      "called_tools": [
+        "get_dag_snapshot"
+      ],
+      "tool_recall": 1.0,
+      "stale_hallucination": false,
+      "loop_aborted": false,
+      "self_heal_verified": null,
+      "turns": 2,
+      "latency_ms": 12147.9,
+      "prompt_tokens": 7009,
+      "completion_tokens": 880,
+      "final_answer": "## Current Best MAE for Latest Commit\n\n**No verified MAE metric exists for your current HEAD commit.**\n\n### DAG Snapshot Analysis (SSOT - Sole Source of Truth)\n\n| Metric | Status | Details |\n|--------|--------|---------|\n| **Head Commit SHA** | `fc7f5e6c416c9b0011bbd07715decd271645ecf6` | \"Shift forecast blend to 0.4 MA / 0.6 EWMA\" |\n| **Fresh Evidence Count** | `0` | \u274c No fresh verified metrics available |\n| **Stale Evidence Count** | `1` | All prior evidence is quarantined/stale |\n\n### \u26a0\ufe0f Metric Authority Warning\n\nThe DAG explicitly states:  \n> **\"WARNING: Current HEAD has 0 fresh verified evidence nodes and all prior evidence is STALE/quarantined. Do NOT cite redacted/stale evidence or historical numbers from static repository text files, logs, or handoff notes as valid for current HEAD.\"**\n\n### Available Evidence (STALE - Not Valid for HEAD)\n\n- **Node ID**: `evidence:01a20f5a-084d-7375-ac85-291f49f9434c`  \n  - Label: \"train_grid result\"  \n  - Status: **STALE** (marked by commit `fc7f5e6`)  \n  - Reason: Git commit `fc7f5e6: Shift forecast blend to 0.4 MA / 0.6 EWMA`  \n  - Quarantined: Yes  \n\n### Recommendation\n\n**Re-run the experiment** for HEAD commit `fc7f5e6c416c9b0011bbd07715decd271645ecf6` to generate fresh verified metrics. The current evidence is stale and cannot be used as a valid MAE value for your latest commit.\n\nWould you like me to help you set up the experiment re-run?",
+      "notes": []
+    },
+    {
+      "scenario_id": "S3_env_diff_diagnosis",
+      "passed": true,
+      "expected_tools": [
+        "check_env_diff"
+      ],
+      "called_tools": [
+        "check_env_diff"
+      ],
+      "tool_recall": 1.0,
+      "stale_hallucination": false,
+      "loop_aborted": false,
+      "self_heal_verified": null,
+      "turns": 2,
+      "latency_ms": 7426.9,
+      "prompt_tokens": 5831,
+      "completion_tokens": 548,
+      "final_answer": "## Environment Diff Results for Commit 0ec62a3ee6980769778561459701aa07fefa5db8\n\n**Status:** \u274c **Not in Sync**\n\n| Environment | Fingerprint |\n|-------------|-------------|\n| Repository (Commit) | `uv:blake3:5652db561977cfee` |\n| Host Environment | `uv:blake3:0996be2243db5a38` |\n\n### Missing Python Packages\n- **scipy**\n\nThe Host environment is missing the `scipy` package. This dependency needs to be added to your project's dependencies (likely in `pyproject.toml`) and the lock file (`uv.lock`) should be regenerated to bring the environments into sync.",
+      "notes": []
+    },
+    {
+      "scenario_id": "S4_code_defect_self_heal",
+      "passed": true,
+      "expected_tools": [
+        "run_preflight_in_worktree",
+        "propose_worktree_patch",
+        "approve_and_execute_task"
+      ],
+      "called_tools": [
+        "run_preflight_in_worktree",
+        "read_worktree_file",
+        "read_worktree_file",
+        "propose_worktree_patch",
+        "read_worktree_file",
+        "propose_worktree_patch",
+        "approve_and_execute_task"
+      ],
+      "tool_recall": 1.0,
+      "stale_hallucination": false,
+      "loop_aborted": false,
+      "self_heal_verified": true,
+      "turns": 8,
+      "latency_ms": 52665.1,
+      "prompt_tokens": 56396,
+      "completion_tokens": 3414,
+      "final_answer": "## Task Execution Status: Awaiting Human Approval\n\n**Task ID:** `01a20f5a-6862-77b5-ad32-3e41ace556d5`  \n**Base Commit SHA:** `24e2749f3c5d21f20ab256e2e1293d8222df8ebd`\n\n### Patch Summary\nThe preflight smoke test failed with `NameError: name 'DEFAULT_ALPHA' is not defined`. A patch was proposed to add the missing constant definition.\n\n**Patch ID:** `01a20f5b-162b-70ff-9b5e-b5d9cb550e6c`  \n**Patch Kind:** `file_edits`  \n**Summary:** Add missing DEFAULT_ALPHA constant definition after imports to fix NameError on line 108\n\n### Diff Preview\n```diff\ndiff --git a/src/forecast.py b/src/forecast.py\nindex b5dda4e..384ff63 100644\n--- a/src/forecast.py\n+++ b/src/forecast.py\n@@ -11,7 +11,7 @@ import json\n import math\n import time\n from typing import Iterable\n-\n+DEFAULT_ALPHA = 0.35\n \n def generate_series(length: int = 240) -> list[float]:\n     return [\n```\n\n### Smoke Verification Status\n\u2705 **PASSED** - The patch was smoke verified successfully with:\n- `alpha`: 0.35\n- `elapsed_ms`: 0.17\n- `best_window`: 7\n- `best_mae`: 2.46437\n\n---\n\n**Awaiting your confirmation to execute the task.** Please approve or reject this patch.",
+      "notes": []
+    }
+  ]
+}

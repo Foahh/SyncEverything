@@ -1,20 +1,20 @@
 # Relay Chaos Suite Report (Track 4 — Scripted)
 
-- Generated: 2026-11-24T20:52:25+0800
+- Generated: 2026-11-25T05:20:53+0800
 - Cases: 8 · Passed: 8 · Failed: 0
-- MCP Tools Covered: 8/8 (approve_and_execute_task, check_env_diff, get_dag_snapshot, inspect_sync_status, list_handoffs, propose_worktree_patch, read_evidence_log, run_preflight_in_worktree)
-- P2P Loopback Gate (`sandbox-dual`): **PASS** (RTT=n/a, duration=976.6 ms)
+- MCP Tools Covered: 9/9 (approve_and_execute_task, check_env_diff, get_dag_snapshot, inspect_sync_status, list_handoffs, propose_worktree_patch, read_evidence_log, read_worktree_file, run_preflight_in_worktree)
+- P2P Loopback Gate (`sandbox-dual`): **PASS** (RTT=n/a, duration=5271.7 ms)
 
 | Case | Fault | Result | Tool Recall | Duration (ms) |
 |---|---|---|---:|---:|
-| `chaos-01-missing-dep` | `missing_dependency` | PASS | 1.00 | 3461.9 |
-| `chaos-02-upstream-edit` | `upstream_code_edit` | PASS | 1.00 | 3080.5 |
-| `chaos-03-same-line-conflict` | `same_line_conflict` | PASS | 1.00 | 2928.3 |
-| `chaos-04-mid-run-disconnect` | `mid_run_disconnect` | PASS | 1.00 | 10531.2 |
-| `chaos-05-runtime-exception` | `runtime_exception` | PASS | 1.00 | 3229.2 |
-| `chaos-06-corrupted-lock` | `corrupted_env_lock` | PASS | 1.00 | 3014.4 |
-| `chaos-07-stale-evidence-trap` | `stale_evidence_trap` | PASS | 1.00 | 2925.8 |
-| `chaos-08-duplicate-replay` | `duplicate_task_replay` | PASS | 1.00 | 2387.8 |
+| `chaos-01-missing-dep` | `missing_dependency` | PASS | 1.00 | 17254.3 |
+| `chaos-02-upstream-edit` | `upstream_code_edit` | PASS | 1.00 | 12837.7 |
+| `chaos-03-same-line-conflict` | `same_line_conflict` | PASS | 1.00 | 7981.6 |
+| `chaos-04-mid-run-disconnect` | `mid_run_disconnect` | PASS | 1.00 | 15844.3 |
+| `chaos-05-runtime-exception` | `runtime_exception` | PASS | 1.00 | 8930.2 |
+| `chaos-06-corrupted-lock` | `corrupted_env_lock` | PASS | 1.00 | 15567.0 |
+| `chaos-07-stale-evidence-trap` | `stale_evidence_trap` | PASS | 1.00 | 23458.5 |
+| `chaos-08-duplicate-replay` | `duplicate_task_replay` | PASS | 1.00 | 16795.6 |
 
 ## chaos-01-missing-dep — Missing Python Dependency Auto-Healing
 

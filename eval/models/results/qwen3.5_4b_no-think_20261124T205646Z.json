@@ -1,0 +1,110 @@
+{
+  "model": "qwen3.5:4b (no-think)",
+  "base_url": "http://127.0.0.1:11434/v1",
+  "dry_run": false,
+  "scoring_version": 3,
+  "timestamp_utc": "2026-11-24T20:56:46Z",
+  "endpoint_model": "relay-qwen3.5-4b-16k",
+  "reasoning_effort": "none",
+  "summary": {
+    "passed_scenarios": 4,
+    "total_scenarios": 4,
+    "pass_rate_pct": 100.0,
+    "avg_tool_recall": 1.0,
+    "stale_hallucination_rate_pct": 0.0,
+    "loop_abort_rate_pct": 0.0,
+    "self_heal_passed": true,
+    "median_latency_ms": 4660.2,
+    "total_tokens": 56283
+  },
+  "scenarios": [
+    {
+      "scenario_id": "S1_sync_and_handoffs",
+      "passed": true,
+      "expected_tools": [
+        "inspect_sync_status",
+        "list_handoffs"
+      ],
+      "called_tools": [
+        "inspect_sync_status",
+        "list_handoffs"
+      ],
+      "tool_recall": 1.0,
+      "stale_hallucination": false,
+      "loop_aborted": false,
+      "self_heal_verified": null,
+      "turns": 2,
+      "latency_ms": 4523.4,
+      "prompt_tokens": 5748,
+      "completion_tokens": 292,
+      "final_answer": "**Relay Sync Status:**\n- **Runtime Mode:** `host`\n- **Transport Path:** `offline` (not connected)\n- **Last Synced Commit:** `be3bbf3e0a3de45a7ff8fcc694e9ce6fd3efeab3`\n- **Pending Outbox Count:** 0\n\n**Recent Handoffs:**\nThere is **1 recent handoff**:\n- **Handoff ID:** `01a20f58-20a8-7499-94cd-96d96a4743ee`\n- **Repo ID:** `forecast-bench`\n- **Base Commit SHA:** `be3bbf3e0a3de45a7ff8fcc694e9ce6fd3efeab3`\n- **Summary:** Initial smoke check\n- **Active Task Count:** 1\n- **Stale Evidence Count:** 0\n\nThe system is currently running in host mode but not connected to a remote node. There is one active task from the initial smoke check on the `forecast-bench` repository.",
+      "notes": []
+    },
+    {
+      "scenario_id": "S2_stale_evidence_trap",
+      "passed": true,
+      "expected_tools": [
+        "get_dag_snapshot"
+      ],
+      "called_tools": [
+        "get_dag_snapshot"
+      ],
+      "tool_recall": 1.0,
+      "stale_hallucination": false,
+      "loop_aborted": false,
+      "self_heal_verified": null,
+      "turns": 2,
+      "latency_ms": 4797.0,
+      "prompt_tokens": 6847,
+      "completion_tokens": 313,
+      "final_answer": "**No verified MAE metrics exist for your current HEAD commit.**\n\nAccording to the DAG snapshot (the sole authoritative source):\n- Your current HEAD is `f0ece869ff330be4de8901cbfc8c3d8b1cd4d4c3` (\"Shift forecast blend to 0.4 MA / 0.6 EWMA\")\n- **fresh_evidence_count: 0** \u2014 there are no fresh verified metrics for this commit\n- The only evidence node (`evidence:01a20f58-3654-7724-aad7-6cda9cf5039e`) is marked **stale** because it was produced from the older artifact `artifact:863a05eee7dfeb5cb11aa053bbf4f97814d7b383`, which has been superseded by your current HEAD\n\nThe metric authority note explicitly warns: \"Do NOT cite redacted/stale evidence or historical numbers from static repository text files, logs, or handoff notes as valid for current HEAD.\"\n\n**Recommendation:** Re-run the experiment on commit `f0ece869ff330be4de8901cbfc8c3d8b1cd4d4c3` to generate fresh verified metrics.",
+      "notes": []
+    },
+    {
+      "scenario_id": "S3_env_diff_diagnosis",
+      "passed": true,
+      "expected_tools": [
+        "check_env_diff"
+      ],
+      "called_tools": [
+        "check_env_diff"
+      ],
+      "tool_recall": 1.0,
+      "stale_hallucination": false,
+      "loop_aborted": false,
+      "self_heal_verified": null,
+      "turns": 2,
+      "latency_ms": 2000.6,
+      "prompt_tokens": 5695,
+      "completion_tokens": 120,
+      "final_answer": "The Host environment is **not in sync** with commit `db9cb34bc923729aa5d1abba08f8170c4a6cfe79`.\n\n**Missing Python package:**\n- `scipy`",
+      "notes": []
+    },
+    {
+      "scenario_id": "S4_code_defect_self_heal",
+      "passed": true,
+      "expected_tools": [
+        "run_preflight_in_worktree",
+        "propose_worktree_patch",
+        "approve_and_execute_task"
+      ],
+      "called_tools": [
+        "run_preflight_in_worktree",
+        "read_worktree_file",
+        "propose_worktree_patch",
+        "propose_worktree_patch",
+        "approve_and_execute_task"
+      ],
+      "tool_recall": 1.0,
+      "stale_hallucination": false,
+      "loop_aborted": false,
+      "self_heal_verified": true,
+      "turns": 6,
+      "latency_ms": 22262.7,
+      "prompt_tokens": 35724,
+      "completion_tokens": 1544,
+      "final_answer": "The task execution requires human approval. Here's the summary:\n\n**Task ID:** `01a20f58-64fc-754d-8126-558527201915`  \n**Base Commit SHA:** `956fea7df080765bfb5fb163f913a8be5cab3742`\n\n**Patch Applied:**\n- **Patch ID:** `01a20f58-ad44-7113-b50a-619e3708ddc5`\n- **Type:** `file_edits`\n- **Summary:** Define DEFAULT_ALPHA = 0.35 constant after from __future__ import to fix NameError in src/forecast.py line 108\n\n**Diff Preview:**\n```diff\ndiff --git a/src/forecast.py b/src/forecast.py\nindex b5dda4e..27a58b7 100644\n--- a/src/forecast.py\n+++ b/src/forecast.py\n@@ -6,6 +6,8 @@ for 3-group experiments while emitting machine-readable JSON metrics.\n \n from __future__ import annotations\n \n+DEFAULT_ALPHA = 0.35\n+\n import argparse\n import json\n import math\n```\n\n**Status:** Awaiting your confirmation to execute the task with this patch.",
+      "notes": []
+    }
+  ]
+}

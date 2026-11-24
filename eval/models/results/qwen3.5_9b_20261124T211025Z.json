@@ -1,0 +1,110 @@
+{
+  "model": "qwen3.5:9b",
+  "base_url": "http://127.0.0.1:11434/v1",
+  "dry_run": false,
+  "scoring_version": 3,
+  "timestamp_utc": "2026-11-24T21:10:25Z",
+  "endpoint_model": "relay-qwen3.5-9b-16k",
+  "summary": {
+    "passed_scenarios": 4,
+    "total_scenarios": 4,
+    "pass_rate_pct": 100.0,
+    "avg_tool_recall": 1.0,
+    "stale_hallucination_rate_pct": 0.0,
+    "loop_abort_rate_pct": 0.0,
+    "self_heal_passed": true,
+    "median_latency_ms": 23967.3,
+    "total_tokens": 80438
+  },
+  "scenarios": [
+    {
+      "scenario_id": "S1_sync_and_handoffs",
+      "passed": true,
+      "expected_tools": [
+        "inspect_sync_status",
+        "list_handoffs"
+      ],
+      "called_tools": [
+        "inspect_sync_status",
+        "list_handoffs"
+      ],
+      "tool_recall": 1.0,
+      "stale_hallucination": false,
+      "loop_aborted": false,
+      "self_heal_verified": null,
+      "turns": 2,
+      "latency_ms": 29409.8,
+      "prompt_tokens": 5870,
+      "completion_tokens": 873,
+      "final_answer": "Here's the Relay sync status and recent handoffs summary:\n\n## Sync Status\n- **Runtime Mode**: `host`\n- **Last Synced Commit**: `46aad381f23f6fc565f15166d2bc8b47605edcc5`\n- **Transport Path**: `offline`\n- **Connected**: `false`\n- **Pending Outbox Count**: `0`\n\n## Recent Handoffs\n- **Total Handoffs**: `1` (within the last 10)\n\n### Handoff Details:\n| Field | Value |\n|-------|-------|\n| **Handoff ID** | `01a20f61-8ea8-71d5-8f65-d18612176563` |\n| **Repo ID** | `forecast-bench` |\n| **Source Device** | `cli` |\n| **Base Commit SHA** | `46aad381f23f6fc565f15166d2bc8b47605edcc5` |\n| **Summary** | `Initial smoke check` |\n| **Active Task Count** | `1` |\n| **Stale Evidence Count** | `0` |\n| **Created At** | `2026-11-24T21:06:21.480708800Z` |\n\nThe system is currently in **host mode** with an **offline transport path**. There's one recent handoff from the CLI device for the `forecast-bench` repository, which performed an initial smoke check at commit `46aad381f23f6fc565f15166d2bc8b47605edcc5`.",
+      "notes": []
+    },
+    {
+      "scenario_id": "S2_stale_evidence_trap",
+      "passed": true,
+      "expected_tools": [
+        "get_dag_snapshot"
+      ],
+      "called_tools": [
+        "get_dag_snapshot"
+      ],
+      "tool_recall": 1.0,
+      "stale_hallucination": false,
+      "loop_aborted": false,
+      "self_heal_verified": null,
+      "turns": 2,
+      "latency_ms": 18524.9,
+      "prompt_tokens": 6982,
+      "completion_tokens": 646,
+      "final_answer": "Based on the authoritative DAG snapshot, **there are no fresh verified metrics available for the current HEAD commit** (`4c34ee617c7c4b6a0d3ee27e8e117073b290492e`).\n\nThe snapshot shows:\n- `fresh_evidence_count`: 0\n- `stale_evidence_count`: 1\n- The single evidence node (`train_grid result`) is marked as **STALE** and quarantined due to the commit \"Shift forecast blend to 0.4 MA / 0.6 EWMA\"\n\nThe DAG explicitly warns: *\"Do NOT cite redacted/stale evidence or historical numbers from static repository text files, logs, or handoff notes as valid for current HEAD.\"*\n\n**Recommendation**: Re-run the experiment to generate fresh verified metrics for the current HEAD commit before any MAE value can be reliably reported.",
+      "notes": []
+    },
+    {
+      "scenario_id": "S3_env_diff_diagnosis",
+      "passed": true,
+      "expected_tools": [
+        "check_env_diff"
+      ],
+      "called_tools": [
+        "check_env_diff"
+      ],
+      "tool_recall": 1.0,
+      "stale_hallucination": false,
+      "loop_aborted": false,
+      "self_heal_verified": null,
+      "turns": 2,
+      "latency_ms": 11857.1,
+      "prompt_tokens": 5796,
+      "completion_tokens": 422,
+      "final_answer": "The Host environment comparison against commit `8157f97a528c63281ed9f08bdc379834ae6e4878` shows:\n\n- **Status**: Not in sync (`in_sync: false`)\n- **Missing Python packages**: `scipy`\n- **Repository environment fingerprint**: `uv:blake3:5652db561977cfee`\n- **Host environment fingerprint**: `uv:blake3:0996be2243db5a38`\n\nThe Host environment is missing the `scipy` package compared to the target commit. This would need to be addressed via a patch (e.g., using `propose_worktree_patch` with `patch_kind=\"uv_spec\"` and `uv_spec=\"scipy\"`) before executing tasks that depend on this commit.",
+      "notes": []
+    },
+    {
+      "scenario_id": "S4_code_defect_self_heal",
+      "passed": true,
+      "expected_tools": [
+        "run_preflight_in_worktree",
+        "propose_worktree_patch",
+        "approve_and_execute_task"
+      ],
+      "called_tools": [
+        "run_preflight_in_worktree",
+        "read_worktree_file",
+        "propose_worktree_patch",
+        "propose_worktree_patch",
+        "propose_worktree_patch",
+        "approve_and_execute_task"
+      ],
+      "tool_recall": 1.0,
+      "stale_hallucination": false,
+      "loop_aborted": false,
+      "self_heal_verified": true,
+      "turns": 7,
+      "latency_ms": 172533.4,
+      "prompt_tokens": 54703,
+      "completion_tokens": 5146,
+      "final_answer": "Task `01a20f62-9401-7595-977b-34c874b86f52` for commit `fde01729ef545ecf325e3b9d4b59bd90844f51b1` requires human approval before execution.\n\n**Pending Patch Summary:**\n- **patch_id**: `01a20f64-e0e8-71f5-b6ee-98a9a97956ea`\n- **kind**: `file_edits`\n- **summary**: Define `DEFAULT_ALPHA = 0.35` constant in `src/forecast.py` to fix `NameError` on line 108 where it's used as default for `--alpha` argument\n\n**Diff Preview:**\n```diff\ndiff --git a/src/forecast.py b/src/forecast.py\nindex b5dda4e..7ede20b 100644\n--- a/src/forecast.py\n+++ b/src/forecast.py\n@@ -11,6 +11,7 @@ import json\n import math\n import time\n from typing import Iterable\n+DEFAULT_ALPHA = 0.35\n \n \n def generate_series(length: int = 240) -> list[float]:\n```\n\n**Workflow Steps Taken:**\n1. \u2705 Ran `run_preflight_in_worktree` \u2014 smoke failed with `NameError: name 'DEFAULT_ALPHA' is not defined`\n2. \u2705 Read `src/forecast.py` to inspect context\n3. \u2705 Proposed `propose_worktree_patch` with `patch_kind: \"file_edits\"` inserting `DEFAULT_ALPHA = 0.35` after imports\n4. \u2705 Smoke verification passed (`smoke_verified: true`)\n5. \u23f8\ufe0f `approve_and_execute_task` returned `approval_required` \u2014 awaiting human confirmation\n\nPlease approve the patch to proceed with task execution, or provide alternative instructions.",
+      "notes": []
+    }
+  ]
+}

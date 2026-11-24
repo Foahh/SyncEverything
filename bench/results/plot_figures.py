@@ -480,11 +480,11 @@ def plot_fig3_model_pareto() -> None:
 
     # Custom explicit data coordinates + leader arrows to avoid any box collisions
     pos_p1 = {
-        "deepseek-flash": (18.5, 97.0, "left"),
-        "qwen3.5:4b (no-think)": (11.0, 29.0, "center"),
-        "qwen3.5:9b (no-think)": (28.5, 29.0, "center"),
-        "qwen3.5:4b": (24.5, 79.0, "center"),
-        "qwen3.5:9b": (37.5, 67.5, "center"),
+        "deepseek-flash": (6.2, 112.0, "center"),
+        "qwen3.5:9b (no-think)": (22.5, 112.0, "center"),
+        "qwen3.5:4b (no-think)": (7.2, 44.0, "center"),
+        "qwen3.5:4b": (15.5, 72.0, "center"),
+        "qwen3.5:9b": (25.0, 44.0, "center"),
     }
 
     for row in stats_rows:
@@ -522,19 +522,19 @@ def plot_fig3_model_pareto() -> None:
         )
 
     ax1.grid(True, which="both", axis="both", linestyle="--", alpha=0.35)
-    ax1.set_xlim(0, max(r["lat_m"] + r["lat_sd"] for r in stats_rows) * 1.16)
-    ax1.set_ylim(0, 108)
+    ax1.set_xlim(0, max(r["lat_m"] + r["lat_sd"] for r in stats_rows) * 1.18)
+    ax1.set_ylim(0, 120)
     ax1.set_xlabel("Median Scenario LLM Latency (s, Mean ± SD)")
     ax1.set_ylabel("Scenario Pass Rate (%, Mean ± SD)")
     ax1.set_title("(a) Latency vs. Task Success")
 
     # Panel (b): Tool Recall vs Latency + Stale Leakage Indicator
     pos_p2 = {
-        "deepseek-flash": (10.5, 102.8, "left"),
-        "qwen3.5:4b (no-think)": (9.5, 81.8, "center"),
-        "qwen3.5:9b (no-think)": (23.5, 86.2, "center"),
-        "qwen3.5:4b": (36.5, 98.0, "center"),
-        "qwen3.5:9b": (38.0, 81.8, "center"),
+        "deepseek-flash": (7.8, 112.0, "center"),
+        "qwen3.5:9b (no-think)": (23.2, 112.0, "center"),
+        "qwen3.5:4b (no-think)": (7.5, 73.0, "center"),
+        "qwen3.5:4b": (17.5, 50.0, "center"),
+        "qwen3.5:9b": (24.5, 73.0, "center"),
     }
     for row in stats_rows:
         m = row["model"]
@@ -570,8 +570,8 @@ def plot_fig3_model_pareto() -> None:
         )
 
     ax2.grid(True, which="both", axis="both", linestyle="--", alpha=0.35)
-    ax2.set_xlim(0, max(r["lat_m"] + r["lat_sd"] for r in stats_rows) * 1.16)
-    ax2.set_ylim(0, 106)
+    ax2.set_xlim(0, max(r["lat_m"] + r["lat_sd"] for r in stats_rows) * 1.18)
+    ax2.set_ylim(0, 120)
     ax2.set_xlabel("Median Scenario LLM Latency (s, Mean ± SD)")
     ax2.set_ylabel("Average MCP Tool Recall (%, Mean ± SD)")
     ax2.set_title("(b) Latency vs. Tool Recall & Stale Leakage")
@@ -724,7 +724,7 @@ def plot_fig4_chaos_self_healing() -> None:
         label="Total Patch Retries (Right Axis)",
         zorder=5,
     )
-    retry_offsets = [(24, 20), (0, 14), (4, 18)]
+    retry_offsets = [(26, 22), (0, -36), (4, 22)]
     for rx, rt, ur, dr, off in zip(lx, total_retries, uv_retries, diff_retries, retry_offsets):
         ax2_r.annotate(
             f"{rt} retries\n(uv={ur}, edit={dr})",
@@ -739,7 +739,7 @@ def plot_fig4_chaos_self_healing() -> None:
             arrowprops={"arrowstyle": "-", "color": OKABE["vermilion"], "lw": 0.8},
             zorder=10,
         )
-    ax2_r.set_ylim(-1.2, max(total_retries + [10]) * 1.40)
+    ax2_r.set_ylim(-1.2, max(total_retries + [10]) * 1.65)
     ax2_r.set_ylabel("Total Patch Retries (Count)", color=OKABE["vermilion"])
     ax2_r.tick_params(axis="y", colors=OKABE["vermilion"])
 
