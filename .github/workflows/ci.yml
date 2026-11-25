@@ -10,6 +10,9 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
 
@@ -47,10 +50,13 @@ jobs:
         uses: astral-sh/setup-uv@v5
 
       - name: Run relay-core and relay-daemon tests
-        run: cargo test -p relay-core -p relay-daemon
+        run: cargo test --locked -p relay-core -p relay-daemon
+
+      - name: Test desktop workspace and MCP file handling
+        run: cargo test --locked -p relay-desktop --lib
 
       - name: Check full Rust workspace
-        run: cargo check --workspace
+        run: cargo check --locked --workspace
 
   desktop-frontend:
     name: Desktop frontend checks
