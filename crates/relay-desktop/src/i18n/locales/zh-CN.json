@@ -1,4 +1,27 @@
 {
+  "desk": {
+    "loading": "正在读取任务…",
+    "empty": "当前项目还没有任务。",
+    "noMatch": "此筛选条件下没有任务。",
+    "retry": "重试",
+    "enqueue": "加入待发送",
+    "views": "工作区视图",
+    "tasks": "任务",
+    "graph": "版本关系",
+    "all": "全部",
+    "attention": "待我处理",
+    "active": "进行中",
+    "history": "历史",
+    "recent": "当前显示本地最近记录，主机处理情况待同步。",
+    "open": "打开项目",
+    "configure": "配置项目",
+    "local": "在本机运行",
+    "fresh": "结果有效",
+    "stale": "结果已过期",
+    "pending_verify": "结果待验证",
+    "rerun": "按当前版本重跑",
+    "changed": "项目版本已变化。请核对新版本后再次提交。"
+  },
   "app": {
     "name": "SyncEverything"
   },

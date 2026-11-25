@@ -1,4 +1,27 @@
 {
+  "desk": {
+    "loading": "Loading tasks…",
+    "empty": "No tasks in this project yet.",
+    "noMatch": "No tasks match this filter.",
+    "retry": "Retry",
+    "enqueue": "Queue for delivery",
+    "views": "Workspace views",
+    "tasks": "Tasks",
+    "graph": "Version graph",
+    "all": "All",
+    "attention": "Needs attention",
+    "active": "In progress",
+    "history": "History",
+    "recent": "Latest local records. Remote actions await synchronization.",
+    "open": "Open project",
+    "configure": "Configure project",
+    "local": "Run locally",
+    "fresh": "Current",
+    "stale": "Outdated",
+    "pending_verify": "Pending verification",
+    "rerun": "Run on current version",
+    "changed": "The project revision changed. Review the new revision and submit again."
+  },
   "app": {
     "name": "SyncEverything"
   },

@@ -34,7 +34,7 @@ interface TopTelemetryBarProps {
   onToggleTheme: () => void;
   onToggleCopilot: () => void;
   onOpenPairModal: () => void;
-  onOpenRunTask: () => void;
+  onOpenRunTask?: () => void;
   onOpenRepoSettings: () => void;
   onOpenLlmSettings: () => void;
   onSwitchWorkspace: (repoPath: string) => Promise<void>;
@@ -135,10 +135,12 @@ export function TopTelemetryBar({
           <Link2 data-icon="inline-end" className="text-muted-foreground" />
         </Button>
 
-        <Button variant="default" size="default" onClick={onOpenRunTask}>
-          <Play data-icon="inline-start" />
-          <span className="relay-text-trim leading-none">{t("topbar.runTask")}</span>
-        </Button>
+        {onOpenRunTask && (
+          <Button variant="default" size="default" onClick={onOpenRunTask}>
+            <Play data-icon="inline-start" />
+            <span className="relay-text-trim leading-none">{t("topbar.runTask")}</span>
+          </Button>
+        )}
 
         <Button
           variant={isCopilotOpen ? "secondary" : "outline"}

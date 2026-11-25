@@ -44,6 +44,8 @@ import {
 } from "./lib/queries";
 import { isTaskRunning } from "./lib/taskLogStream";
 
+const emptyTasks: TaskRecord_Serialize[] = [];
+
 export default function App() {
   useRelayEventSync();
   const { t } = useTranslation();
@@ -52,7 +54,11 @@ export default function App() {
   const [includeStale, setIncludeStale] = useState(true);
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
-  const [rightRailOpen, setRightRailOpen] = useState(true);
+  const [rightRailOpen, setRightRailOpen] = useState(false);
+  const [graphOpen, setGraphOpen] = useState(false);
+  const [filter, setFilter] = useState<"all" | "attention" | "active" | "history">("all");
+  const [dispatchHead, setDispatchHead] = useState<string | null>(null);
+  const [seed, setSeed] = useState<TaskRecord_Serialize | null>(null);
   const [rightRailTab, setRightRailTab] = useState<RightRailTab>("agent");
   const [inspectorMode, setInspectorMode] = useState<InspectorMode>("node");
   const [activeApprovalTaskId, setActiveApprovalTaskId] = useState<string | null>(null);
@@ -67,8 +73,9 @@ export default function App() {
   const { data: workspace } = useWorkspaceInfo();
   const { data: recentWorkspaces = [] } = useRecentWorkspaces();
   const { data: llmSettings } = useLlmSettings();
-  const { data: dag } = useDagSnapshot(includeStale);
-  const { data: tasks = [] } = useTasks();
+  const { data: dag } = useDagSnapshot(graphOpen ? includeStale : true);
+  const taskQuery = useTasks();
+  const tasks = taskQuery.data ?? emptyTasks;
   const { data: trustedPeers = [] } = useTrustedPeers();
   const copilot = useCopilotChat();
   const { logsByTask, clearTaskLogs } = useTaskLogStream();
@@ -207,11 +214,54 @@ export default function App() {
     setRightRailOpen(true);
   };
 
+  function openRun(previous: TaskRecord_Serialize | null = null) {
+    if (
+      !workspace?.is_git_repo ||
+      !workspace.has_manifest ||
+      !dag?.head_commit_sha ||
+      !workspace.presets.length
+    ) {
+      handleOpenSettings("repo");
+      return;
+    }
+    if (status?.mode === "client" && !status.remote_node_id && !status.connected) {
+      openPairing();
+      return;
+    }
+    setSeed(previous);
+    setDispatchHead(dag.head_commit_sha);
+    setTaskModalOpen(true);
+  }
+
+  const attention = (task: TaskRecord_Serialize) =>
+    needsTaskApproval(task) || task.state === "failed";
+  const active = (task: TaskRecord_Serialize) =>
+    task.state === "queued" || isTaskRunning(task.state);
+  const visibleTasks = tasks
+    .filter(
+      (task) =>
+        filter === "all" ||
+        (filter === "attention"
+          ? attention(task)
+          : filter === "active"
+            ? active(task) && !attention(task)
+            : !active(task) && !attention(task)),
+    )
+    .sort(
+      (a, b) =>
+        Number(attention(b)) - Number(attention(a)) || b.updated_at.localeCompare(a.updated_at),
+    );
   const handleDispatchTask = async (values: DispatchTaskFormValues) => {
+    if (status?.mode === "client" && !status.connected && !status.remote_node_id)
+      throw new Error(t("topbar.pairDevice"));
+    if (!dispatchHead || dispatchHead !== dag?.head_commit_sha) {
+      setDispatchHead(dag?.head_commit_sha ?? null);
+      throw new Error(t("desk.changed"));
+    }
     const created = await submitTask.mutateAsync({
       task_id: values.taskId,
       repo_id: workspace?.repo_id ?? dag?.repo_id ?? "default-workspace",
-      base_commit_sha: dag?.head_commit_sha ?? "HEAD",
+      base_commit_sha: dispatchHead,
       command_preset: values.preset,
       params: values.params,
       require_approval: values.requireApproval,
@@ -251,7 +301,9 @@ export default function App() {
           setInspectorMode("node");
           setRightRailTab("inspector");
         } else {
-          setRightRailTab("agent");
+          setSelectedTaskId(updated.spec.task_id);
+          setInspectorMode("task");
+          setRightRailTab("inspector");
         }
       },
     });
@@ -259,6 +311,10 @@ export default function App() {
 
   const handleSwitchWorkspace = async (repoPath: string) => {
     await switchWorkspace.mutateAsync(repoPath);
+    setGraphOpen(false);
+    setFilter("all");
+    setRightRailOpen(false);
+    setTaskModalOpen(false);
     setSelectedNodeId(null);
     setSelectedTaskId(null);
     clearTaskLogs();
@@ -289,7 +345,7 @@ export default function App() {
         onToggleTheme={toggleTheme}
         onToggleCopilot={handleToggleCopilot}
         onOpenPairModal={openPairing}
-        onOpenRunTask={() => setTaskModalOpen(true)}
+        onOpenRunTask={graphOpen ? () => openRun() : undefined}
         onOpenRepoSettings={() => handleOpenSettings("repo")}
         onOpenLlmSettings={() => handleOpenSettings("llm")}
         onSwitchWorkspace={handleSwitchWorkspace}
@@ -297,54 +353,124 @@ export default function App() {
         onInitManifest={handleInitWorkspaceManifest}
       />
 
+      <nav className="flex items-center gap-2 border-b px-4 py-2" aria-label={t("desk.views")}>
+        {(["tasks", "graph"] as const).map((view) => (
+          <button
+            key={view}
+            type="button"
+            aria-pressed={graphOpen === (view === "graph")}
+            className="rounded-md px-3 py-1.5 text-sm font-medium aria-pressed:bg-primary/10 aria-pressed:text-primary"
+            onClick={() => setGraphOpen(view === "graph")}
+          >
+            {t(`desk.${view}`)}
+          </button>
+        ))}
+      </nav>
       <main className="flex min-h-0 flex-1 overflow-hidden">
-        <LeftRail
-          status={status}
-          trustedPeers={trustedPeers}
-          tasks={tasks}
-          selectedTaskId={inspectorMode === "task" ? selectedTaskId : null}
-          cancellingTaskId={cancelTask.isPending ? (cancelTask.variables ?? null) : null}
-          onOpenRunTask={() => setTaskModalOpen(true)}
-          onOpenPairModal={openPairing}
-          onOpenApproval={handleOpenApproval}
-          onInspectTask={handleInspectTask}
-          onCancelTask={handleCancelTask}
-          onSelectEvidenceNode={handleSelectNode}
-          onSwitchMode={(mode) => switchMode.mutate(mode)}
-          isSwitchingMode={switchMode.isPending}
-          switchModeError={
-            switchMode.error == null ? null : formatErrorMessage(switchMode.error, t)
-          }
-          onDismissSwitchModeError={() => switchMode.reset()}
-          onTriggerUpstreamEdit={handleTriggerUpstreamEdit}
-          onResetDemo={() => {
-            setSelectedNodeId(null);
-            setSelectedTaskId(null);
-            clearTaskLogs();
-            setInspectorMode("node");
-            setRightRailTab("agent");
-            resetDemo.mutate();
-          }}
-          isSimulatingEdit={simulateEdit.isPending}
-        />
-
-        <DagCanvas
-          snapshot={dag}
-          selectedNodeId={selectedNodeId}
-          includeStale={includeStale}
-          hasRepo={Boolean(workspace?.repo_root)}
-          isGitRepo={Boolean(workspace?.is_git_repo)}
-          hasManifest={Boolean(workspace?.has_manifest)}
-          isGeneratingManifest={initManifest.isPending}
-          onToggleIncludeStale={() => setIncludeStale((prev) => !prev)}
-          onSelectNode={handleSelectNode}
-          onOpenRecordDecision={() => setDecisionModalOpen(true)}
-          onOpenDispatchTask={() => setTaskModalOpen(true)}
-          onOpenRepoSettings={() => handleOpenSettings("repo")}
-          manifestError={initManifest.error ? formatErrorMessage(initManifest.error, t) : null}
-          onDismissManifestError={() => initManifest.reset()}
-          onGenerateManifest={() => initManifest.mutate({ repoPath: workspace?.repo_root ?? null })}
-        />
+        {!graphOpen && (
+          <div className="flex min-w-0 flex-1 flex-col">
+            <header className="space-y-3 border-b px-6 py-4">
+              <h1 className="text-xl font-semibold">{t("desk.tasks")}</h1>
+              {status?.mode === "client" &&
+                (!status.connected || status.pending_outbox_count > 0) && (
+                  <p role="status" className="text-sm text-muted-foreground">
+                    {t("desk.recent")}
+                  </p>
+                )}
+              <div className="flex flex-wrap gap-2">
+                {(["all", "attention", "active", "history"] as const).map((key) => (
+                  <button
+                    key={key}
+                    aria-pressed={filter === key}
+                    className="rounded-md border px-3 py-1 text-sm aria-pressed:bg-secondary"
+                    onClick={() => setFilter(key)}
+                  >
+                    {t(`desk.${key}`)}
+                  </button>
+                ))}
+              </div>
+            </header>
+            {taskQuery.isError && (
+              <div
+                role="alert"
+                className="flex items-center justify-between gap-3 border-b p-3 text-sm text-destructive"
+              >
+                {formatErrorMessage(taskQuery.error, t)}{" "}
+                <button onClick={() => void taskQuery.refetch()}>{t("desk.retry")}</button>
+              </div>
+            )}
+            <LeftRail
+              status={status}
+              trustedPeers={trustedPeers}
+              tasks={visibleTasks}
+              dag={dag}
+              emptyText={
+                taskQuery.isPending
+                  ? t("desk.loading")
+                  : filter === "all"
+                    ? t("desk.empty")
+                    : t("desk.noMatch")
+              }
+              runLabel={
+                !workspace?.repo_root
+                  ? t("desk.open")
+                  : !workspace.has_manifest || !dag?.head_commit_sha || !workspace.presets.length
+                    ? t("desk.configure")
+                    : status?.mode === "client" && !status.connected && !status.remote_node_id
+                      ? t("topbar.pairDevice")
+                      : status?.mode === "client"
+                        ? t("sidebar.runOnHost")
+                        : t("desk.local")
+              }
+              onRerun={openRun}
+              selectedTaskId={inspectorMode === "task" ? selectedTaskId : null}
+              cancellingTaskId={cancelTask.isPending ? (cancelTask.variables ?? null) : null}
+              onOpenRunTask={() => openRun()}
+              onOpenPairModal={openPairing}
+              onOpenApproval={handleOpenApproval}
+              onInspectTask={handleInspectTask}
+              onCancelTask={handleCancelTask}
+              onSelectEvidenceNode={handleSelectNode}
+              onSwitchMode={(mode) => switchMode.mutate(mode)}
+              isSwitchingMode={switchMode.isPending}
+              switchModeError={
+                switchMode.error == null ? null : formatErrorMessage(switchMode.error, t)
+              }
+              onDismissSwitchModeError={() => switchMode.reset()}
+              onTriggerUpstreamEdit={handleTriggerUpstreamEdit}
+              onResetDemo={() => {
+                setSelectedNodeId(null);
+                setSelectedTaskId(null);
+                clearTaskLogs();
+                setInspectorMode("node");
+                setRightRailTab("agent");
+                resetDemo.mutate();
+              }}
+              isSimulatingEdit={simulateEdit.isPending}
+            />
+          </div>
+        )}
+        {graphOpen && (
+          <DagCanvas
+            snapshot={dag}
+            selectedNodeId={selectedNodeId}
+            includeStale={includeStale}
+            hasRepo={Boolean(workspace?.repo_root)}
+            isGitRepo={Boolean(workspace?.is_git_repo)}
+            hasManifest={Boolean(workspace?.has_manifest)}
+            isGeneratingManifest={initManifest.isPending}
+            onToggleIncludeStale={() => setIncludeStale((prev) => !prev)}
+            onSelectNode={handleSelectNode}
+            onOpenRecordDecision={() => setDecisionModalOpen(true)}
+            onOpenDispatchTask={() => openRun()}
+            onOpenRepoSettings={() => handleOpenSettings("repo")}
+            manifestError={initManifest.error ? formatErrorMessage(initManifest.error, t) : null}
+            onDismissManifestError={() => initManifest.reset()}
+            onGenerateManifest={() =>
+              initManifest.mutate({ repoPath: workspace?.repo_root ?? null })
+            }
+          />
+        )}
 
         <RightWorkbenchRail
           isOpen={rightRailOpen}
@@ -397,7 +523,15 @@ export default function App() {
       <DispatchTaskModal
         isOpen={taskModalOpen}
         onOpenChange={setTaskModalOpen}
-        headCommitSha={dag?.head_commit_sha ?? null}
+        headCommitSha={dispatchHead}
+        seed={seed}
+        runText={
+          status?.mode === "client"
+            ? status.connected
+              ? t("sidebar.runOnHost")
+              : t("desk.enqueue")
+            : t("desk.local")
+        }
         presets={workspace?.presets ?? []}
         onDispatch={handleDispatchTask}
         isSubmitting={submitTask.isPending}

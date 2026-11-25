@@ -21,6 +21,7 @@ import {
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import type {
+  DagSnapshot_Serialize,
   PeerStatus_Serialize,
   RuntimeMode,
   TaskRecord_Serialize,
@@ -31,6 +32,10 @@ import { isTauriRuntime, needsTaskApproval } from "../lib/relayApi";
 import { isTaskCancellable, isTaskRunning, taskStateBadgeProps } from "../lib/taskLogStream";
 
 interface LeftRailProps {
+  dag?: DagSnapshot_Serialize;
+  runLabel: string;
+  emptyText: string;
+  onRerun: (task: TaskRecord_Serialize) => void;
   status: PeerStatus_Serialize | undefined;
   trustedPeers: TrustedPeerRecord_Serialize[];
   tasks: TaskRecord_Serialize[];
@@ -54,6 +59,10 @@ interface LeftRailProps {
 const RUNTIME_MODES: RuntimeMode[] = ["client", "host", "local_dual_sandbox"];
 
 export function LeftRail({
+  dag,
+  runLabel,
+  emptyText,
+  onRerun,
   status,
   trustedPeers,
   tasks,
@@ -87,14 +96,18 @@ export function LeftRail({
   const activeTrustedCount = trustedPeers.filter((peer) => peer.revoked_at === null).length;
 
   return (
-    <aside className="flex h-full w-[268px] shrink-0 flex-col border-r border-border bg-sidebar text-sidebar-foreground">
-      <div className="flex flex-1 flex-col gap-5 overflow-y-auto p-3.5">
-        <Button size="lg" className="w-full justify-center" onClick={onOpenRunTask}>
+    <aside className="flex min-h-0 w-full flex-1 flex-col border-r border-border bg-sidebar text-sidebar-foreground">
+      <div className="grid min-h-0 flex-1 content-start items-start gap-4 overflow-y-auto p-5 lg:grid-cols-[minmax(0,1fr)_210px] lg:grid-rows-[auto_1fr]">
+        <Button
+          size="lg"
+          className="w-full justify-center lg:col-start-2 lg:row-start-1"
+          onClick={onOpenRunTask}
+        >
           <Play data-icon="inline-start" />
-          <span className="relay-text-trim leading-none">{t("sidebar.runOnHost")}</span>
+          <span className="relay-text-trim leading-none">{runLabel}</span>
         </Button>
 
-        <section className="flex flex-col gap-2">
+        <section className="flex flex-col gap-2 lg:col-start-2 lg:row-start-2">
           <div className="text-[11px] font-medium text-muted-foreground">
             {t("sidebar.deviceSection")}
           </div>
@@ -137,7 +150,7 @@ export function LeftRail({
           </div>
         </section>
 
-        <section className="flex flex-col gap-2">
+        <section className="flex min-w-0 flex-col gap-2 lg:col-start-1 lg:row-span-2 lg:row-start-1">
           <div className="flex items-center justify-between">
             <span className="text-[11px] font-medium text-muted-foreground">
               {t("sidebar.runsSection")}
@@ -151,11 +164,12 @@ export function LeftRail({
 
           {tasks.length === 0 ? (
             <div className="rounded-lg border border-dashed border-border px-3 py-5 text-center text-xs leading-relaxed text-muted-foreground">
-              {t("sidebar.noRuns")}
+              {emptyText}
             </div>
           ) : (
             <div className="flex flex-col gap-2">
               {tasks.map((task) => {
+                const result = dag?.nodes.find((node) => node.id === task.evidence_node_id);
                 const needsFixReview = needsTaskApproval(task);
                 const badge = taskStateBadgeProps(task.state);
                 const running = isTaskRunning(task.state) && !needsFixReview;
@@ -194,6 +208,20 @@ export function LeftRail({
                       </Badge>
                     </div>
 
+                    <div className="mt-2 flex flex-wrap items-center gap-3 text-xs text-muted-foreground">
+                      <code title={task.spec.base_commit_sha}>
+                        {task.spec.base_commit_sha.slice(0, 8)}
+                      </code>
+                      <time dateTime={task.updated_at}>
+                        {new Date(task.updated_at).toLocaleString()}
+                      </time>
+                      {result && <span>{t(`desk.${result.freshness.status}`)}</span>}
+                      {result?.freshness.status === "stale" && (
+                        <Button size="sm" variant="outline" onClick={() => onRerun(task)}>
+                          {t("desk.rerun")}
+                        </Button>
+                      )}
+                    </div>
                     {(task.preflight_summary || task.spec.user_note) && (
                       <p className="mt-1 line-clamp-2 text-[11.5px] leading-relaxed text-muted-foreground">
                         {task.preflight_summary
