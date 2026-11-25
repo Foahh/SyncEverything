@@ -322,6 +322,11 @@ async fn worktree_preflight_and_code_diff_self_healing_preserves_clean_main_tree
     }
 
     // A patch that fails smoke verification automatically rolls back tracked & untracked changes.
+    fs::write(path.join("fix-note.txt"), "preflight note\n").unwrap();
+    fs::write(path.join("staged-note.txt"), "index copy\n").unwrap();
+    git(path, &["add", "staged-note.txt"]).await;
+    fs::write(path.join("staged-note.txt"), "worktree copy\n").unwrap();
+    let starting_diff = worktree.diff().await.unwrap();
     let failed_proposal = sandbox
         .apply_and_verify_patch(
             task_id,
@@ -333,6 +338,11 @@ async fn worktree_preflight_and_code_diff_self_healing_preserves_clean_main_tree
                     file_path: "src/app.py".into(),
                     old_text: Some("import json\n".into()),
                     new_text: "import json\n\nWRONG_NAME = \"still broken\"\n".into(),
+                },
+                FileEdit {
+                    file_path: "fix-note.txt".into(),
+                    old_text: Some("preflight note".into()),
+                    new_text: "candidate note".into(),
                 },
                 FileEdit {
                     file_path: "scratch-untracked.txt".into(),
@@ -347,7 +357,9 @@ async fn worktree_preflight_and_code_diff_self_healing_preserves_clean_main_tree
     assert!(!failed_proposal.smoke_verified);
     assert!(failed_proposal.diff_preview.contains("+WRONG_NAME"));
     assert!(!path.join("scratch-untracked.txt").exists());
-    assert!(worktree.diff().await.unwrap().is_empty());
+    assert_eq!(worktree.diff().await.unwrap(), starting_diff);
+    assert_eq!(fs::read_to_string(path.join("fix-note.txt")).unwrap(), "preflight note\n");
+    assert_eq!(git(path, &["show", ":staged-note.txt"]).await.trim_end(), "index copy");
 
     // Subsequent retry succeeds cleanly and idempotently on the rolled-back worktree.
     let edits = vec![
@@ -399,6 +411,30 @@ async fn worktree_preflight_and_code_diff_self_healing_preserves_clean_main_tree
     assert!(!sandbox.is_working_tree_dirty().await.unwrap());
 }
 
+#[tokio::test]
+async fn worktree_file_view_counts_all_lines_and_reads_late_ranges() {
+    let temp = TempDir::new();
+    let root = temp.join("src");
+    fs::create_dir_all(&root).unwrap();
+    let mut source = "x".repeat(2 * 1024 * 1024 + 31);
+    source.push_str("\n");
+    source.push_str(&"ordinary line\n".repeat(250));
+    source.push_str("last line without newline");
+    fs::write(root.join("data.txt"), source).unwrap();
+    let first = read_confined_file(&root, "data.txt", None, None, 256)
+        .await
+        .unwrap();
+    assert!(first.truncated);
+    assert_eq!(first.total_lines, 252);
+    assert!(first.content.contains("   1: xxx"));
+    let tail = read_confined_file(&root, "data.txt", Some(252), None, 256)
+        .await
+        .unwrap();
+    assert_eq!(tail.content, " 252: last line without newline\n");
+    assert_eq!(tail.total_lines, 252);
+    assert!(!tail.truncated);
+}
+
 #[test]
 fn extract_error_snippets_parses_generic_formats_and_excludes_sensitive_dirs() {
     let temp = TempDir::new();
@@ -433,6 +469,9 @@ fn extract_error_snippets_parses_generic_formats_and_excludes_sensitive_dirs() {
     assert_eq!(snippets[1].file_path, "uv.lock");
     assert_eq!(snippets[1].line, 4);
     assert!(snippets[1].snippet.contains("   4: [[package]"));
+    let compiler = extract_error_snippets(&wt, "src/app.py:11:5: error\nsrc/app.py:999:1: note");
+    assert_eq!(compiler.len(), 1);
+    assert_eq!(compiler[0].line, 11);
 }
 
 #[test]

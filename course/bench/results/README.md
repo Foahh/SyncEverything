@@ -27,6 +27,8 @@ uv run python course/eval/models/run_mcp_eval.py --daemon-bin target/debug/relay
 ### 2. Re-Generate All 4 Publication Figures (PNG + SVG + PDF)
 ```powershell
 uv run --with matplotlib --with numpy python course/bench/results/plot_figures.py
+# Or pin a specific Track 3 scoring cohort:
+# uv run --with matplotlib --with numpy python course/bench/results/plot_figures.py --model-scoring-version 3
 ```
 
 ### 3. Re-Run Live Experiments (Uses `.env` `RELAY_LLM_*` + Local 16K Ollama Aliases)

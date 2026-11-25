@@ -20,6 +20,12 @@
   ],
   "ground_truth_assertions": [
     {
+      "assertion_id": "host_patch_verified",
+      "description": "The Host records a smoke-verified patch for this task",
+      "metric_key": "proposal_smoke_verified",
+      "expected_value": true
+    },
+    {
       "assertion_id": "client_apply_conflict",
       "description": "Applying the approved diff to the dirty laptop checkout is rejected by Git",
       "metric_key": "conflict_apply_failed",

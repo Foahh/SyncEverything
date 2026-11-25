@@ -7,7 +7,9 @@ Usage (zero modifications to project pyproject.toml or Cargo.toml):
 
 from __future__ import annotations
 
+import argparse
 import csv
+import hashlib
 import json
 import statistics
 import sys
@@ -27,7 +29,7 @@ BENCH_DIR = BENCH_RESULTS.parent
 COURSE_ROOT = BENCH_DIR.parent
 REPO_ROOT = COURSE_ROOT.parent
 sys.path.insert(0, str(COURSE_ROOT / "eval"))
-from model_runs import load_model_runs
+from model_runs import latest_scoring_version, load_model_runs
 
 CHAOS_RESULTS = BENCH_DIR / "chaos-cases" / "results"
 MODEL_RESULTS = COURSE_ROOT / "eval" / "models" / "results"
@@ -85,6 +87,9 @@ def save_figure(fig: plt.Figure, stem: str) -> None:
         if ext == "png":
             kwargs["dpi"] = 300
         fig.savefig(out, **kwargs)
+        if ext == "svg":
+            lines = out.read_text(encoding="utf-8").splitlines()
+            out.write_text("\n".join(line.rstrip() for line in lines) + "\n", encoding="utf-8", newline="\n")
     plt.close(fig)
     print(f"[plot] Saved {stem}.{{png,svg,pdf}}", flush=True)
 
@@ -287,11 +292,18 @@ def plot_fig2_context_ablation() -> None:
     with scaling_path.open("r", encoding="utf-8") as fh:
         scaling_rows = list(csv.DictReader(fh))
     hashes = {(r["snapshot_id"], r["strategy"]): r["context_bundle_hash"] for r in scaling_rows}
+    inputs_bytes = (BENCH_RESULTS / "context_ablation_inputs.json").read_bytes()
+    inputs = json.loads(inputs_bytes)
+    inputs_hash = hashlib.sha256(inputs_bytes).hexdigest()
+    snapshots = {q["query_id"]: q["snapshot_id"] for q in inputs["queries"]}
     for line in (BENCH_RESULTS / "context_ablation_runs.jsonl").read_text(encoding="utf-8").splitlines():
         if line.strip():
             row = json.loads(line)
-            if row["context_bundle_hash"] != hashes[(row["snapshot_id"], row["strategy"])]:
-                raise ValueError("Figure 2 requires measurements and scaling rows from identical context bundles")
+            snapshot, strategy = snapshots[row["query_id"]], row["strategy"]
+            expected = inputs["snapshots"][snapshot]["bundles"][strategy]["context_bundle_hash"]
+            if (row["inputs_sha256"] != inputs_hash or row["snapshot_id"] != snapshot
+                    or row["context_bundle_hash"] != expected or hashes[snapshot, strategy] != expected):
+                raise ValueError("Figure 2 requires measurements and scaling rows from the same saved inputs")
 
     strat_order = ["full_transcript", "flat_summary", "dag_bundle"]
     strat_labels = {
@@ -419,12 +431,12 @@ def plot_fig2_context_ablation() -> None:
     save_figure(fig, "fig2_context_ablation")
 
 
-def plot_fig3_model_pareto() -> None:
+def plot_fig3_model_pareto(scoring_version: int) -> None:
     grouped: dict[str, list[dict[str, Any]]] = {}
-    for d in load_model_runs(MODEL_RESULTS):
+    for d in load_model_runs(MODEL_RESULTS, scoring_version):
         grouped.setdefault(str(d["model"]), []).append(d)
     if not grouped:
-        raise ValueError("Figure 3 requires live MCP evaluation results")
+        raise ValueError(f"Figure 3 requires live MCP evaluation results with scoring version {scoring_version}")
 
     order = [
         "qwen3.5:4b (no-think)",
@@ -482,11 +494,11 @@ def plot_fig3_model_pareto() -> None:
 
     # Custom explicit data coordinates + leader arrows to avoid any box collisions
     pos_p1 = {
-        "deepseek-flash": (18.5, 97.0, "left"),
-        "qwen3.5:4b (no-think)": (11.0, 29.0, "center"),
-        "qwen3.5:9b (no-think)": (28.5, 29.0, "center"),
-        "qwen3.5:4b": (24.5, 79.0, "center"),
-        "qwen3.5:9b": (37.5, 67.5, "center"),
+        "deepseek-flash": (6.2, 112.0, "center"),
+        "qwen3.5:9b (no-think)": (22.5, 112.0, "center"),
+        "qwen3.5:4b (no-think)": (7.2, 44.0, "center"),
+        "qwen3.5:4b": (15.5, 72.0, "center"),
+        "qwen3.5:9b": (25.0, 44.0, "center"),
     }
 
     for row in stats_rows:
@@ -524,19 +536,19 @@ def plot_fig3_model_pareto() -> None:
         )
 
     ax1.grid(True, which="both", axis="both", linestyle="--", alpha=0.35)
-    ax1.set_xlim(0, max(r["lat_m"] + r["lat_sd"] for r in stats_rows) * 1.16)
-    ax1.set_ylim(0, 108)
+    ax1.set_xlim(0, max(r["lat_m"] + r["lat_sd"] for r in stats_rows) * 1.18)
+    ax1.set_ylim(0, 120)
     ax1.set_xlabel("Median Scenario LLM Latency (s, Mean ± SD)")
     ax1.set_ylabel("Scenario Pass Rate (%, Mean ± SD)")
     ax1.set_title("(a) Latency vs. Task Success")
 
     # Panel (b): Tool Recall vs Latency + Stale Leakage Indicator
     pos_p2 = {
-        "deepseek-flash": (10.5, 102.8, "left"),
-        "qwen3.5:4b (no-think)": (9.5, 81.8, "center"),
-        "qwen3.5:9b (no-think)": (23.5, 86.2, "center"),
-        "qwen3.5:4b": (36.5, 98.0, "center"),
-        "qwen3.5:9b": (38.0, 81.8, "center"),
+        "deepseek-flash": (7.8, 112.0, "center"),
+        "qwen3.5:9b (no-think)": (23.2, 112.0, "center"),
+        "qwen3.5:4b (no-think)": (7.5, 73.0, "center"),
+        "qwen3.5:4b": (17.5, 50.0, "center"),
+        "qwen3.5:9b": (24.5, 73.0, "center"),
     }
     for row in stats_rows:
         m = row["model"]
@@ -572,8 +584,8 @@ def plot_fig3_model_pareto() -> None:
         )
 
     ax2.grid(True, which="both", axis="both", linestyle="--", alpha=0.35)
-    ax2.set_xlim(0, max(r["lat_m"] + r["lat_sd"] for r in stats_rows) * 1.16)
-    ax2.set_ylim(0, 106)
+    ax2.set_xlim(0, max(r["lat_m"] + r["lat_sd"] for r in stats_rows) * 1.18)
+    ax2.set_ylim(0, 120)
     ax2.set_xlabel("Median Scenario LLM Latency (s, Mean ± SD)")
     ax2.set_ylabel("Average MCP Tool Recall (%, Mean ± SD)")
     ax2.set_title("(b) Latency vs. Tool Recall & Stale Leakage")
@@ -723,13 +735,13 @@ def plot_fig4_chaos_self_healing() -> None:
         marker="D",
         markersize=7.0,
         linewidth=2.0,
-        label="Total Patch Retries (Right Axis)",
+        label="Tool Errors in Repair Cases (Right Axis)",
         zorder=5,
     )
-    retry_offsets = [(24, 20), (0, 14), (4, 18)]
+    retry_offsets = [(26, 22), (0, -36), (4, 22)]
     for rx, rt, ur, dr, off in zip(lx, total_retries, uv_retries, diff_retries, retry_offsets):
         ax2_r.annotate(
-            f"{rt} retries\n(uv={ur}, edit={dr})",
+            f"{rt} tool errors\n(C01={ur}, others={dr})",
             xy=(rx, rt),
             xytext=off,
             textcoords="offset points",
@@ -741,8 +753,8 @@ def plot_fig4_chaos_self_healing() -> None:
             arrowprops={"arrowstyle": "-", "color": OKABE["vermilion"], "lw": 0.8},
             zorder=10,
         )
-    ax2_r.set_ylim(-1.2, max(total_retries + [10]) * 1.40)
-    ax2_r.set_ylabel("Total Patch Retries (Count)", color=OKABE["vermilion"])
+    ax2_r.set_ylim(-1.2, max(total_retries + [10]) * 1.65)
+    ax2_r.set_ylabel("Tool Errors in Repair Cases", color=OKABE["vermilion"])
     ax2_r.tick_params(axis="y", colors=OKABE["vermilion"])
 
     h1, l1 = ax2.get_legend_handles_labels()
@@ -759,12 +771,21 @@ def plot_fig4_chaos_self_healing() -> None:
 
 
 def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--model-scoring-version",
+        type=int,
+        default=None,
+        help="Optional explicit Track 3 scoring_version cohort (defaults to the latest saved live cohort)",
+    )
+    args = parser.parse_args()
+    scoring_version = args.model_scoring_version or latest_scoring_version(MODEL_RESULTS)
     setup_rcparams()
     plot_fig1_baseline_comparison()
     plot_fig2_context_ablation()
-    plot_fig3_model_pareto()
+    plot_fig3_model_pareto(scoring_version)
     plot_fig4_chaos_self_healing()
-    print("[plot] All 4 publication figures generated cleanly.", flush=True)
+    print(f"[plot] All 4 publication figures generated cleanly (Track 3 cohort v{scoring_version}).", flush=True)
     return 0
 
 

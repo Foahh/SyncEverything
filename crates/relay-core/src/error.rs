@@ -40,6 +40,9 @@ pub enum RelayError {
         reason: String,
     },
 
+    #[error("evidence {0} is awaiting verification")]
+    UnverifiedEvidenceBlocked(String),
+
     #[error("git command failed: {0}")]
     Git(String),
 

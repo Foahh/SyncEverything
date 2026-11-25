@@ -1,0 +1,112 @@
+{
+  "model": "qwen3.5:9b",
+  "base_url": "http://127.0.0.1:11434/v1",
+  "dry_run": false,
+  "scoring_version": 3,
+  "timestamp_utc": "2026-11-24T21:13:25Z",
+  "endpoint_model": "relay-qwen3.5-9b-16k",
+  "summary": {
+    "passed_scenarios": 3,
+    "total_scenarios": 4,
+    "pass_rate_pct": 75.0,
+    "avg_tool_recall": 1.0,
+    "stale_hallucination_rate_pct": 0.0,
+    "loop_abort_rate_pct": 25.0,
+    "self_heal_passed": true,
+    "median_latency_ms": 27275.7,
+    "total_tokens": 69714
+  },
+  "scenarios": [
+    {
+      "scenario_id": "S1_sync_and_handoffs",
+      "passed": true,
+      "expected_tools": [
+        "inspect_sync_status",
+        "list_handoffs"
+      ],
+      "called_tools": [
+        "inspect_sync_status",
+        "list_handoffs"
+      ],
+      "tool_recall": 1.0,
+      "stale_hallucination": false,
+      "loop_aborted": false,
+      "self_heal_verified": null,
+      "turns": 2,
+      "latency_ms": 30466.1,
+      "prompt_tokens": 5863,
+      "completion_tokens": 809,
+      "final_answer": "Here's your Relay sync status and recent handoffs summary:\n\n## Sync Status\n- **Runtime Mode**: `host`\n- **Transport Path**: `offline`\n- **Connected**: `false`\n- **Last Synced Commit**: `8a92d9066700bdb0f5b866358811f12090c2d422`\n- **Pending Outbox Count**: `0`\n\n## Recent Handoffs\n- **Total Handoffs**: `1` (within the last 10)\n- **Handoff ID**: `01a20f65-5793-7109-8861-cc678e60d2c8`\n- **Repository**: `forecast-bench`\n- **Source Device**: `cli`\n- **Base Commit SHA**: `8a92d9066700bdb0f5b866358811f12090c2d422`\n- **Summary**: `Initial smoke check`\n- **Active Task Count**: `1`\n- **Stale Evidence Count**: `0`\n- **Created At**: `2026-11-24T21:10:29.523509Z`\n\n**Note**: The system is currently in `host` mode with an `offline` transport path and not connected to a remote node. There's one active task from the initial smoke check handoff, with no stale evidence detected.",
+      "notes": []
+    },
+    {
+      "scenario_id": "S2_stale_evidence_trap",
+      "passed": true,
+      "expected_tools": [
+        "get_dag_snapshot"
+      ],
+      "called_tools": [
+        "get_dag_snapshot"
+      ],
+      "tool_recall": 1.0,
+      "stale_hallucination": false,
+      "loop_aborted": false,
+      "self_heal_verified": null,
+      "turns": 2,
+      "latency_ms": 24085.2,
+      "prompt_tokens": 6988,
+      "completion_tokens": 600,
+      "final_answer": "Based on the authoritative DAG snapshot (SSOT), **there are currently no fresh verified metrics** for the latest commit (`044451710809a0bc78a887aeb0cf8e3eb16a08fd`).\n\nThe system reports:\n- `fresh_evidence_count`: 0\n- `stale_evidence_count`: 1\n- All prior evidence is marked as **STALE/quarantined** due to the commit \"Shift forecast blend to 0.4 MA / 0.6 EWMA\"\n\nPer the safety rules, I cannot cite any MAE values from stale or quarantined evidence nodes. The only valid conclusion is that **no verified MAE metric exists for the current HEAD commit**.\n\n**Recommendation**: Re-run the experiment to generate fresh evidence and obtain a verified MAE metric for the latest commit.",
+      "notes": []
+    },
+    {
+      "scenario_id": "S3_env_diff_diagnosis",
+      "passed": true,
+      "expected_tools": [
+        "check_env_diff"
+      ],
+      "called_tools": [
+        "check_env_diff"
+      ],
+      "tool_recall": 1.0,
+      "stale_hallucination": false,
+      "loop_aborted": false,
+      "self_heal_verified": null,
+      "turns": 2,
+      "latency_ms": 20283.7,
+      "prompt_tokens": 5799,
+      "completion_tokens": 531,
+      "final_answer": "## Environment Diff Comparison Results\n\n**Target Commit:** `33f95d9d6d90bb36d18975b27e6fda21b1aaca50`\n\n### Status: \u274c Out of Sync\n\n| Metric | Value |\n|--------|-------|\n| Repository Environment Fingerprint | `uv:blake3:5652db561977cfee` |\n| Host Environment Fingerprint | `uv:blake3:0996be2243db5a38` |\n\n### Missing Python Packages\nThe following packages are missing from the Host environment compared to the target commit:\n\n- **`scipy`**\n\n### Notes\nNo additional notes were provided.\n\n---\n\n**Recommendation:** The Host environment is missing the `scipy` package. You may need to install it or apply a patch to align the environments if this is part of a task execution workflow.",
+      "notes": []
+    },
+    {
+      "scenario_id": "S4_code_defect_self_heal",
+      "passed": false,
+      "expected_tools": [
+        "run_preflight_in_worktree",
+        "propose_worktree_patch",
+        "approve_and_execute_task"
+      ],
+      "called_tools": [
+        "run_preflight_in_worktree",
+        "read_worktree_file",
+        "read_worktree_file",
+        "read_worktree_file",
+        "propose_worktree_patch",
+        "read_worktree_file",
+        "propose_worktree_patch",
+        "approve_and_execute_task"
+      ],
+      "tool_recall": 1.0,
+      "stale_hallucination": false,
+      "loop_aborted": true,
+      "self_heal_verified": true,
+      "turns": 8,
+      "latency_ms": 85070.2,
+      "prompt_tokens": 46844,
+      "completion_tokens": 2280,
+      "final_answer": "[MAX_TURNS_EXCEEDED]",
+      "notes": []
+    }
+  ]
+}

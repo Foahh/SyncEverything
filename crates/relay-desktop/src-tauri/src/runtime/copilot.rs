@@ -38,7 +38,9 @@ pub(super) struct ChatTurn {
 
 // The lifecycle lock serializes send/clear/cancel. The worker never takes that lock.
 async fn finish_previous_turn(active: &mut Option<ChatTurn>) -> bool {
-    let Some(turn) = active.as_mut() else { return false };
+    let Some(turn) = active.as_mut() else {
+        return false;
+    };
     let was_running = !turn.worker.is_finished();
     turn.cancel.store(true, Ordering::Relaxed);
     if let Some(stop) = turn.stop_stream.take() {
@@ -150,9 +152,15 @@ impl DesktopRuntime {
         let turn_id = Uuid::now_v7().to_string();
         let initial = assistant_msg.clone();
         let worker = tokio::spawn(async move {
-            runtime.run_copilot_turn(turn_id, assistant_msg, worker_cancel, stopped).await;
+            runtime
+                .run_copilot_turn(turn_id, assistant_msg, worker_cancel, stopped)
+                .await;
         });
-        *active = Some(ChatTurn { cancel, stop_stream: Some(stop_stream), worker });
+        *active = Some(ChatTurn {
+            cancel,
+            stop_stream: Some(stop_stream),
+            worker,
+        });
 
         Ok(initial)
     }
@@ -179,12 +187,8 @@ impl DesktopRuntime {
         let llm = match LlmClient::new(llm_config, Duration::from_secs(90)) {
             Ok(client) => client,
             Err(error) => {
-                self.finish_turn_with_error(
-                    &turn_id,
-                    &mut assistant_msg,
-                    error.to_string(),
-                )
-                .await;
+                self.finish_turn_with_error(&turn_id, &mut assistant_msg, error.to_string())
+                    .await;
                 return;
             }
         };
@@ -200,7 +204,7 @@ impl DesktopRuntime {
         let tools = copilot_tool_definitions();
         let mut seen_calls: HashMap<String, u32> = HashMap::new();
 
-        'turns: for _turn_idx in 0..MAX_COPILOT_TURNS {
+        'turns: for turn_index in 0..MAX_COPILOT_TURNS {
             if cancel.load(Ordering::Relaxed) {
                 break;
             }
@@ -208,19 +212,18 @@ impl DesktopRuntime {
             let app_handle = self.app.clone();
             let turn_id_cb = turn_id.clone();
             let message_id_cb = message_id.clone();
-            let request = llm
-                .stream_chat_with_tools(&messages, &tools, &cancel, |delta| {
-                    let event = AgentChatStreamEvent {
-                        turn_id: turn_id_cb.clone(),
-                        message_id: message_id_cb.clone(),
-                        kind: "token_delta".into(),
-                        delta: Some(delta.to_owned()),
-                        trace: None,
-                        approval: None,
-                        error: None,
-                    };
-                    let _ = event.emit(&app_handle);
-                });
+            let request = llm.stream_chat_with_tools(&messages, &tools, &cancel, |delta| {
+                let event = AgentChatStreamEvent {
+                    turn_id: turn_id_cb.clone(),
+                    message_id: message_id_cb.clone(),
+                    kind: "token_delta".into(),
+                    delta: Some(delta.to_owned()),
+                    trace: None,
+                    approval: None,
+                    error: None,
+                };
+                let _ = event.emit(&app_handle);
+            });
             let streamed = tokio::select! {
                 biased;
                 _ = &mut stopped => break,
@@ -233,12 +236,8 @@ impl DesktopRuntime {
                     break;
                 }
                 Err(error) => {
-                    self.finish_turn_with_error(
-                        &turn_id,
-                        &mut assistant_msg,
-                        error.to_string(),
-                    )
-                    .await;
+                    self.finish_turn_with_error(&turn_id, &mut assistant_msg, error.to_string())
+                        .await;
                     return;
                 }
             };
@@ -268,11 +267,15 @@ impl DesktopRuntime {
                     })
                 })
                 .collect();
-            messages.push(json!({
+            let mut assistant_turn = json!({
                 "role": "assistant",
                 "content": if turn.content.is_empty() { Value::Null } else { Value::String(turn.content.clone()) },
                 "tool_calls": tool_calls_json,
-            }));
+            });
+            if let Some(fields) = assistant_turn.as_object_mut() {
+                fields.extend(turn.reasoning_fields);
+            }
+            messages.push(assistant_turn);
 
             let mut stop_for_approval = false;
             for call in turn.tool_calls {
@@ -350,15 +353,18 @@ impl DesktopRuntime {
                 messages.push(json!({
                     "role": "tool",
                     "tool_call_id": call.id,
-                    "content": truncate_preview(&outcome.output_json, 8000),
+                    "content": provider_tool_output(&call.name, &outcome.output_json),
                 }));
 
                 if let Some(card) = outcome.approval_card {
                     assistant_msg.approval = Some(card.clone());
                     if let Err(error) = self.engine.upsert_chat_message(&assistant_msg).await {
                         self.finish_turn_with_error(
-                            &turn_id, &mut assistant_msg, error.to_string(),
-                        ).await;
+                            &turn_id,
+                            &mut assistant_msg,
+                            error.to_string(),
+                        )
+                        .await;
                         return;
                     }
                     self.emit_chat_event(AgentChatStreamEvent {
@@ -371,6 +377,7 @@ impl DesktopRuntime {
                         error: None,
                     });
                     stop_for_approval = true;
+                    break;
                 }
             }
 
@@ -379,6 +386,10 @@ impl DesktopRuntime {
             if stop_for_approval {
                 assistant_msg.content = approval_turn_content(&assistant_msg.content);
                 break 'turns;
+            }
+            if turn_index + 1 == MAX_COPILOT_TURNS && !cancel.load(Ordering::Relaxed) {
+                assistant_msg.error =
+                    Some("The model reached the tool-call limit before finishing.".into());
             }
         }
 
@@ -459,12 +470,14 @@ impl DesktopRuntime {
             .collect();
 
         let workspace_ctx = format!(
-            "{COPILOT_SYSTEM_PROMPT}\n\n[ACTIVE WORKSPACE CONTEXT]\nrepo_id: {}\nname: {}\nruntime_mode: {:?}\nhead_commit_sha: {}\nstale_evidence_count: {}\nwhitelisted_presets: {}\nrecent_tasks: {}",
+            "{COPILOT_SYSTEM_PROMPT}\n\n[ACTIVE WORKSPACE CONTEXT]\nrepo_id: {}\nname: {}\nruntime_mode: {:?}\nhead_commit_sha: {}\nfresh_evidence_count: {}\nstale_evidence_count: {}\nmetric_authority_note: {}\nwhitelisted_presets: {}\nrecent_tasks: {}",
             workspace.repo_id,
             workspace.name,
             status.mode,
             snapshot.head_commit_sha.as_deref().unwrap_or("none"),
-            snapshot.stale_count,
+            snapshot.fresh_evidence_count,
+            snapshot.stale_evidence_count,
+            snapshot.metric_authority_note.as_deref().unwrap_or("none"),
             serde_json::to_string(&presets).unwrap_or_default(),
             serde_json::to_string(&active_tasks).unwrap_or_default(),
         );
@@ -474,10 +487,7 @@ impl DesktopRuntime {
             "content": workspace_ctx,
         })];
 
-        let history = self
-            .engine
-            .list_chat_messages(HISTORY_WINDOW + 2)
-            .await?;
+        let history = self.engine.list_chat_messages(HISTORY_WINDOW + 2).await?;
         for msg in history {
             if msg.id == exclude_message_id || msg.content.trim().is_empty() {
                 continue;
@@ -500,40 +510,41 @@ impl DesktopRuntime {
         raw_args: &str,
         cancel: &AtomicBool,
     ) -> ToolExecOutcome {
-        let parsed_args: Value = serde_json::from_str(raw_args).unwrap_or_else(|_| json!({}));
+        let parsed_args: Value = match serde_json::from_str(raw_args) {
+            Ok(args @ Value::Object(_)) => args,
+            Ok(_) => return err_outcome("Tool arguments must be a JSON object.".into()),
+            Err(error) => return err_outcome(format!("Invalid tool arguments: {error}")),
+        };
 
         match name {
             "inspect_sync_status" => ok_json(&self.status().await),
-            "list_handoffs" => {
-                let args: ListHandoffsArgs =
-                    serde_json::from_value(parsed_args).unwrap_or(ListHandoffsArgs { limit: Some(10) });
-                result_json(self.mcp.handle_list_handoffs(args).await)
-            }
-            "check_env_diff" => {
-                let commit_sha = parsed_args
-                    .get("commit_sha")
-                    .and_then(Value::as_str)
-                    .filter(|s| !s.trim().is_empty())
-                    .unwrap_or("HEAD")
-                    .to_owned();
-                result_json(
-                    self.mcp
-                        .handle_check_env_diff(CheckEnvDiffArgs { commit_sha })
-                        .await,
-                )
-            }
-            "get_dag_snapshot" => result_json(
-                self.mcp
-                    .handle_get_dag_snapshot(GetDagSnapshotArgs {})
-                    .await,
-            ),
-            "read_evidence_log" => match serde_json::from_value::<ReadEvidenceLogArgs>(parsed_args) {
+            "list_handoffs" => match serde_json::from_value::<ListHandoffsArgs>(parsed_args) {
+                Ok(args) => result_json(self.mcp.handle_list_handoffs(args).await),
+                Err(error) => err_outcome(format!("Invalid arguments: {error}")),
+            },
+            "check_env_diff" => match serde_json::from_value::<CheckEnvDiffArgs>(parsed_args) {
+                Ok(args) => result_json(self.mcp.handle_check_env_diff(args).await),
+                Err(error) => err_outcome(format!("Invalid arguments: {error}")),
+            },
+            "get_dag_snapshot" => match serde_json::from_value::<GetDagSnapshotArgs>(parsed_args) {
+                Ok(args) => result_json(self.mcp.handle_get_dag_snapshot(args).await),
+                Err(error) => err_outcome(format!("Invalid arguments: {error}")),
+            },
+            "read_evidence_log" => match serde_json::from_value::<ReadEvidenceLogArgs>(parsed_args)
+            {
                 Ok(args) => result_json(self.mcp.handle_read_evidence_log(args).await),
                 Err(error) => err_outcome(format!("Invalid arguments: {error}")),
             },
             "run_preflight_in_worktree" => {
                 match serde_json::from_value::<RunPreflightArgs>(parsed_args) {
-                    Ok(args) => result_json(self.mcp.handle_run_preflight(args).await),
+                    Ok(args) => match self.mcp.handle_run_preflight(args).await {
+                        Ok(report) => ToolExecOutcome {
+                            ok: report.smoke_passed,
+                            mutated_graph: true,
+                            ..ok_json(&report)
+                        },
+                        Err(error) => err_outcome(error.to_string()),
+                    },
                     Err(error) => err_outcome(format!("Invalid arguments: {error}")),
                 }
             }
@@ -554,26 +565,12 @@ impl DesktopRuntime {
                 }
             }
             "approve_and_execute_task" => {
-                let task_id = match parsed_args.get("task_id").and_then(Value::as_str) {
-                    Some(id) if !id.trim().is_empty() => id.to_owned(),
-                    _ => return err_outcome("Missing required 'task_id' argument".into()),
+                let mut args = match serde_json::from_value::<ApproveAndExecuteArgs>(parsed_args) {
+                    Ok(args) => args,
+                    Err(error) => return err_outcome(format!("Invalid arguments: {error}")),
                 };
-                let patch_id = parsed_args
-                    .get("patch_id")
-                    .and_then(Value::as_str)
-                    .map(str::to_owned);
-                match self
-                    .mcp
-                    .handle_approve_and_execute(
-                        ApproveAndExecuteArgs {
-                            task_id,
-                            patch_id,
-                            approved_via_ui: Some(false),
-                        },
-                        None,
-                    )
-                    .await
-                {
+                args.approved_via_ui = Some(false);
+                match self.mcp.handle_approve_and_execute(args, None).await {
                     Ok(resp @ ApprovalExecutionResponse::ApprovalRequired { .. }) => {
                         let card = match &resp {
                             ApprovalExecutionResponse::ApprovalRequired {
@@ -641,12 +638,7 @@ impl DesktopRuntime {
                     ));
                 }
             }
-        } else if !self
-            .workspace
-            .presets
-            .iter()
-            .any(|p| p.name == args.preset)
-        {
+        } else if !self.workspace.presets.iter().any(|p| p.name == args.preset) {
             return err_outcome(format!("Unknown preset '{}'", args.preset));
         }
 
@@ -657,7 +649,9 @@ impl DesktopRuntime {
                 .unwrap_or_else(|_| "HEAD".to_owned())
         } else {
             match self.engine.dag_snapshot(true).await {
-                Ok(snapshot) => snapshot.head_commit_sha.unwrap_or_else(|| "HEAD".to_owned()),
+                Ok(snapshot) => snapshot
+                    .head_commit_sha
+                    .unwrap_or_else(|| "HEAD".to_owned()),
                 Err(error) => return err_outcome(error.to_string()),
             }
         };
@@ -686,10 +680,12 @@ impl DesktopRuntime {
                 if cancel.load(Ordering::Relaxed) {
                     break;
                 }
-                if awaiting_clean_run_approval(&latest) || !matches!(
-                    latest.state,
-                    TaskState::Queued | TaskState::PreflightRunning
-                ) {
+                if awaiting_clean_run_approval(&latest)
+                    || !matches!(
+                        latest.state,
+                        TaskState::Queued | TaskState::PreflightRunning
+                    )
+                {
                     break;
                 }
                 sleep(Duration::from_millis(250)).await;
@@ -700,13 +696,16 @@ impl DesktopRuntime {
         }
 
         let approval_card = if latest.state == TaskState::SelfHealingProposed {
-            latest.active_proposal.as_ref().map(|proposal| AgentApprovalCard {
-                task_id: latest.spec.task_id.to_string(),
-                patch_id: Some(proposal.patch_id.clone()),
-                summary: proposal.summary.clone(),
-                diff_preview: proposal.diff_preview.clone(),
-                resolved: None,
-            })
+            latest
+                .active_proposal
+                .as_ref()
+                .map(|proposal| AgentApprovalCard {
+                    task_id: latest.spec.task_id.to_string(),
+                    patch_id: Some(proposal.patch_id.clone()),
+                    summary: proposal.summary.clone(),
+                    diff_preview: proposal.diff_preview.clone(),
+                    resolved: None,
+                })
         } else if awaiting_clean_run_approval(&latest) {
             Some(AgentApprovalCard {
                 task_id: latest.spec.task_id.to_string(),
@@ -730,7 +729,9 @@ impl DesktopRuntime {
     async fn tool_record_decision(&self, parsed_args: Value) -> ToolExecOutcome {
         let args: RecordDecisionToolArgs = match serde_json::from_value(parsed_args) {
             Ok(args) => args,
-            Err(error) => return err_outcome(format!("Invalid record_decision arguments: {error}")),
+            Err(error) => {
+                return err_outcome(format!("Invalid record_decision arguments: {error}"));
+            }
         };
         let label = args.label.trim().to_owned();
         let rationale = args.rationale.trim().to_owned();
@@ -865,6 +866,26 @@ fn approval_turn_content(content: &str) -> String {
     } else {
         content.to_owned()
     }
+}
+
+fn provider_tool_output(tool: &str, raw: &str) -> String {
+    if raw.chars().nth(8000).is_none() {
+        return raw.to_owned();
+    }
+    let mut result = json!({ "truncated": true, "preview": truncate_preview(raw, 7200) });
+    if tool == "get_dag_snapshot"
+        && let Ok(snapshot) = serde_json::from_str::<Value>(raw)
+    {
+        for key in [
+            "head_commit_sha",
+            "fresh_evidence_count",
+            "stale_evidence_count",
+            "metric_authority_note",
+        ] {
+            result[key] = snapshot[key].clone();
+        }
+    }
+    result.to_string()
 }
 
 fn truncate_preview(raw: &str, max_chars: usize) -> String {

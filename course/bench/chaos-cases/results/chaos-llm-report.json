@@ -1,7 +1,7 @@
 {
   "suite": "relay-track4-chaos-llm",
   "mode": "llm",
-  "generated_at": "2026-11-24T13:42:02+0800",
+  "generated_at": "2026-11-25T05:24:40+0800",
   "daemon_bin": "target\\debug\\relay-daemon.exe",
   "python": "3.14.7",
   "model": "deepseek-flash",
@@ -14,6 +14,7 @@
     "list_handoffs",
     "propose_worktree_patch",
     "read_evidence_log",
+    "read_worktree_file",
     "run_preflight_in_worktree"
   ],
   "summary": {
@@ -25,11 +26,11 @@
     "self_heal_total": 4,
     "self_heal_rate_pct": 100.0,
     "avg_tool_recall": 1.0,
-    "total_retries": 0,
+    "total_retries": 3,
     "stale_hallucination_count": 0,
-    "total_tokens": 299127,
-    "median_llm_latency_ms": 14698.0,
-    "mcp_tools_covered_count": 8
+    "total_tokens": 363970,
+    "median_llm_latency_ms": 10524.0,
+    "mcp_tools_covered_count": 9
   },
   "cases": [
     {
@@ -38,7 +39,7 @@
       "fault_kind": "missing_dependency",
       "passed": true,
       "self_heal_passed": true,
-      "duration_ms": 21712.1,
+      "duration_ms": 38403.3,
       "expected_tool_trace": [
         "check_env_diff",
         "run_preflight_in_worktree",
@@ -47,6 +48,7 @@
       ],
       "called_tools": [
         "inspect_sync_status",
+        "list_handoffs",
         "get_dag_snapshot",
         "check_env_diff",
         "run_preflight_in_worktree",
@@ -54,24 +56,24 @@
         "approve_and_execute_task",
         "approve_and_execute_task",
         "get_dag_snapshot",
-        "read_evidence_log",
-        "list_handoffs"
+        "read_evidence_log"
       ],
       "local_tools": [
         "list_repo_files",
         "read_repo_file",
+        "read_repo_file",
         "read_repo_file"
       ],
       "tool_recall": 1.0,
-      "turns": 10,
+      "turns": 9,
       "retries": 0,
       "loop_aborted": false,
       "stale_hallucination": false,
-      "prompt_tokens": 55768,
-      "completion_tokens": 2200,
-      "total_tokens": 57968,
-      "latency_ms": 17202.7,
-      "final_answer": "The 3-window grid experiment completed and its evidence is fresh. Here's the verified outcome.\n\n## Best MAE: **2.16502** (window = 28)\n\n| Window | MAE | RMSE |\n|---|---|---|\n| 7 | 2.42358 | 2.82267 |\n| 14 | 2.78647 | 3.23089 |\n| **28** | **2.16502** | **2.56794** |\n\n- **Preset / mode:** `train_grid` / `grid`, alpha = 0.35, elapsed 1.42 ms\n- **Evidence node:** `evidence:01a20c10-be13-7762-bc4f-12ed239a1ea5` \u2014 freshness **fresh**, `stale_count: 0`\n- **Provenance:** `produced_from` artifact `c290e8f7562b03e7744d70c037f8ecfecbf715c1` (active HEAD), so these metrics are validated against the current code\n- **Log blob hash:** `ca7f7754\u202601a763`\n- Note: window 14 is worse than window 7, so the relationship is non-monotonic \u2014 but 28 is the clear winner on both MAE and RMSE.\n\n## What was required to get there\n\nThe smoke preflight failed with `ModuleNotFoundError: No module named 'tiny_stats'` (exit 1). Root cause: `src/forecast.py:132` imports `tiny_stats` at module scope, but `pyproject.toml` declared `dependencies = []`.\n\nRather than hitting a package index (the host runs `UV_OFFLINE=1`), I used the vendored wheel found via `list_repo_files`:\n\n- **Patch id:** `01a20c10-e022-7183-8ebf-8b88c772a253` (`uv_spec`, `smoke_verified: true`)\n- `./vendor/tiny_stats-0.1.0-py3-none-any.whl` \u2192 added as `tiny-stats` plus `[tool.uv.sources]` path override; `uv.lock` regenerated (`sha256:195d17bc\u2026415da4c`)\n- Env parity before the run: `check_env_diff` reported `in_sync: true`, no missing packages\n- Human approval gate respected: first call returned `approval_required`, then execution proceeded on your UI approval, running on branch `relay/worktree/bc4f12ed239a1ea5`\n\n## One caveat on the \"hand off to Windows host\" framing\n\nTwo things worth flagging rather than glossing over:\n\n1. **Sync is offline.** `inspect_sync_status` shows `mode: host`, `transport_path: offline`, `connected: false`, `remote_node_id: null`, `pending_outbox_count: 0`. So nothing crossed the wire to a peer device.\n2. **The run executed locally on this Windows host.** The worktree paths (`~\\...`) and `device_origin: \"local\"` on the evidence node confirm this machine is the Windows host itself. The handoff record `01a20c10-be13-7762-bc4f-12ed239a1ea5` exists (source `cli`, base commit `c290e8f7`), but with transport offline it has not propagated to any other device.\n\nSo the task is genuinely done and the metrics are trustworthy \u2014 but it was an in-place local execution, not a verified cross-device transfer. If you specifically need the result to land on a *separate* Windows machine, connectivity needs restoring first; I'd want to confirm that rather than assume the numbers are visible where you need them.",
+      "prompt_tokens": 65263,
+      "completion_tokens": 2303,
+      "total_tokens": 67566,
+      "latency_ms": 15720.5,
+      "final_answer": "The `train_grid` experiment ran and its evidence node is **fresh** for the current HEAD.\n\n## Verified outcome (SSOT: `get_dag_snapshot`, node `evidence:01a20f6f-...`)\n\n- **Fresh evidence:** `fresh_evidence_count = 1`, `stale_evidence_count = 0`, no `metric_authority_note` \u2192 these numbers are authoritative for HEAD `4818640`.\n- **Preset:** `train_grid` (`--windows 7,14,28`), `alpha = 0.35`, `mode = grid`, `elapsed_ms = 3.78`\n\n| Window | MAE | RMSE |\n|---|---|---|\n| 7 | 2.42358 | 2.82267 |\n| 14 | 2.78647 | 3.23089 |\n| **28** | **2.16502** | **2.56794** |\n\n**Best MAE = 2.16502 at window 28** (lowest of the three; window 14 was worst).\n\n## What happened along the way\n\n1. **Smoke preflight failed** \u2014 `ModuleNotFoundError: No module named 'tiny_stats'` at `src/forecast.py:132`. Root cause: the module-scope `import tiny_stats` was undeclared, and `check_env_diff` reported `in_sync: true, missing_packages: []` precisely because nothing was declared in `pyproject.toml`/`uv.lock` \u2014 so the fingerprint check could not see it.\n2. **Self-healed with a `uv_spec` patch** \u2192 `./vendor/tiny_stats-0.1.0-py3-none-any.whl` (the repo's own deterministic wheel). Diff shown: `dependencies = [\"tiny-stats\"]` + `[tool.uv.sources]` path entry + lockfile package stanza pinned to `sha256:195d17bc\u2026`. Offline-safe: no index access, wheel installed in 57 ms under `UV_OFFLINE=1`.\n3. **Approval gate honored** \u2014 first `approve_and_execute_task` call returned `approval_required` (patch_id `01a20f6f-4f00-7699-af12-ecce2672a32e`); executed only after your UI approval with `approved_via_ui=true`.\n\n## \u26a0\ufe0f Two caveats on the \"hand off to the Windows host\" part\n\n- **This run is not a Windows host execution.** `inspect_sync_status` shows `mode: host`, `connected: false`, `transport_path: offline`, `remote_node_id: null`, `pending_outbox_count: 0`. The evidence node's `device_origin` is `local` and it ran in a local worktree. There is **no verified cross-device transfer** \u2014 nothing was delivered to a Windows peer, and the outbox is empty because no sync link exists. The evidence verifies the 3-window grid result, not a handoff.\n- **The repo's static text is not evidence.** `README.md` (line 22) and `results/calibration-latest.txt` state `best_mae = 2.16502` / `best_window = 28`. That value coincidentally matches today's fresh run, but I am citing it **only** from the DAG node \u2014 committed text and log files are never valid metrics for current HEAD.\n\nTo actually complete the handoff, the Windows host needs to be reachable (P2P connected, outbox drained). I can re-check `inspect_sync_status` on request, but the queued task is now done and its evidence is fresh.",
       "metrics": {
         "detected_missing_module": "tiny_stats",
         "proposal_smoke_verified": true,
@@ -142,30 +144,25 @@
       "fault_kind": "upstream_code_edit",
       "passed": true,
       "self_heal_passed": null,
-      "duration_ms": 17868.5,
+      "duration_ms": 20752.9,
       "expected_tool_trace": [
         "get_dag_snapshot"
       ],
       "called_tools": [
         "get_dag_snapshot",
-        "inspect_sync_status"
+        "list_handoffs"
       ],
-      "local_tools": [
-        "list_repo_files",
-        "read_repo_file",
-        "read_repo_file",
-        "read_repo_file"
-      ],
+      "local_tools": [],
       "tool_recall": 1.0,
-      "turns": 4,
+      "turns": 3,
       "retries": 0,
       "loop_aborted": false,
       "stale_hallucination": false,
-      "prompt_tokens": 17278,
-      "completion_tokens": 2160,
-      "total_tokens": 19438,
-      "latency_ms": 13957.6,
-      "final_answer": "## Answer: **no results are valid for the current code \u2014 everything in the DAG is STALE**\n\n### What the DAG shows at HEAD `07e1afe1`\n\n| Node | Kind | Freshness |\n|---|---|---|\n| `artifact:07e1afe1\u2026` \u2014 \"change default smoothing alpha after the host run\" (changed: `src/forecast.py`) | artifact | \u2705 fresh (HEAD) |\n| `artifact:b9f278a4\u2026` \u2014 \"initialize forecast fixture\" | artifact | \u2705 fresh (superseded by `07e1afe1`) |\n| `evidence:01a20c11-1266-76af-a53a-3660b20cdccf` \u2014 `train_grid` result | evidence | \u274c **STALE** |\n\n`stale_count = 1`, and the only evidence node in the graph is the stale one. It is stale with:\n\n- `caused_by`: `artifact:07e1afe1\u2026` (your smoothing-default commit)\n- `edges`: `b9f278a4 \u2192 produced_from \u2192 evidence:01a20c11` (i.e. it was produced from the *pre-change* code), and `07e1afe1 \u2192 supersedes \u2192 b9f278a4`\n\nSo there is **zero verified evidence attributable to the current commit**. I did not call `read_evidence_log` on that node \u2014 it's STALE, so the read would (correctly) be refused, and its recorded numbers are not citable as results for the new code.\n\n### Why the grid run was invalidated (root cause confirmed in code)\n\n`relay.toml` \u2192 `[presets.train_grid]` runs:\n```\nuv run python src/forecast.py --windows 7,14,28\n```\nIt passes **no `--alpha`**, so the run inherits the argparse default in `src/forecast.py:108`:\n```python\nparser.add_argument(\"--alpha\", type=float, default=0.5, help=\"EWMA smoothing factor\")\n```\n`alpha` flows straight through `run_sweep(...)` into `evaluate_window(...)` and changes `ewma` at line 36, hence MAE/RMSE for every window. Your commit moved that default (the stale run was recorded at the old default), so **every grid row and the `best_window` / `best_mae` pick are invalid at HEAD** \u2014 re-running `train_grid` now would use the new default and is not guaranteed to reproduce the old ordering.\n\n### Caveats about the other artifacts\n\n- `results/calibration-latest.txt` is **not evidence**. It's a static fixture file committed in `b9f278a4` (the superseded artifact); its `grid:` line reflects the *old* default. Don't use it as a current result. The `alpha sweep:` line is a different story \u2014 see below.\n- `alpha_sweep` (`--alphas 0.2,0.35,0.5`) passes alphas **explicitly**, and `run_alpha_sweep` takes `alphas` as a required argument with no default. That code path is therefore *semantically insensitive* to the default change. But note: **there is no evidence node for `alpha_sweep` in the DAG at all**, so nothing from it has been verified \u2014 it is merely not invalidated by construction, not \"valid.\"\n\n### Sync health (for context)\n\n`mode=host`, `transport_path=offline`, `connected=false`, `last_synced_commit=07e1afe1\u2026` (== HEAD), `pending_outbox_count=0`. The staleness is **not** a sync gap \u2014 the new artifact propagated fine and the invalidation is working as designed.\n\n### To get valid numbers again\n\nQueue a fresh task at `07e1afe1` and run the preset through the gate \u2014 e.g. re-run `train_grid` (now at alpha 0.5), and optionally `alpha_sweep` to see whether the optimum alpha/window pairing still holds. Want me to do that? I'd start with `run_preflight_in_worktree` on the new task and stop at the approval gate before executing.",
+      "prompt_tokens": 11487,
+      "completion_tokens": 981,
+      "total_tokens": 12468,
+      "latency_ms": 6681.2,
+      "final_answer": "## Answer: No results are valid for the new code \u2014 the entire grid run must be re-executed\n\n**Current HEAD:** `cffe8a05e40a12d89847fbfc9539ecba94247174` \u2014 *\"feat(bench): change default smoothing alpha after the host run\"*\n\n### What the DAG (SSOT) says\n\n| Node | Commit / Origin | Freshness |\n|---|---|---|\n| `artifact:cffe8a05\u2026` \u2014 smoothing-alpha default change (`src/forecast.py`) | HEAD `cffe8a05` | **fresh** (code artifact, not metrics) |\n| `artifact:f4bf7a49\u2026` \u2014 initialize forecast fixture | base `f4bf7a49` | **fresh** (code artifact, not metrics) |\n| `evidence:01a20f6f\u2026` \u2014 `train_grid` result (task `01a20f6f-92f3-7079-ad8e-8709e12ae972`) | produced from `f4bf7a49`, device `local` | **STALE / quarantined** |\n\n- `fresh_evidence_count = 0`\n- `stale_evidence_count = 1`\n- The single evidence node carries `metrics_json: {\"quarantined\": true, \"reason\": \"stale_evidence_metrics_redacted\"}` \u2014 and `metric_authority_note` is present.\n\n### Why the grid results are stale\n\nThe `train_grid` evidence was produced from the **previous** artifact `f4bf7a49`. The edge set shows HEAD `cffe8a05` **supersedes** `f4bf7a49`, and the evidence node records `caused_by: artifact:cffe8a05\u2026` with reason *\"Git commit cffe8a0: feat(bench): change default smoothing alpha after the host run\"*. Because your change touched `src/forecast.py` \u2014 the file that defines the smoothing alpha that the grid sweeps \u2014 every number in that run was computed under the old default. It cannot be attributed to the new code.\n\n### What I will not do\n\nI can't quote the previous grid's numbers for you. They are redacted in the snapshot, and I won't substitute the values from `results/calibration-latest.txt`, the raw log tail, or the handoff note \u2014 those are historical text artifacts, not verified evidence for HEAD, and the snapshot explicitly forbids using them as current metrics. I also did not retry `read_evidence_log` on the stale node, since it deterministically blocks stale evidence.\n\n### Recommendation\n\nRe-run the grid on the new code to produce fresh evidence:\n\n1. Preflight in an isolated worktree to confirm the workspace still passes smoke with the new default.\n2. Execute the `train_grid` preset at HEAD `cffe8a05` so a new evidence node is created under the current artifact.\n3. Only after `fresh_evidence_count \u2265 1` with `freshness.status: fresh` at `cffe8a05` should any grid metrics be cited.\n\nIf you queue the task, tell me the new task ID (or hand me the preset to run) and I'll drive it through preflight \u2192 patch-if-needed \u2192 approval gate. Note that a changed default alpha may also shift what counts as a \"pass\" in the calibration check, so it's worth confirming whether `scripts/verify_calibration.py` and `results/calibration-latest.txt` need a corresponding update \u2014 but I'd only treat that file as a *baseline to refresh*, never as valid HEAD evidence.",
       "metrics": {
         "task_state_final": "completed",
         "evidence_count": 1,
@@ -217,7 +214,7 @@
       "fault_kind": "same_line_conflict",
       "passed": true,
       "self_heal_passed": true,
-      "duration_ms": 27147.7,
+      "duration_ms": 39896.8,
       "expected_tool_trace": [
         "run_preflight_in_worktree",
         "propose_worktree_patch",
@@ -225,7 +222,11 @@
       ],
       "called_tools": [
         "inspect_sync_status",
+        "get_dag_snapshot",
+        "list_handoffs",
         "run_preflight_in_worktree",
+        "check_env_diff",
+        "read_worktree_file",
         "propose_worktree_patch",
         "approve_and_execute_task",
         "approve_and_execute_task",
@@ -233,21 +234,20 @@
         "read_evidence_log"
       ],
       "local_tools": [
-        "read_repo_file",
         "list_repo_files",
         "read_repo_file",
         "read_repo_file"
       ],
       "tool_recall": 1.0,
-      "turns": 9,
+      "turns": 10,
       "retries": 0,
       "loop_aborted": false,
       "stale_hallucination": false,
-      "prompt_tokens": 55932,
-      "completion_tokens": 3224,
-      "total_tokens": 59156,
-      "latency_ms": 23111.8,
-      "final_answer": "## Done \u2014 patched run executed and verified\n\n**Approval gate:** first call surfaced `approval_required` (patch `01a20c11-8861-76cf-a223-7e6c92245519`); after your UI approval, re-issued with `approved_via_ui=true` \u2192 `execution_started` on worktree branch `relay/worktree/86e236675d5ebcda`.\n\n**Patch (verified, smoke then grid):**\n- `src/forecast.py:108` \u2014 `--alpha` `default=0.35` \u2192 `default=0.45`\n- Smoke preflight in worktree: passed (`alpha: 0.45`, best_mae 2.29667 on window 7)\n- `train_grid` executed \u2192 `outcome: execution_started`, evidence node `evidence:01a20c11-57fa-769b-86e2-36675d5ebcda`\n\n**Verified metrics (DAG node freshness: `fresh`, `stale_count: 0`):**\n| window | MAE | RMSE |\n|---|---|---|\n| 7 | 2.26463 | 2.65654 |\n| 14 | 2.60309 | 3.03289 |\n| 28 | 1.99091 | 2.37910 |\n\nBest: window 28, MAE **1.99091**, alpha **0.45**, elapsed 1.28 ms. Produced from artifact `8e19a3f5fd5276869e088e6bfb2f783dd575a913`.\n\n## On your actual question \u2014 \"is it safe?\"\n\n**Safe, but be clear about what it does *not* include.** Both are true at once:\n\n1. **Your working tree is untouched.** The run happened in an isolated worktree; the artifact node records `working_tree_dirty: false` and the patch only exists on branch `relay/worktree/86e236675d5ebcda`. No stash, no checkout, no overwrite of your uncommitted edit.\n2. **Your uncommitted tweak was *not* part of this run.** The worktree is based on committed HEAD `8e19a3f5`, cleaned to the committed content (preflight ran at `alpha: 0.35` before my patch, proving your local value was absent). So the numbers above reflect **0.35 \u2192 0.45 from HEAD**, not whatever alpha you locally changed it to. If your tweak was, e.g., `0.4` or `0.5`, these metrics do not describe your code.\n\n**One warning worth flagging:** this is a same-line situation. Your uncommitted edit and this patch both land on line 108, so if you later adopt this patch (via `patch_id 01a20c11-8861-76cf-a223-7e6c92245519` or by merging the worktree branch), git will conflict on exactly that line \u2014 resolve it manually and re-run; don't let either value silently win.\n\n**Sync note:** `inspect_sync_status` shows mode `host`, transport `offline`, `connected: false`, `pending_outbox_count: 0`. The evidence node is `device_origin: local`, so if you're pulling this from another device, the record may not have propagated off the host yet.",
+      "prompt_tokens": 76534,
+      "completion_tokens": 3027,
+      "total_tokens": 79561,
+      "latency_ms": 19389.8,
+      "final_answer": "## Done \u2014 patched run executed and verified\n\n**Task** `01a20f6f-e86c-71c4-adca-012b4d176781` \u00b7 **Patch** `01a20f70-3045-71d2-9dcc-3140e699410f` \u00b7 **Base HEAD** `fd7da2a` (`uv:blake3:a1d5417e68ea552e`, in sync)\n\n### Short answer to your question: yes, *mostly* \u2014 but not as validation of your local tweak\n\n- \u2705 **Safe in the sense that it cannot destroy your work.** The run happened in the isolated worktree/branch `relay/worktree/adca012b4d176781`. Your main working tree was never written to, so your uncommitted alpha tweak stays intact.\n- \u26a0\ufe0f **The evidence does not include your tweak.** The worktree is cut from HEAD `fd7da2a`, and the artifact node for that commit records `working_tree_dirty: false`. So this evidence attests to **alpha = 0.45 from the host patch**, not to your local variant.\n- \u26a0\ufe0f **Same-line collision ahead.** The patch touches `src/forecast.py:108` \u2014 the `--alpha` default line. If your uncommitted tweak edits that same line, merging/applying the host patch into your working tree will conflict. Take the *metrics* from this run; don't expect the patch to slot in cleanly next to your edit.\n- Note: I can't confirm your uncommitted edit's contents from the host snapshot (it reports a clean tree at HEAD), so the above is based on the worktree isolation boundary, not on inspection of your local diff.\n\n### What was executed\n| Step | Result |\n|---|---|\n| `run_preflight_in_worktree` (pre-patch) | \u2705 passed, exit 0, smoke `alpha: 0.35`, best_mae 2.46437 |\n| `read_worktree_file` `src/forecast.py:100-126` | confirmed line 108 verbatim |\n| `propose_worktree_patch` (file_edits, 1 line) | \u2705 smoke re-verified at `alpha: 0.45` |\n| `approve_and_execute_task` (no UI flag) | \u23f8 `approval_required` \u2014 gate respected |\n| `approve_and_execute_task` (`approved_via_ui=true`) | \u25b6 `execution_started` |\n\n```diff\n-    parser.add_argument(\"--alpha\", type=float, default=0.35, help=\"EWMA smoothing factor\")\n+    parser.add_argument(\"--alpha\", type=float, default=0.45, help=\"EWMA smoothing factor\")\n```\n\n### Verified metrics \u2014 `evidence:01a20f6f-...` (**fresh**, `fresh_evidence_count: 1`, `metric_authority_note: null`)\n`train_grid`, alpha **0.45**, elapsed 3.2 ms:\n\n| window | MAE | RMSE |\n|---|---|---|\n| 7 | 2.26463 | 2.65654 |\n| 14 | 2.60309 | 3.03289 |\n| **28 (best)** | **1.99091** | **2.3791** |\n\nCross-checked against the raw log tail (`log_blob_hash 56bc4d15\u2026`) \u2014 the JSON matches the DAG metrics, and the run is linked to HEAD by a `produced_from` edge.\n\n**If you want your own tweak measured:** commit it (or let Relay run preflight on a worktree that includes it) and re-run `train_grid` \u2014 that would supersede this node as evidence for your variant.",
       "metrics": {
         "conflict_apply_failed": true,
         "client_edit_preserved": true,
@@ -299,7 +299,7 @@
       "fault_kind": "mid_run_disconnect",
       "passed": true,
       "self_heal_passed": null,
-      "duration_ms": 24148.2,
+      "duration_ms": 39832.0,
       "expected_tool_trace": [
         "run_preflight_in_worktree",
         "inspect_sync_status",
@@ -321,11 +321,11 @@
       "retries": 0,
       "loop_aborted": false,
       "stale_hallucination": false,
-      "prompt_tokens": 24444,
-      "completion_tokens": 1685,
-      "total_tokens": 26129,
-      "latency_ms": 12735.7,
-      "final_answer": "## Outcome: task was **not lost** \u2014 full recovery, run completed \u2705\n\n**1. Recovery (state survived the disconnect)**\n- `inspect_sync_status`: mode `host`, last synced commit `4f365a0\u2026`, **pending_outbox_count = 0** \u2192 nothing was dropped mid-flight. Transport path is still `offline` (peer connection down), but the host daemon restarted cleanly and owns the task locally.\n- `list_handoffs`: handoff `01a20c11-\u2026` on `forecast-bench` at base commit `4f365a0\u2026` with **1 active task** and **0 stale evidence**.\n\n**2. Preflight (resumed, no patch needed)**\n- `run_preflight_in_worktree` \u2192 `smoke_passed: true`, exit code 0, branch `relay/worktree/9b64c8b7ba8c1a64`. No missing modules, no traceback, so `propose_worktree_patch` was unnecessary.\n\n**3. Approval gate**\n- First call correctly returned `approval_required` (\"Approve running preset `train_grid`\", no diff). Re-run with `approved_via_ui=true` after your UI approval \u2192 `execution_started`.\n\n**4. Verified result (FRESH evidence node)**\nDAG snapshot: `head_commit_sha 4f365a0\u2026`, `stale_count: 0`, node `evidence:01a20c11-\u2026` freshness = **fresh**, linked to artifact `4f365a0\u2026` via `produced_from` (artifact `working_tree_dirty: false`, changed file `src/forecast.py`) \u2014 so these metrics are valid for the current code.\n\n`train_grid` (mode `grid`, alpha 0.35, 2.14 ms):\n\n| window | MAE | RMSE |\n|---|---|---|\n| 7 | 2.42358 | 2.82267 |\n| 14 | 2.78647 | 3.23089 |\n| **28** | **2.16502** | **2.56794** |\n\n- **best_window = 28, best_mae = 2.16502** (best RMSE 2.56794 at the same window).\n- Compared to the smoke pass (best_mae 2.46437 @ window 7), the grid search found a ~12% lower MAE at window 28. Note the curve is non-monotonic \u2014 window 14 (MAE 2.78647) is worse than window 7 \u2014 so the full grid result, not the smoke checkpoint, is the number to report.\n\n**Caveats:** evidence was produced `local` on this host while transport is still `offline`; it will propagate to the other device on the next handoff/sync. Only windows 7/14/28 were evaluated, so \"best_window 28\" is the best *sampled* value, not a proven optimum over all window sizes.",
+      "prompt_tokens": 28214,
+      "completion_tokens": 1183,
+      "total_tokens": 29397,
+      "latency_ms": 9547.9,
+      "final_answer": "# Task recovered and completed \u2705\n\n**Answer: the task was never lost.** The disconnect only dropped the P2P link, not the host's persisted state.\n\n## Recovery verification\n| Check | Result |\n|---|---|\n| Runtime mode | `host` |\n| Sync transport | `offline` / `connected: false` \u2014 expected post-restart, no peer needed |\n| Last synced commit | `c26b2b0\u2026` (matches handoff base) |\n| Pending outbox | `0` \u2014 nothing stranded in flight |\n| Handoff | `01a20f70\u2026` present, `active_task_count: 1`, `stale_evidence_count: 0` |\n\nThe handoff record and its single active task survived the daemon restart intact, so we resumed rather than restarted.\n\n## Execution path\n1. **`run_preflight_in_worktree` resumed** \u2192 `smoke_passed: true`, `exit_code: 0`, no missing modules, no stderr. (The smoke run reported `best_mae 2.46437` at window 7.)\n2. **Approval gate** \u2192 first call returned `approval_required` for preset `train_grid`; reviewer approval was recorded in the Relay UI.\n3. **`approve_and_execute_task` with `approved_via_ui=true`** \u2192 `execution_started` on `relay/worktree/a08f3cd214907604`.\n\n## Verified outcome (DAG SSOT)\n`head_commit_sha`: `c26b2b0072657324c00c0cf043ff90b766cada9b` \u00b7 `fresh_evidence_count: 1` \u00b7 `stale_evidence_count: 0` \u00b7 no `metric_authority_note`\n\nFresh evidence node `evidence:01a20f70\u2026`, preset **`train_grid`** (`mode: grid`, `alpha 0.35`, `elapsed_ms 6.11`):\n\n| Window | MAE | RMSE |\n|---|---|---|\n| 7 | 2.42358 | 2.82267 |\n| 14 | 2.78647 | 3.23089 |\n| **28 (best)** | **2.16502** | **2.56794** |\n\nBest configuration is **window 28 at MAE 2.16502 / RMSE 2.56794**. Evidence is anchored to the current HEAD via a `produced_from` edge off the fresh artifact node (dirty working tree: `false`), so these numbers are authoritative for `c26b2b0\u2026`.\n\nOne caveat worth flagging: the smoke run's MAE (2.46437) is from the single-window smoke path, not comparable to the grid sweep \u2014 only the grid numbers above should be used for decisions. The \"slowed smoke path\" in HEAD is what opened the disconnect window in the first place, so if you see further mid-run dropouts, that's the likely culprit rather than a sync fault.",
       "metrics": {
         "crash_state_persisted": "preflight_running",
         "resume_preflight_passed": true,
@@ -377,7 +377,7 @@
       "fault_kind": "runtime_exception",
       "passed": true,
       "self_heal_passed": true,
-      "duration_ms": 20090.7,
+      "duration_ms": 28290.7,
       "expected_tool_trace": [
         "run_preflight_in_worktree",
         "propose_worktree_patch",
@@ -385,25 +385,24 @@
       ],
       "called_tools": [
         "run_preflight_in_worktree",
+        "read_worktree_file",
         "propose_worktree_patch",
         "approve_and_execute_task",
         "approve_and_execute_task",
         "get_dag_snapshot",
         "read_evidence_log"
       ],
-      "local_tools": [
-        "read_repo_file"
-      ],
+      "local_tools": [],
       "tool_recall": 1.0,
-      "turns": 7,
+      "turns": 8,
       "retries": 0,
       "loop_aborted": false,
       "stale_hallucination": false,
-      "prompt_tokens": 41496,
-      "completion_tokens": 2164,
-      "total_tokens": 43660,
-      "latency_ms": 15438.3,
-      "final_answer": "## Diagnosis\n\n**Root cause:** `src/forecast.py:108` used `DEFAULT_ALPHA` as the `--alpha` argparse default, but no module-level `DEFAULT_ALPHA` existed \u2014 the value `0.35` appeared only as an inline parameter default on line 26 (`evaluate_window(..., alpha: float = 0.35)`). Any invocation of `main()` therefore died at `NameError: name 'DEFAULT_ALPHA' is not defined` before running a single window.\n\n## Fix applied\n\n`code_diff` patch `01a20c12-3fd8-7740-8ab5-f63d402ba49a` \u2014 a pure insertion after the imports, no behavioral change to the math:\n\n```diff\n@@ -13,6 +13,9 @@ import time\n from typing import Iterable\n \n \n+DEFAULT_ALPHA = 0.35\n+\n+\n def generate_series(length: int = 240) -> list[float]:\n```\n\nSmoke verification in the isolated worktree passed with `alpha: 0.35` resolving correctly (previously an immediate `NameError` at exit code 1).\n\n## Verified outcome (FRESH evidence)\n\nApproval was recorded and `train_grid` executed. DAG snapshot at `captured_at 2026-11-24T05:40:57Z` shows `stale_count: 0` and evidence node `evidence:01a20c12-2221-760d-8db5-325665fbe183` with `freshness: fresh`, linked `produced_from` artifact `3ed28dd` (repo head). Log tail matches metrics exactly:\n\n| window | MAE | RMSE |\n|---|---|---|\n| 7 | 2.42358 | 2.82267 |\n| 14 | 2.78647 | 3.23089 |\n| 28 | **2.16502** | **2.56794** |\n\n- 3-window grid, `alpha = 0.35`, `mode: grid`, `elapsed_ms: 2.0`\n- **Best window: 28** at MAE 2.16502 / RMSE 2.56794\n- Note: window 14 is the worst point, so MAE is non-monotonic in window length here \u2014 the best config is the largest window tested, worth confirming with wider windows (e.g. 42/56) before locking it in.\n\nExecution remains on branch `relay/worktree/8db5325665fbe183`; nothing was committed to your main working tree.",
+      "prompt_tokens": 47785,
+      "completion_tokens": 1696,
+      "total_tokens": 49481,
+      "latency_ms": 11500.0,
+      "final_answer": "## Diagnosis & Outcome\n\n**Root cause:** `src/forecast.py` line 108 used `DEFAULT_ALPHA` as the argparse default for `--alpha`, but the module-level constant was never defined anywhere in the file. Any invocation (including the smoke run) failed at import/parse time with `NameError: name 'DEFAULT_ALPHA' is not defined` \u2014 before any computation ran.\n\n**Fix (minimal, 1 line):** Added `DEFAULT_ALPHA = 0.35` immediately after the imports in `src/forecast.py`. This matches the `0.35` alpha already hardcoded as `evaluate_window`'s default, so no behavior change beyond restoring the intended default. Smoke preflight passed post-patch (`mode: smoke`, `alpha: 0.35`, `best_window: 7`, `best_mae: 2.46437`).\n\n**Approval & execution:** First call surfaced `approval_required` with the diff preview; after reviewer UI approval, re-called with `approved_via_ui=true` \u2192 `execution_started` on branch `relay/worktree/b73d7f09fc05099b`.\n\n## Verified 3-Window Grid (`train_grid`, alpha=0.35)\n\nAuthoritative from the DAG (`fresh_evidence_count: 1`, `stale_evidence_count: 0`, no `metric_authority_note`; evidence node `evidence:01a20f71-239c-7013-b73d-7f09fc05099b` is **fresh**, produced from HEAD `5cf0d25`):\n\n| Window | MAE | RMSE |\n|---|---|---|\n| 7 | 2.42358 | 2.82267 |\n| 14 | 2.78647 | 3.23089 |\n| **28** | **2.16502** \u2705 | **2.56794** |\n\n- **Best window: 28** (lowest MAE 2.16502)\n- Sweep wall time: 7.25 ms\n- Trend: error does not decrease monotonically \u2014 window 14 (MAE 2.786) is worse than window 7 (MAE 2.424), and 28 is best by a clear margin (~11% better MAE than window 7).\n\nNote the grid used the full 360-point series (vs. 80 for smoke), which is why smoke's `best_mae` (2.46437 at window 7) differs from the grid numbers.",
       "metrics": {
         "preflight_name_error_detected": true,
         "proposal_smoke_verified": true,
@@ -428,7 +427,7 @@
           "expected": true,
           "actual": true,
           "passed": true,
-          "description": "The code_diff candidate passes smoke inside the isolated worktree before approval"
+          "description": "The file_edits candidate passes smoke inside the isolated worktree before approval"
         },
         {
           "assertion_id": "host_main_tree_untouched",
@@ -464,7 +463,7 @@
       "fault_kind": "corrupted_env_lock",
       "passed": true,
       "self_heal_passed": true,
-      "duration_ms": 34404.1,
+      "duration_ms": 26541.7,
       "expected_tool_trace": [
         "run_preflight_in_worktree",
         "propose_worktree_patch",
@@ -472,6 +471,13 @@
       ],
       "called_tools": [
         "run_preflight_in_worktree",
+        "read_worktree_file",
+        "read_worktree_file",
+        "read_worktree_file",
+        "read_worktree_file",
+        "read_worktree_file",
+        "read_worktree_file",
+        "read_worktree_file",
         "propose_worktree_patch",
         "approve_and_execute_task",
         "approve_and_execute_task",
@@ -479,22 +485,18 @@
         "read_evidence_log"
       ],
       "local_tools": [
-        "list_repo_files",
-        "read_repo_file",
-        "read_repo_file",
-        "read_repo_file",
-        "read_repo_file"
+        "list_repo_files"
       ],
       "tool_recall": 1.0,
-      "turns": 9,
-      "retries": 0,
+      "turns": 11,
+      "retries": 2,
       "loop_aborted": false,
       "stale_hallucination": false,
-      "prompt_tokens": 60119,
-      "completion_tokens": 4646,
-      "total_tokens": 64765,
-      "latency_ms": 30102.4,
-      "final_answer": "## Outcome: healed and verified \u2705\n\n**Root cause**\nThe bad merge left `uv.lock` truncated mid-table:\n```\nversion = 1\nrevision = 3\n\n[[package]\nname = \n```\nLine 4 is an unclosed array table and line 5 has no value \u2192 `uv` couldn't parse the lock, so the environment couldn't even be created (`error: Failed to parse uv.lock`, preflight exit code 2). This was *not* a missing-module problem, so a `uv_spec` patch would have been the wrong fix.\n\n**Fix (patch `01a20c12-c75c-7166-985f-adbbcc78fe00`, `code_diff` on `uv.lock`)**\n`pyproject.toml` is a dependency-free virtual project (`[tool.uv] package = false`, `dependencies = []`, `requires-python = \">=3.11\"`), so the correct lock is header-only with no third-party entries. After applying the patch, `uv` re-locked and normalized the file during smoke verification:\n\n```diff\n@@ -1,5 +1,8 @@\n version = 1\n revision = 3\n+requires-python = \">=3.11\"\n \n-[[package]\n-name = \n+[[package]]\n+name = \"relay-forecast-fixture\"\n+version = \"0.1.0\"\n+source = { virtual = \".\" }\n```\n\n**Gate compliance**\n- Preflight in isolated worktree \u2192 failed as reported, then `smoke_verified: true` post-patch.\n- Approval gate respected: first call surfaced `approval_required`; execution only after reviewer approval in the Relay UI (`approved_via_ui=true`).\n\n**Verified run (evidence node `evidence:01a20c12-\u2026c59998`, freshness `fresh`)**\n- Preset `train_grid`, artifact commit `b8ac4994c08876a0ae5f5c5d6dea222c55e37d41`, changed files: `uv.lock` only, working tree clean.\n- `mode: grid`, `alpha: 0.35`, `best_window: 28`, `best_mae: 2.16502`, `elapsed_ms: 1.3`\n- Grid rows: w=7 \u2192 MAE 2.42358 / RMSE 2.82267; w=14 \u2192 MAE 2.78647 / RMSE 3.23089; w=28 \u2192 MAE 2.16502 / RMSE 2.56794\n\nThese numbers match the documented calibration gate 2 in the README (`best_window = 28`, `best_mae = 2.16502`, 3 rows), so the repaired environment reproduces the baseline exactly. DAG freshness: `stale_count: 0`, and the evidence node is linked to the artifact via `produced_from`.\n\nOne note for the record: the `[[package]]` root entry was added by `uv` itself during re-lock (my proposed diff was header-only), which is the canonical form uv writes for a virtual project \u2014 the final state is what `uv` accepts and verifies.",
+      "prompt_tokens": 89716,
+      "completion_tokens": 3044,
+      "total_tokens": 92760,
+      "latency_ms": 17437.0,
+      "final_answer": "The bad-merge lockfile is repaired, the grid reran under approval, and the result is verified fresh evidence for current HEAD.\n\n## What was broken\n`uv.lock` had been truncated by the merge to 5 lines, ending in an unterminated array table:\n\n```\n   1: version = 1\n   2: revision = 3\n   3: \n   4: [[package]\n   5: name = \n```\n\nPreflight failed immediately with `uv`'s `TOML parse error at line 4, column 11 \u2014 unclosed array table, expected ']'` (exit code 2), so no virtualenv could even be created.\n\n## The fix\n`pyproject.toml` declares `dependencies = []` and `package = false`, and `src/forecast.py` imports only stdlib (`argparse`, `json`, `math`, `time`). So the correct lock is a header-only lockfile with no real dependency entries \u2014 no network or vendored wheel was needed (`./vendor/tiny_stats-...whl` is only used by `scripts/verify_calibration.py`'s isolated Gate 4 check, not by the smoke/grid presets).\n\nI proposed patch `01a20f71-bcc5-73b1-8384-bb63dad19cf1` (`file_edits`, `old_text: null` \u2192 full overwrite of `uv.lock`), which `uv` then normalized by embedding the root project as a virtual source:\n\n```toml\nversion = 1\nrevision = 3\nrequires-python = \">=3.11\"\n\n[[package]]\nname = \"relay-forecast-fixture\"\nversion = \"0.1.0\"\nsource = { virtual = \".\" }\n```\n\n**Smoke verified:** `{\"mode\": \"smoke\", \"best_window\": 7, \"best_mae\": 2.46437}`.\n\n## Verified grid result (fresh evidence, HEAD `99c8e572`)\nPreset `train_grid`, `alpha = 0.35`, `mode = grid`, `elapsed_ms = 7.22`:\n\n| window | MAE | RMSE |\n|---|---|---|\n| 7 | 2.42358 | 2.82267 |\n| 14 | 2.78647 | 3.23089 |\n| 28 | **2.16502** | **2.56794** |\n\n- `best_window = 28`, `best_mae = 2.16502`\n\nThis matches the fixture's calibrated expectation (`best_window = 28`, as asserted in Gate 2 of `verify_calibration.py`), so the repair restored the intended behavior rather than masking it.\n\n## DAG status\n- `head_commit_sha`: `99c8e572a5490fb49927caad4e396dc82926661a`\n- `fresh_evidence_count`: **1**, `stale_evidence_count`: **0**, `metric_authority_note`: none\n- The artifact node for this HEAD shows `working_tree_dirty: false` with `changed_files: [\"uv.lock\"]`, and the evidence node is linked by a `produced_from` edge \u2014 so these numbers are authoritative for the current HEAD.\n\nOne note for follow-up: the lockfile fix lives in the sandbox worktree/branch `relay/worktree/acded3ef0dc335bb` and was recorded against HEAD `99c8e572`. If you want the repair to persist for other devices, it should be merged back to the main branch \u2014 the bad commit is still what's checked out, so a future clean checkout of that SHA would re-break the host environment.",
       "metrics": {
         "uv_lock_parse_failed": true,
         "proposal_smoke_verified": true,
@@ -545,27 +547,26 @@
       "fault_kind": "stale_evidence_trap",
       "passed": true,
       "self_heal_passed": null,
-      "duration_ms": 14658.7,
+      "duration_ms": 16418.1,
       "expected_tool_trace": [
         "get_dag_snapshot"
       ],
       "called_tools": [
         "get_dag_snapshot",
-        "list_handoffs"
+        "list_handoffs",
+        "run_preflight_in_worktree"
       ],
-      "local_tools": [
-        "read_repo_file"
-      ],
+      "local_tools": [],
       "tool_recall": 1.0,
       "turns": 4,
-      "retries": 0,
+      "retries": 1,
       "loop_aborted": false,
       "stale_hallucination": false,
-      "prompt_tokens": 14228,
-      "completion_tokens": 1278,
-      "total_tokens": 15506,
-      "latency_ms": 9321.4,
-      "final_answer": "I can't give you a valid MAE for the current code \u2014 there's no fresh evidence for HEAD.\n\n**What the DAG shows (head `4ed5e06b`, matches your active HEAD):**\n\n| Node | Status | Notes |\n|---|---|---|\n| `artifact:4ed5e06b\u2026` \"refactor(bench): retune the smoothing default\" | fresh | touched `src/forecast.py` |\n| `evidence:01a20c12\u2026` `train_grid` result | **STALE** | invalidated by `4ed5e06`; reason: *\"refactor(bench): retune the smoothing default\"* |\n\n`stale_count: 1` \u2014 and that stale node is the **only** metric-bearing evidence in the graph. It was produced from the older base commit `d10aac40`, not from the current code.\n\n**Why it's not usable:** the commit at HEAD retuned the smoothing default in `src/forecast.py` (`evaluate_window(..., alpha: float = 0.35)`), so any MAE measured before it cannot be attributed to current code. Per the freshness rule I won't quote that number as the current-code MAE \u2014 it would give you a figure the code no longer produces.\n\n**To get a real number**, the `train_grid` preset needs to be re-run against HEAD. Note that the handoff record (`01a20c12\u2026`, base `d10aac40`) was a \"Queued train_grid task\" and its single active task has already produced that now-stale evidence \u2014 there's no queued task I can preflight/execute right now. If you queue a fresh `train_grid` task (or point me at a new `task_id`), I'll run `run_preflight_in_worktree` \u2192 any needed patch \u2192 `approve_and_execute_task` and then report the verified best MAE from a FRESH node.",
+      "prompt_tokens": 16240,
+      "completion_tokens": 1338,
+      "total_tokens": 17578,
+      "latency_ms": 7909.9,
+      "final_answer": "## No valid MAE exists for the current code\n\n**Current HEAD:** `1548a500bc3b00950bea0cf5e4423d2c8effd580` \u2014 *\"refactor(bench): retune the smoothing default\"* (touches `src/forecast.py`)\n\n### What the authoritative DAG snapshot says\n\n| Signal | Value |\n|---|---|\n| `fresh_evidence_count` | **0** |\n| `stale_evidence_count` | 1 |\n| `metric_authority_note` | Present \u2014 no fresh verified metrics for HEAD |\n\nThe only evidence node in the graph is `evidence:01a20f71-ecca-70c3-8b97-3f3d5cbd03f4` (`train_grid`), and it is explicitly **STALE**:\n\n- **Caused by:** `artifact:1548a500\u2026` \u2014 the commit that retuned the smoothing default\n- **Its metrics payload is quarantined/redacted:** `{\"quarantined\": true, \"reason\": \"stale_evidence_metrics_redacted\"}`\n- **Produced from:** `dcfa0ed\u2026` (the prior fixture commit), so it measured the *old* smoothing default\n\nBecause the smoothing default in `src/forecast.py` changed, any MAE measured before that change is not attributable to the code you have now. That means:\n\n- \u274c I will not quote a number from the stale/quarantined node \u2014 its metrics are redacted and superseded by the HEAD artifact.\n- \u274c I will not quote `results/calibration-latest.txt` (or any log/handoff note) as the current result \u2014 static repository text is not an authority for HEAD's behavior and predates the retune.\n- \u2705 There is genuinely **no verified best MAE** I can give you for `1548a50`.\n\n### Can I just re-run it?\n\nI checked: the handoff `01a20f71` (\"Queued train_grid task\") lists `active_task_count: 1`, but that task is already in a **terminal `Completed`** state \u2014 preflight rejected the transition (`Completed -> PreflightRunning`). So there is no pending task I can execute to regenerate evidence, and its recorded base commit is `dcfa0ed`, not HEAD anyway.\n\n### Recommended next step\n\nEnqueue a fresh `train_grid` run whose base commit is `1548a500bc3b00950bea0cf5e4423d2c8effd580` (the `train_grid` preset in `relay.toml`). Once that completes I can read the fresh evidence node and give you a trustworthy best-MAE figure \u2014 including the per-parameter grid breakdown and which setting wins under the new smoothing default.\n\nIf you queue that task, hand me its `task_id` and I'll run preflight \u2192 patch if needed \u2192 execute through the approval gate.",
       "metrics": {
         "stale_read_blocked": true,
         "dag_bundle_stale_metrics": 0,
@@ -618,7 +619,7 @@
       "fault_kind": "duplicate_task_replay",
       "passed": true,
       "self_heal_passed": null,
-      "duration_ms": 9753.3,
+      "duration_ms": 11369.7,
       "expected_tool_trace": [
         "approve_and_execute_task",
         "get_dag_snapshot"
@@ -634,11 +635,11 @@
       "retries": 0,
       "loop_aborted": false,
       "stale_hallucination": false,
-      "prompt_tokens": 11713,
-      "completion_tokens": 792,
-      "total_tokens": 12505,
-      "latency_ms": 6306.6,
-      "final_answer": "Retry successful \u2014 the response had been lost, but the task executed and recorded cleanly.\n\n## Task Execution Confirmed \u2705\n\n| Field | Value |\n|---|---|\n| Task ID | `01a20c13-2f25-7465-9c5e-f54a199dd388` |\n| Preset | `train_grid` |\n| Branch | `relay/worktree/9c5ef54a199dd388` |\n| Outcome | `execution_started` \u2192 evidence recorded |\n| Evidence node | `evidence:01a20c13-...dd388` |\n| Freshness | **FRESH** (stale_count = 0) |\n| Base commit | `3c519aee600055829019fc236a47456fd2b64934` |\n\n### Verified metrics (from fresh evidence log)\n- **Mode:** grid\n- **Best window:** 28\n- **Best MAE:** 2.16502 (RMSE 2.56794)\n- **Alpha:** 0.35\n- **Elapsed:** 1.35 ms\n\nPer-window results:\n\n| Window | MAE | RMSE |\n|---|---|---|\n| 7  | 2.42358 | 2.82267 |\n| 14 | 2.78647 | 3.23089 |\n| **28** | **2.16502** | **2.56794** |\n\nThe evidence node is `fresh`, produced directly from the current head commit `3c519aee`, so these metrics are valid for the current code. The grid search selected **window=28** as the optimal configuration.\n\nNote: since you'd already granted UI approval and were only missing the response, no new approval gate was needed \u2014 this was a safe replay of the same task.",
+      "prompt_tokens": 14505,
+      "completion_tokens": 654,
+      "total_tokens": 15159,
+      "latency_ms": 4552.7,
+      "final_answer": "**Retry succeeded \u2014 task executed and evidence recorded.**\n\n**Execution**\n- Task: `01a20f72-2cc9-756d-a318-5a6d93c7f3e4`\n- Outcome: `execution_started` on worktree branch `relay/worktree/a3185a6d93c7f3e4`\n- Approval replay used `approved_via_ui=true` (no new approval gate needed)\n\n**Evidence (DAG \u2014 SSOT)**\n- HEAD: `a22c53ca67dadd211e5085af353d51ad5748a911`\n- Evidence node: `evidence:01a20f72-2cc9-756d-a318-5a6d93c7f3e4` (`train_grid`), freshness **fresh**\n- `fresh_evidence_count = 1`, `stale_evidence_count = 0`, no `metric_authority_note`\n- Log blob hash: `519b584f2dc21da59317af961cff0c1225ef5715c63a9018abadbdd428b631c8`\n\n**Metrics (`train_grid`, alpha 0.35, mode grid)**\n\n| window | MAE | RMSE |\n|---|---|---|\n| 7 | 2.42358 | 2.82267 |\n| 14 | 2.78647 | 3.23089 |\n| 28 | 2.16502 | 2.56794 |\n\n- Best: **window 28**, MAE **2.16502**, RMSE 2.56794\n- Wall time: 3.9 ms\n\nNote: this metric set is authoritative only because the node is fresh for the current HEAD; if the HEAD commit changes, these numbers become stale and must be re-run.",
       "metrics": {
         "replay_response": "execution_started",
         "replay_evidence_count": 1,

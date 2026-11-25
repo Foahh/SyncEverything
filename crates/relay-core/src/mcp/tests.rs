@@ -6,6 +6,50 @@ use std::path::{Path, PathBuf};
 use tokio::process::Command;
 
 const REPO_ID: &str = "test-forecast";
+
+#[tokio::test]
+async fn mcp_quarantines_pending_evidence_and_ignores_extra_snapshot_fields() {
+    assert!(serde_json::from_str::<GetDagSnapshotArgs>(r#"{"include_stale":false}"#).is_ok());
+    let engine = Arc::new(RelayEngine::in_memory(REPO_ID, None).await.unwrap());
+    let now = Utc::now();
+    engine
+        .upsert_node_and_edges(
+            GraphNode {
+                id: "pending".into(),
+                label: "Pending result".into(),
+                payload: NodeKind::Evidence {
+                    task_id: Uuid::now_v7().to_string(),
+                    preset: "check".into(),
+                    metrics_json: serde_json::json!({"score":"unverified metric"}).into(),
+                    log_blob_hash: "unused".into(),
+                },
+                freshness: Freshness::PendingVerify,
+                device_origin: "test".into(),
+                created_at: now,
+                updated_at: now,
+            },
+            vec![],
+        )
+        .await
+        .unwrap();
+    let server = RelayMcpServer::new(engine, None, None);
+    let snapshot = server
+        .handle_get_dag_snapshot(GetDagSnapshotArgs {})
+        .await
+        .unwrap();
+    let output = serde_json::to_string(&snapshot).unwrap();
+    assert!(output.contains("unverified_evidence_metrics_redacted"));
+    assert!(!output.contains("unverified metric"));
+    assert_eq!(snapshot.fresh_evidence_count, 0);
+    let log = server
+        .handle_read_evidence_log(ReadEvidenceLogArgs {
+            node_id: "pending".into(),
+            max_lines: None,
+        })
+        .await;
+    assert!(matches!(log, Err(RelayError::UnverifiedEvidenceBlocked(_))));
+}
+
 const MANIFEST: &str = r#"
 [project]
 repo_id = "test-forecast"
@@ -100,8 +144,18 @@ impl Fixture {
         git(&repo, &["update-ref", "HEAD", &sha]).await;
 
         let sandbox = WorktreeSandbox::new(&repo, temp.join("worktrees"));
-        let engine = Arc::new(RelayEngine::in_memory(REPO_ID, Some(repo.clone())).await.unwrap());
-        Self { temp, repo, sandbox, engine, sha }
+        let engine = Arc::new(
+            RelayEngine::in_memory(REPO_ID, Some(repo.clone()))
+                .await
+                .unwrap(),
+        );
+        Self {
+            temp,
+            repo,
+            sandbox,
+            engine,
+            sha,
+        }
     }
 
     fn server(&self) -> RelayMcpServer {
@@ -142,11 +196,20 @@ impl Drop for Fixture {
 async fn git(repo: &Path, args: &[&str]) -> String {
     let mut command = Command::new("git");
     command.arg("-C").arg(repo).args(args);
-    for key in ["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR"] {
+    for key in [
+        "GIT_DIR",
+        "GIT_WORK_TREE",
+        "GIT_INDEX_FILE",
+        "GIT_COMMON_DIR",
+    ] {
         command.env_remove(key);
     }
     let output = command.output().await.unwrap();
-    assert!(output.status.success(), "{args:?}: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "{args:?}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     String::from_utf8(output.stdout).unwrap().trim().to_owned()
 }
 
@@ -165,13 +228,19 @@ async fn host_clean_preflight_obeys_task_approval() {
     let server = fixture.server();
     for require_approval in [true, false] {
         let id = fixture.submit("0.25", require_approval).await;
-        let outcome = run_host_task_pipeline(&fixture.engine, &server, LlmEndpointConfig::default(), id).await.unwrap();
+        let outcome =
+            run_host_task_pipeline(&fixture.engine, &server, LlmEndpointConfig::default(), id)
+                .await
+                .unwrap();
         if require_approval {
             assert!(matches!(outcome, HostTaskOutcome::AwaitingApproval));
             let task = fixture.task(id).await;
             assert_eq!(task.state, TaskState::PreflightRunning);
             assert!(task.evidence_node_id.is_none());
-            server.handle_approve_and_execute(approval(id, None, true), None).await.unwrap();
+            server
+                .handle_approve_and_execute(approval(id, None, true), None)
+                .await
+                .unwrap();
         } else {
             assert!(matches!(outcome, HostTaskOutcome::Completed));
         }
@@ -185,16 +254,25 @@ async fn mcp_end_to_end_preflight_patch_approval_and_stale_block() {
     let task_id = fixture.submit("0.25", true).await;
     let server = fixture.server();
 
-    fixture.engine.enqueue_outbox(&serde_json::json!({"type": "ping"})).await.unwrap();
+    fixture
+        .engine
+        .enqueue_outbox(&serde_json::json!({"type": "ping"}))
+        .await
+        .unwrap();
     let status = server.handle_inspect_sync_status().await.unwrap();
     assert_eq!(status.mode, RuntimeMode::Host);
     assert_eq!(status.transport_path, TransportPath::Offline);
     assert_eq!(status.pending_outbox_count, 1);
 
-    let handoffs = server.handle_list_handoffs(ListHandoffsArgs::default()).await.unwrap();
+    let handoffs = server
+        .handle_list_handoffs(ListHandoffsArgs::default())
+        .await
+        .unwrap();
     assert_eq!(handoffs[0].handoff_id, task_id.to_string());
     let diff = server
-        .handle_check_env_diff(CheckEnvDiffArgs { commit_sha: fixture.sha.clone() })
+        .handle_check_env_diff(CheckEnvDiffArgs {
+            commit_sha: fixture.sha.clone(),
+        })
         .await
         .unwrap();
     assert!(diff.in_sync);
@@ -202,11 +280,17 @@ async fn mcp_end_to_end_preflight_patch_approval_and_stale_block() {
     assert_eq!(diff.package_manager, "uv");
 
     let report = server
-        .handle_run_preflight(RunPreflightArgs { task_id: task_id.to_string() })
+        .handle_run_preflight(RunPreflightArgs {
+            task_id: task_id.to_string(),
+        })
         .await
         .unwrap();
     assert!(!report.smoke_passed);
-    assert!(report.stderr_tail.contains("NameError"), "{}", report.raw_log);
+    assert!(
+        report.stderr_tail.contains("NameError"),
+        "{}",
+        report.raw_log
+    );
     assert!(!report.error_snippets.is_empty());
     let task = fixture.task(task_id).await;
     assert_eq!(task.state, TaskState::PreflightRunning);
@@ -247,16 +331,22 @@ async fn mcp_end_to_end_preflight_patch_approval_and_stale_block() {
     let marker = report.worktree_path.join(".preflight-marker");
     fs::write(&marker, "reuse this worktree").unwrap();
 
-    let patch = server
-        .handle_propose_patch(ProposeWorktreePatchArgs {
-            task_id: task_id.to_string(),
-            patch_kind: "code_diff".into(),
-            summary: "Define the smoke message".into(),
-            dependency_spec: None,
-            edits: Some(fix_edits()),
-        })
-        .await
-        .unwrap();
+    let candidate = ProposeWorktreePatchArgs {
+        task_id: task_id.to_string(),
+        patch_kind: "code_diff".into(),
+        summary: "Define the smoke message".into(),
+        dependency_spec: None,
+        edits: Some(fix_edits()),
+    };
+    let other_server = fixture.server();
+    let (first, second) = tokio::join!(
+        server.handle_propose_patch(candidate.clone()),
+        other_server.handle_propose_patch(candidate),
+    );
+    let patch = match (first, second) {
+        (Ok(patch), Err(_)) | (Err(_), Ok(patch)) => patch,
+        results => panic!("exactly one server may register the patch: {results:?}"),
+    };
     assert!(patch.smoke_verified);
     assert_eq!(patch.worktree_branch, report.worktree_branch);
     assert!(marker.is_file());
@@ -279,7 +369,9 @@ async fn mcp_end_to_end_preflight_patch_approval_and_stale_block() {
     );
     assert_eq!(fixture.task(task_id).await, proposed);
     assert!(matches!(
-        server.handle_approve_and_execute(approval(task_id, Some("wrong".into()), true), None).await,
+        server
+            .handle_approve_and_execute(approval(task_id, Some("wrong".into()), true), None)
+            .await,
         Err(RelayError::ProposalNotFound(_))
     ));
 
@@ -287,7 +379,10 @@ async fn mcp_end_to_end_preflight_patch_approval_and_stale_block() {
     drop(server);
     let server = fixture.server();
     let approved = approval(task_id, Some(patch.patch_id.clone()), true);
-    let response = server.handle_approve_and_execute(approved.clone(), None).await.unwrap();
+    let response = server
+        .handle_approve_and_execute(approved.clone(), None)
+        .await
+        .unwrap();
     assert_eq!(
         response,
         ApprovalExecutionResponse::ExecutionStarted {
@@ -298,19 +393,37 @@ async fn mcp_end_to_end_preflight_patch_approval_and_stale_block() {
     let completed = fixture.task(task_id).await;
     assert_eq!(completed.state, TaskState::Completed);
     assert_eq!(
-        server.handle_approve_and_execute(approved, None).await.unwrap(),
+        server
+            .handle_approve_and_execute(approved, None)
+            .await
+            .unwrap(),
         response,
     );
     assert_eq!(fixture.task(task_id).await, completed);
     let node_id = completed.evidence_node_id.unwrap();
     assert!(!report.worktree_path.exists());
-    assert!(server.context.active_worktrees.lock().await.is_empty());
-    assert!(git(&fixture.repo, &["branch", "--list", &report.worktree_branch]).await.is_empty());
+    assert!(
+        git(
+            &fixture.repo,
+            &["branch", "--list", &report.worktree_branch]
+        )
+        .await
+        .is_empty()
+    );
     assert!(!fixture.sandbox.is_working_tree_dirty().await.unwrap());
-    assert_eq!(fixture.sandbox.head_commit_sha().await.unwrap(), fixture.sha);
-    assert_eq!(fs::read_to_string(fixture.repo.join("src/app.py")).unwrap(), PYTHON);
+    assert_eq!(
+        fixture.sandbox.head_commit_sha().await.unwrap(),
+        fixture.sha
+    );
+    assert_eq!(
+        fs::read_to_string(fixture.repo.join("src/app.py")).unwrap(),
+        PYTHON
+    );
 
-    let snapshot = server.handle_get_dag_snapshot(GetDagSnapshotArgs::default()).await.unwrap();
+    let snapshot = server
+        .handle_get_dag_snapshot(GetDagSnapshotArgs::default())
+        .await
+        .unwrap();
     let artifact = snapshot
         .nodes
         .iter()
@@ -326,14 +439,25 @@ async fn mcp_end_to_end_preflight_patch_approval_and_stale_block() {
         edge.kind == EdgeKind::ProducedFrom && edge.from == artifact.id && edge.to == node_id
     }));
     assert_eq!(
-        server.handle_inspect_sync_status().await.unwrap().last_synced_commit,
+        server
+            .handle_inspect_sync_status()
+            .await
+            .unwrap()
+            .last_synced_commit,
         Some(fixture.sha.clone()),
     );
 
-    let read = ReadEvidenceLogArgs { node_id: node_id.clone(), max_lines: Some(1) };
-    let fresh = server.read_evidence_log(Parameters(read.clone())).await.unwrap();
+    let read = ReadEvidenceLogArgs {
+        node_id: node_id.clone(),
+        max_lines: Some(1),
+    };
+    let fresh = server
+        .read_evidence_log(Parameters(read.clone()))
+        .await
+        .unwrap();
     assert_eq!(fresh.is_error, Some(false));
-    let fresh: EvidenceLog = serde_json::from_str(&fresh.content[0].as_text().unwrap().text).unwrap();
+    let fresh: EvidenceLog =
+        serde_json::from_str(&fresh.content[0].as_text().unwrap().text).unwrap();
     assert_eq!(fresh.log_tail.lines().count(), 1);
     let full_log = server
         .handle_read_evidence_log(ReadEvidenceLogArgs {
@@ -343,12 +467,23 @@ async fn mcp_end_to_end_preflight_patch_approval_and_stale_block() {
         .await
         .unwrap();
     assert!(full_log.log_tail.contains("training done"));
-    assert_eq!(full_log.log_tail.lines().last(), Some(fresh.log_tail.as_str()));
+    assert_eq!(
+        full_log.log_tail.lines().last(),
+        Some(fresh.log_tail.as_str())
+    );
     assert_eq!(fresh.node.freshness, Freshness::Fresh);
-    let NodeKind::Evidence { metrics_json, log_blob_hash, .. } = fresh.node.payload else {
+    let NodeKind::Evidence {
+        metrics_json,
+        log_blob_hash,
+        ..
+    } = fresh.node.payload
+    else {
         panic!("expected evidence payload");
     };
-    assert_eq!(metrics_json, serde_json::json!({"alpha": 0.25, "smoke": "smoke passed"}).into());
+    assert_eq!(
+        metrics_json,
+        serde_json::json!({"alpha": 0.25, "smoke": "smoke passed"}).into()
+    );
     assert!(!log_blob_hash.is_empty());
 
     let mut next = artifact.clone();
@@ -357,7 +492,11 @@ async fn mcp_end_to_end_preflight_patch_approval_and_stale_block() {
         panic!("expected artifact payload");
     };
     *git_commit_sha = "new-commit".into();
-    fixture.engine.supersede_artifact(&artifact.id, next, "upstream edit").await.unwrap();
+    fixture
+        .engine
+        .supersede_artifact(&artifact.id, next, "upstream edit")
+        .await
+        .unwrap();
 
     let stale = server.read_evidence_log(Parameters(read)).await.unwrap();
     assert_eq!(stale.is_error, Some(true));
@@ -373,9 +512,17 @@ async fn mcp_end_to_end_preflight_patch_approval_and_stale_block() {
     assert_eq!(stale_snapshot.fresh_evidence_count, 0);
     assert_eq!(stale_snapshot.stale_evidence_count, 1);
     assert!(stale_snapshot.metric_authority_note.is_some());
-    let stale_node = stale_snapshot.nodes.iter().find(|node| node.id == node_id).unwrap();
+    let stale_node = stale_snapshot
+        .nodes
+        .iter()
+        .find(|node| node.id == node_id)
+        .unwrap();
     assert!(matches!(stale_node.freshness, Freshness::Stale { .. }));
-    let NodeKind::Evidence { metrics_json: redacted_metrics, .. } = &stale_node.payload else {
+    let NodeKind::Evidence {
+        metrics_json: redacted_metrics,
+        ..
+    } = &stale_node.payload
+    else {
         panic!("expected evidence payload");
     };
     assert_eq!(
@@ -392,11 +539,22 @@ async fn mcp_end_to_end_preflight_patch_approval_and_stale_block() {
     assert!(!serialized_stale.contains("smoke passed"));
 
     let raw_snapshot = fixture.engine.dag_snapshot(true).await.unwrap();
-    let raw_node = raw_snapshot.nodes.iter().find(|node| node.id == node_id).unwrap();
-    let NodeKind::Evidence { metrics_json: raw_metrics, .. } = &raw_node.payload else {
+    let raw_node = raw_snapshot
+        .nodes
+        .iter()
+        .find(|node| node.id == node_id)
+        .unwrap();
+    let NodeKind::Evidence {
+        metrics_json: raw_metrics,
+        ..
+    } = &raw_node.payload
+    else {
         panic!("expected evidence payload");
     };
-    assert_eq!(*raw_metrics, serde_json::json!({"alpha": 0.25, "smoke": "smoke passed"}).into());
+    assert_eq!(
+        *raw_metrics,
+        serde_json::json!({"alpha": 0.25, "smoke": "smoke passed"}).into()
+    );
 }
 
 #[tokio::test]
@@ -405,7 +563,9 @@ async fn mcp_rejection_and_failed_preset_clean_up_worktrees() {
     let server = fixture.server();
     let rejected_id = fixture.submit("0.25", true).await;
     let report = server
-        .handle_run_preflight(RunPreflightArgs { task_id: rejected_id.to_string() })
+        .handle_run_preflight(RunPreflightArgs {
+            task_id: rejected_id.to_string(),
+        })
         .await
         .unwrap();
     let rejected = server
@@ -413,19 +573,23 @@ async fn mcp_rejection_and_failed_preset_clean_up_worktrees() {
         .finish_approval(fixture.task(rejected_id).await, ApprovalDecision::Rejected)
         .await
         .unwrap();
-    assert!(matches!(rejected, ApprovalExecutionResponse::Rejected { .. }));
+    assert!(matches!(
+        rejected,
+        ApprovalExecutionResponse::Rejected { .. }
+    ));
     assert_eq!(fixture.task(rejected_id).await.state, TaskState::Rejected);
     assert!(!report.worktree_path.exists());
 
     let failed_id = fixture.submit("invalid-number", false).await;
-    let error = server.handle_approve_and_execute(approval(failed_id, None, false), None).await;
+    let error = server
+        .handle_approve_and_execute(approval(failed_id, None, false), None)
+        .await;
     assert!(error.unwrap_err().to_string().contains("train_grid"));
     let failed = fixture.task(failed_id).await;
     assert_eq!(failed.state, TaskState::Failed);
     assert!(failed.error_message.unwrap().contains("invalid-number"));
     assert!(failed.evidence_node_id.is_none());
     assert!(!fixture.sandbox.task_worktree(failed_id).unwrap().0.exists());
-    assert!(server.context.active_worktrees.lock().await.is_empty());
     assert!(!fixture.sandbox.is_working_tree_dirty().await.unwrap());
 }
 
@@ -468,8 +632,7 @@ else:
     let mut saw_running_chunk = false;
     let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
     while tokio::time::Instant::now() < deadline {
-        if let Ok(Ok(chunk)) =
-            tokio::time::timeout(Duration::from_secs(5), log_rx.recv()).await
+        if let Ok(Ok(chunk)) = tokio::time::timeout(Duration::from_secs(5), log_rx.recv()).await
             && chunk.task_id == id.to_string()
             && chunk.preset == "train_grid"
             && chunk.text.contains("running partial output")
@@ -495,14 +658,21 @@ else:
     assert!(cancel_started.elapsed() < Duration::from_secs(10));
     assert!(matches!(exec_result, Err(RelayError::TaskCancelled(_))));
 
-    // Verify task stays Cancelled, partial log is persisted in SQLite, registry & worktree are clean.
+    // Verify cancellation, persisted output, and the registered Git worktree cleanup.
     let final_task = fixture.task(id).await;
     assert_eq!(final_task.state, TaskState::Cancelled);
     assert!(final_task.error_message.is_none());
     assert!(final_task.evidence_node_id.is_none());
     assert_eq!(fixture.engine.active_cancellation_count(), 0);
     assert!(!fixture.sandbox.task_worktree(id).unwrap().0.exists());
-    assert!(server.context.active_worktrees.lock().await.is_empty());
+    assert!(
+        server
+            .context
+            .find_worktree(&final_task)
+            .await
+            .unwrap()
+            .is_none()
+    );
 
     let (hash, content) = fixture
         .engine
@@ -523,25 +693,37 @@ async fn cancelling_patch_verification_persists_its_partial_log() {
     let mut chunks = fixture.engine.subscribe_task_logs();
     let patch_server = server.clone();
     let operation = tokio::spawn(async move {
-        patch_server.handle_propose_patch(ProposeWorktreePatchArgs {
-            task_id: id.to_string(),
-            patch_kind: "code_diff".into(),
-            summary: "Verify a candidate change".into(),
-            dependency_spec: None,
-            edits: Some(vec![FileEdit {
-                file_path: "src/app.py".into(),
-                old_text: None,
-                new_text: "import time\nprint('verification started', flush=True)\ntime.sleep(30)\n".into(),
-            }]),
-        }).await
+        patch_server
+            .handle_propose_patch(ProposeWorktreePatchArgs {
+                task_id: id.to_string(),
+                patch_kind: "code_diff".into(),
+                summary: "Verify a candidate change".into(),
+                dependency_spec: None,
+                edits: Some(vec![FileEdit {
+                    file_path: "src/app.py".into(),
+                    old_text: None,
+                    new_text:
+                        "import time\nprint('verification started', flush=True)\ntime.sleep(30)\n"
+                            .into(),
+                }]),
+            })
+            .await
     });
     tokio::time::timeout(Duration::from_secs(15), async {
         loop {
-            if chunks.recv().await.unwrap().text.contains("verification started") {
+            if chunks
+                .recv()
+                .await
+                .unwrap()
+                .text
+                .contains("verification started")
+            {
                 break;
             }
         }
-    }).await.expect("patch smoke did not start");
+    })
+    .await
+    .expect("patch smoke did not start");
     fixture.engine.cancel_task(id).await.unwrap();
     let result = tokio::time::timeout(Duration::from_secs(10), operation)
         .await

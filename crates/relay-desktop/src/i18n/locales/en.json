@@ -232,8 +232,9 @@
       "submit_task": "Submitted task preset",
       "record_decision": "Saved note",
       "read_repo_file": "Read repository file",
-      "git_diff": "Checked uncommitted Git diff",
-      "runningPrefix": "Running {{name}}…"
+      "git_diff": "Check uncommitted changes",
+      "runningPrefix": "{{name}}…",
+      "failed": "{{name}} failed"
     }
   },
   "modals": {
@@ -415,13 +416,14 @@
       "apiKeyEnvLabel": "Or read key from environment variable (optional)",
       "apiKeyEnvPlaceholder": "e.g., DEEPSEEK_API_KEY or OPENAI_API_KEY",
       "reasoningEffortLabel": "Reasoning effort",
-      "reasoningEffortHint": "Local Ollama and Edge tiers default to Off for faster tool calling unless overridden.",
+      "reasoningEffortHint": "Off by default for local models for faster tool use. Cloud models follow the provider default unless set here.",
       "reasoningEffortOption": {
-        "default": "Auto",
+        "default": "Recommended",
         "none": "Off",
         "low": "Low",
         "medium": "Medium",
-        "high": "High"
+        "high": "High",
+        "auto": "Provider default"
       },
       "testBtn": "Test Connection",
       "testingBtn": "Testing…",
@@ -459,6 +461,7 @@
     "openRepoFirst": "Open a local Git repository first.",
     "repoPathEmpty": "Enter a local repository folder path.",
     "runtimeShuttingDown": "SyncEverything is shutting down. Please try again shortly.",
+    "copilotToolLimit": "The model reached the tool-call limit before finishing.",
     "taskNotCancellable": "This task can no longer be cancelled.",
     "taskNotFound": "Task not found.",
     "peerRevoked": "This device has been revoked. Remove it from Trusted Devices to pair again.",

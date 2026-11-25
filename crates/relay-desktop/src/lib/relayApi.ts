@@ -190,6 +190,35 @@ function parseMockTicketNodeId(ticketJson: string): string {
   return "paired-peer";
 }
 
+function previewDagSnapshot(
+  dag: DagSnapshot_Serialize,
+  includeStale: boolean,
+): DagSnapshot_Serialize {
+  const staleCount = dag.nodes.filter((n) => n.freshness.status === "stale").length;
+  const freshEvidenceCount = dag.nodes.filter(
+    (n) => n.payload.kind === "evidence" && n.freshness.status === "fresh",
+  ).length;
+  const staleEvidenceCount = dag.nodes.filter(
+    (n) => n.payload.kind === "evidence" && n.freshness.status === "stale",
+  ).length;
+  const nodes = includeStale ? dag.nodes : dag.nodes.filter((n) => n.freshness.status !== "stale");
+  const allowed = new Set(nodes.map((n) => n.id));
+  const edges = dag.edges.filter((e) => allowed.has(e.from) && allowed.has(e.to));
+  return structuredClone({
+    ...dag,
+    nodes,
+    edges,
+    stale_count: staleCount,
+    fresh_evidence_count: freshEvidenceCount,
+    stale_evidence_count: staleEvidenceCount,
+    metric_authority_note:
+      freshEvidenceCount === 0 && staleEvidenceCount > 0
+        ? "WARNING: Current HEAD has 0 fresh verified evidence nodes and all prior evidence is STALE/quarantined."
+        : null,
+    captured_at: new Date().toISOString(),
+  });
+}
+
 let mockState: MockWorkspaceState = createInitialMockState();
 const previewWorkspaces = new Map<string, MockWorkspaceState>();
 let previewRecentWorkspaces: RecentWorkspaceEntry_Serialize[] = [];
@@ -312,34 +341,35 @@ async function runMockCopilotTurn(
   };
 
   let responseText = "";
+  const dag = previewDagSnapshot(mockState.dag, true);
   const presetNames = mockState.workspace.presets.map((p) => p.name);
   const hasRepo = Boolean(mockState.workspace.repo_root);
-  const shortHead = (mockState.dag.head_commit_sha ?? "HEAD").slice(0, 7);
+  const shortHead = (dag.head_commit_sha ?? "HEAD").slice(0, 7);
 
   if (lower.includes("outdated") || lower.includes("stale") || prompt.includes("过期")) {
     await runTool("get_dag_snapshot", "{}", () =>
       JSON.stringify(
         {
-          repo_id: mockState.dag.repo_id,
-          head_commit_sha: mockState.dag.head_commit_sha,
-          stale_count: mockState.dag.stale_count,
-          fresh_evidence_count: mockState.dag.fresh_evidence_count,
-          stale_evidence_count: mockState.dag.stale_evidence_count,
-          node_count: mockState.dag.nodes.length,
+          repo_id: dag.repo_id,
+          head_commit_sha: dag.head_commit_sha,
+          stale_count: dag.stale_count,
+          fresh_evidence_count: dag.fresh_evidence_count,
+          stale_evidence_count: dag.stale_evidence_count,
+          metric_authority_note: dag.metric_authority_note,
+          node_count: dag.nodes.length,
         },
         null,
         2,
       ),
     );
-    const staleNodes = mockState.dag.nodes.filter((n) => n.freshness.status === "stale");
     responseText =
-      staleNodes.length > 0
+      dag.stale_evidence_count > 0
         ? isZh
-          ? `检测到 **${staleNodes.length} 项过期结果**（当前提交 \`${shortHead}\`），旧指标已自动隔离。\n\n建议在 \`relay.toml\` 中选择预设重新执行。`
-          : `Found **${staleNodes.length} outdated result(s)** against HEAD \`${shortHead}\`. Quarantined metrics are excluded from reasoning.\n\nRe-run a preset from \`relay.toml\` to record fresh results.`
+          ? `检测到 **${dag.stale_evidence_count} 项过期结果**（当前提交 \`${shortHead}\`），旧指标已自动隔离。\n\n建议在 \`relay.toml\` 中选择预设重新执行。`
+          : `Found **${dag.stale_evidence_count} outdated result(s)** against HEAD \`${shortHead}\`. Quarantined metrics are excluded from reasoning.\n\nRe-run a preset from \`relay.toml\` to record fresh results.`
         : isZh
-          ? `当前没有过期结果（\`stale_count = 0\`）。请先打开包含 \`relay.toml\` 的本地 Git 仓库，或运行首个预设任务。`
-          : `No outdated results right now (\`stale_count = 0\`). Open a local Git repository with \`relay.toml\` or run your first preset task.`;
+          ? `当前没有过期结果。请先打开包含 \`relay.toml\` 的本地 Git 仓库，或运行首个预设任务。`
+          : `No outdated results right now. Open a local Git repository with \`relay.toml\` or run your first preset task.`;
   } else if (
     lower.includes("env") ||
     lower.includes("sync") ||
@@ -351,7 +381,7 @@ async function runMockCopilotTurn(
       await runTool("check_env_diff", '{"commit_sha":"HEAD"}', () =>
         JSON.stringify(
           {
-            commit_sha: mockState.dag.head_commit_sha ?? "HEAD",
+            commit_sha: dag.head_commit_sha ?? "HEAD",
             ecosystem: "generic",
             package_manager: "generic",
             in_sync: true,
@@ -369,12 +399,13 @@ async function runMockCopilotTurn(
     await runTool("get_dag_snapshot", "{}", () =>
       JSON.stringify(
         {
-          repo_id: mockState.dag.repo_id,
-          head_commit_sha: mockState.dag.head_commit_sha,
-          nodes: mockState.dag.nodes.length,
-          stale_count: mockState.dag.stale_count,
-          fresh_evidence_count: mockState.dag.fresh_evidence_count,
-          stale_evidence_count: mockState.dag.stale_evidence_count,
+          repo_id: dag.repo_id,
+          head_commit_sha: dag.head_commit_sha,
+          nodes: dag.nodes.length,
+          stale_count: dag.stale_count,
+          fresh_evidence_count: dag.fresh_evidence_count,
+          stale_evidence_count: dag.stale_evidence_count,
+          metric_authority_note: dag.metric_authority_note,
           presets: presetNames,
         },
         null,
@@ -383,11 +414,11 @@ async function runMockCopilotTurn(
     );
     responseText = isZh
       ? hasRepo
-        ? `当前工作区 **${mockState.workspace.name || mockState.workspace.repo_id}**（HEAD \`${shortHead}\`）共有 **${mockState.dag.nodes.length}** 个图谱节点，可用预设：${presetNames.length > 0 ? presetNames.map((n) => `\`${n}\``).join("、") : "请先配置 `relay.toml`"}。`
-        : "当前尚未打开本地仓库。请在顶部或工作区设置中选择本地 Git 仓库，或者配对一台远程主机。"
+        ? `当前工作区 **${mockState.workspace.name || mockState.workspace.repo_id}**（HEAD \`${shortHead}\`）共有 **${dag.nodes.length}** 个图谱节点，可用预设：${presetNames.length > 0 ? presetNames.map((n) => `\`${n}\``).join("、") : "请先配置 `relay.toml`"}。`
+        : "当前尚未打开本地仓库。请在顶部或工作区设置中选择本地 Git 仓库。"
       : hasRepo
-        ? `Workspace **${mockState.workspace.name || mockState.workspace.repo_id}** (HEAD \`${shortHead}\`) has **${mockState.dag.nodes.length}** graph nodes and presets: ${presetNames.length > 0 ? presetNames.map((n) => `\`${n}\``).join(", ") : "generate `relay.toml` to add presets"}.`
-        : "No local repository is open yet. Open a local Git repository or pair with a remote host to get started.";
+        ? `Workspace **${mockState.workspace.name || mockState.workspace.repo_id}** (HEAD \`${shortHead}\`) has **${dag.nodes.length}** graph nodes and presets: ${presetNames.length > 0 ? presetNames.map((n) => `\`${n}\``).join(", ") : "generate `relay.toml` to add presets"}.`
+        : "No local repository is open yet. Open a local Git repository to get started.";
   }
 
   const chunks = responseText.match(/.{1,12}/gs) ?? [responseText];
@@ -593,23 +624,22 @@ export const relayApi = {
     if (isTauriRuntime()) {
       return commands.saveLlmSettings(update);
     }
-    const nextKey = update.api_key;
-    const hasKey =
-      nextKey === undefined || nextKey === null
-        ? mockState.llm.has_api_key
-        : nextKey.trim().length > 0;
-    const hint =
-      nextKey && nextKey.trim().length > 0
-        ? `${nextKey.trim().slice(0, 3)}••••${nextKey.trim().slice(-4)}`
-        : nextKey === ""
-          ? null
-          : mockState.llm.api_key_hint;
+    const key = update.api_key?.trim();
+    let hint = mockState.llm.api_key_hint;
+    if (key !== undefined) {
+      const characters = Array.from(key);
+      hint = !key
+        ? null
+        : characters.length <= 10
+          ? "••••••"
+          : `${characters.slice(0, 3).join("")}••••${characters.slice(-4).join("")}`;
+    }
     mockState.llm = {
       tier: update.tier,
       base_url: update.base_url.trim(),
       model: update.model.trim(),
       api_key_env: update.api_key_env?.trim() || null,
-      has_api_key: hasKey || Boolean(update.api_key_env?.trim()),
+      has_api_key: hint !== null,
       api_key_hint: hint,
       reasoning_effort: update.reasoning_effort?.trim() || null,
     };
@@ -646,31 +676,7 @@ export const relayApi = {
     if (isTauriRuntime()) {
       return commands.getDagSnapshot(includeStale);
     }
-    const staleCount = mockState.dag.nodes.filter((n) => n.freshness.status === "stale").length;
-    const freshEvidenceCount = mockState.dag.nodes.filter(
-      (n) => n.payload.kind === "evidence" && n.freshness.status === "fresh",
-    ).length;
-    const staleEvidenceCount = mockState.dag.nodes.filter(
-      (n) => n.payload.kind === "evidence" && n.freshness.status === "stale",
-    ).length;
-    const nodes = includeStale
-      ? mockState.dag.nodes
-      : mockState.dag.nodes.filter((n) => n.freshness.status !== "stale");
-    const allowed = new Set(nodes.map((n) => n.id));
-    const edges = mockState.dag.edges.filter((e) => allowed.has(e.from) && allowed.has(e.to));
-    return structuredClone({
-      ...mockState.dag,
-      nodes,
-      edges,
-      stale_count: staleCount,
-      fresh_evidence_count: freshEvidenceCount,
-      stale_evidence_count: staleEvidenceCount,
-      metric_authority_note:
-        freshEvidenceCount === 0 && staleEvidenceCount > 0
-          ? "WARNING: Current HEAD has 0 fresh verified evidence nodes and all prior evidence is STALE/quarantined."
-          : null,
-      captured_at: new Date().toISOString(),
-    });
+    return previewDagSnapshot(mockState.dag, includeStale);
   },
 
   async listTasks(): Promise<TaskRecord_Serialize[]> {

@@ -92,14 +92,13 @@ impl LlmEndpointConfig {
             && !env_name.trim().is_empty()
         {
             cfg.api_key_env = Some(env_name.trim().to_owned());
+            cfg.tier = InferenceTier::CloudOpenAiCompat;
         }
         if let Ok(key) = std::env::var("RELAY_LLM_API_KEY")
             && !key.trim().is_empty()
         {
             cfg.api_key = Some(key.trim().to_owned());
-            if cfg.tier == InferenceTier::HostLocalOllama {
-                cfg.tier = InferenceTier::CloudOpenAiCompat;
-            }
+            cfg.tier = InferenceTier::CloudOpenAiCompat;
         }
         if let Ok(tier) = std::env::var("RELAY_LLM_TIER") {
             match tier.trim().to_ascii_lowercase().as_str() {
@@ -170,7 +169,7 @@ impl LlmEndpointConfig {
 
 fn mask_secret(secret: &str) -> String {
     let chars: Vec<char> = secret.chars().collect();
-    if chars.len() <= 6 {
+    if chars.len() <= 10 {
         return "••••••".to_string();
     }
     let prefix: String = chars[..3].iter().collect();
@@ -229,6 +228,7 @@ pub struct LlmClient {
     model: String,
     api_key: Option<String>,
     reasoning_effort: Option<String>,
+    retry_ollama_errors: bool,
 }
 
 impl LlmClient {
@@ -264,6 +264,7 @@ impl LlmClient {
                 .transpose()?,
         };
         let reasoning_effort = config.effective_reasoning_effort().map(str::to_owned);
+        let retry_ollama_errors = config.tier != InferenceTier::CloudOpenAiCompat;
         let client = Client::builder().timeout(timeout).build().map_err(llm_error)?;
         Ok(Self {
             client,
@@ -273,6 +274,7 @@ impl LlmClient {
             model: config.model,
             api_key,
             reasoning_effort,
+            retry_ollama_errors,
         })
     }
 
@@ -323,18 +325,22 @@ impl LlmClient {
                     role: "user".into(),
                     content: "Reply OK".into(),
                 }];
-                let body = json!({
+                let mut body = json!({
                     "model": self.model,
                     "messages": ping,
                     "max_tokens": 1,
                     "stream": false
                 });
+                if let Some(effort) = &self.reasoning_effort {
+                    body["reasoning_effort"] = json!(effort);
+                }
                 let mut chat_req = self.client.post(self.endpoint.clone()).json(&body);
                 if let Some(key) = &self.api_key {
                     chat_req = chat_req.bearer_auth(key);
                 }
+                let response = chat_req.send().await;
                 let latency_ms = u32::try_from(started.elapsed().as_millis()).unwrap_or(u32::MAX);
-                match chat_req.send().await {
+                match response {
                     Ok(chat_resp) if chat_resp.status().is_success() => LlmProbeResult {
                         ok: true,
                         latency_ms,
@@ -404,17 +410,32 @@ impl LlmClient {
                 return response.json().await.map_err(CompletionError::Transport);
             }
             let err_body = response.text().await.unwrap_or_default();
-            if attempt == 0 && is_retryable_ollama_xml_500(status, &err_body) {
+            if attempt == 0 && self.should_retry_ollama(status, &err_body) {
                 tracing::warn!(
                     model = %self.model,
                     "Retrying /chat/completions once after Ollama HTTP 500 XML parse error"
                 );
                 continue;
             }
-            let detail: String = err_body.chars().take(280).collect();
+            let detail = self.provider_error_detail(&err_body);
             return Err(CompletionError::Http { status, detail });
         }
         unreachable!("request_completion retry loop always returns on attempt 1")
+    }
+
+    fn should_retry_ollama(&self, status: StatusCode, body: &str) -> bool {
+        if !self.retry_ollama_errors || status != StatusCode::INTERNAL_SERVER_ERROR {
+            return false;
+        }
+        let lower = body.to_ascii_lowercase();
+        lower.contains("xml syntax error") || lower.contains("unexpected eof")
+    }
+
+    fn provider_error_detail(&self, body: &str) -> String {
+        match self.api_key.as_deref().filter(|key| !key.is_empty()) {
+            Some(key) => body.replace(key, "[redacted]").chars().take(280).collect(),
+            None => body.chars().take(280).collect(),
+        }
     }
 }
 
@@ -434,14 +455,6 @@ impl CompletionError {
             Self::Http { status, detail } => RelayError::Llm(format!("HTTP {status}: {detail}")),
         }
     }
-}
-
-pub(crate) fn is_retryable_ollama_xml_500(status: StatusCode, body: &str) -> bool {
-    if status != StatusCode::INTERNAL_SERVER_ERROR {
-        return false;
-    }
-    let lower = body.to_ascii_lowercase();
-    lower.contains("xml syntax error") || lower.contains("unexpected eof")
 }
 
 fn llm_error(error: reqwest::Error) -> RelayError {
@@ -761,15 +774,14 @@ pub fn build_safe_dag_context(snapshot: &DagSnapshot) -> String {
         let NodeKind::Evidence { metrics_json, .. } = &node.payload else {
             continue;
         };
-        let status = match node.freshness {
-            Freshness::Fresh => "FRESH",
-            Freshness::PendingVerify => "PENDING_VERIFY",
+        let entry = match node.freshness {
+            Freshness::Fresh => json!({"node_id": node.id, "status": "FRESH", "metrics": metrics_json}),
+            Freshness::PendingVerify => json!({"node_id": node.id, "status": "PENDING_VERIFY"}),
             Freshness::Stale { .. } => {
                 quarantined.push(&node.id);
                 continue;
             }
         };
-        let entry = json!({"node_id": node.id, "status": status, "metrics": metrics_json});
         context.push_str(&entry.to_string());
         context.push('\n');
     }

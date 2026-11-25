@@ -232,8 +232,9 @@
       "submit_task": "提交预设任务",
       "record_decision": "保存了一条记录",
       "read_repo_file": "读取仓库代码文件",
-      "git_diff": "查看未提交 Git 差异",
-      "runningPrefix": "正在执行 {{name}}…"
+      "git_diff": "查看未提交改动",
+      "runningPrefix": "正在{{name}}…",
+      "failed": "{{name}}失败"
     }
   },
   "modals": {
@@ -414,14 +415,15 @@
       "hideKey": "隐藏 API Key",
       "apiKeyEnvLabel": "或从环境变量读取密钥（可选）",
       "apiKeyEnvPlaceholder": "例如：DEEPSEEK_API_KEY 或 OPENAI_API_KEY",
-      "reasoningEffortLabel": "思考强度（Reasoning Effort）",
-      "reasoningEffortHint": "本地 Ollama 与端侧轻量模式默认关闭思考以提升工具调用速度，可按需调整。",
+      "reasoningEffortLabel": "思考强度",
+      "reasoningEffortHint": "本地模型默认关闭以加快工具调用；云端模型默认跟随服务端设置，也可按需指定。",
       "reasoningEffortOption": {
-        "default": "自动",
+        "default": "默认推荐",
         "none": "关闭",
         "low": "低",
         "medium": "中",
-        "high": "高"
+        "high": "高",
+        "auto": "跟随服务端"
       },
       "testBtn": "测试连通性",
       "testingBtn": "测试中…",
@@ -459,6 +461,7 @@
     "openRepoFirst": "请先打开一个本地 Git 仓库。",
     "repoPathEmpty": "请输入本地仓库目录路径。",
     "runtimeShuttingDown": "应用正在关闭，请稍后重试。",
+    "copilotToolLimit": "模型已达到本轮工具调用上限，任务尚未完成。",
     "taskNotCancellable": "该任务当前状态无法取消。",
     "taskNotFound": "未找到该任务。",
     "peerRevoked": "此设备已取消信任，无法继续同步。如需重新配对，请先在受信任设备中将其移除。",

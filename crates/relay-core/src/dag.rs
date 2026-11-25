@@ -21,7 +21,7 @@ pub struct DagEngine {
 }
 
 pub const NO_FRESH_EVIDENCE_AUTHORITY_NOTE: &str = concat!(
-    "WARNING: Current HEAD has 0 fresh verified evidence nodes and all prior evidence is STALE/quarantined. ",
+    "WARNING: Current HEAD has 0 fresh verified evidence nodes. STALE or unverified metrics are quarantined. ",
     "This DAG snapshot is the sole authoritative source of experiment metrics (SSOT). ",
     "Do NOT cite redacted/stale evidence or historical numbers from static repository text files, logs, or handoff notes as valid for current HEAD; ",
     "explicitly report that no fresh verified metrics exist for HEAD and recommend re-running the experiment."
@@ -271,6 +271,9 @@ impl DagEngine {
                 reason: reason.clone(),
             });
         }
+        if node.freshness == Freshness::PendingVerify {
+            return Err(RelayError::UnverifiedEvidenceBlocked(node.id.clone()));
+        }
         Ok(node)
     }
 
@@ -471,5 +474,18 @@ mod tests {
         assert_eq!(mixed.fresh_evidence_count, 1);
         assert_eq!(mixed.stale_evidence_count, 1);
         assert!(mixed.metric_authority_note.is_none());
+    }
+
+    #[test]
+    fn pending_evidence_is_not_verified() {
+        let mut dag = DagEngine::new("test");
+        let mut pending = sample_evidence("pending", "task");
+        pending.freshness = Freshness::PendingVerify;
+        dag.upsert_node(pending);
+        assert!(matches!(
+            dag.assert_evidence_fresh("pending"),
+            Err(RelayError::UnverifiedEvidenceBlocked(id)) if id == "pending"
+        ));
+        assert_eq!(dag.snapshot(true).fresh_evidence_count, 0);
     }
 }

@@ -1,24 +1,24 @@
 # Relay Chaos Suite Report (Track 4 — Live LLM)
 
-- Generated: 2026-11-24T13:42:02+0800
+- Generated: 2026-11-25T05:24:40+0800
 - Model: `deepseek-flash` (`https://api.deepseek.com`)
 - Pass Rate: **8/8 (100.0%)** · Self-Heal: **4/4 (100.0%)**
-- Avg Tool Recall: **1.000** · Retries: **0** · Stale Hallucinations: **0** · Total Tokens: **299127**
+- Avg Tool Recall: **1.000** · Retries: **3** · Stale Hallucinations: **0** · Total Tokens: **363970**
 
 | Case | Fault | Pass | Self-Heal | Tool Recall | Retries | Stale Halluc | Turns | Tokens | LLM Latency (ms) |
 |---|---|---|---|---:|---:|---|---:|---:|---:|
-| `chaos-01-missing-dep` | `missing_dependency` | PASS | YES | 1.00 | 0 | False | 10 | 57968 | 17202.7 |
-| `chaos-02-upstream-edit` | `upstream_code_edit` | PASS | n/a | 1.00 | 0 | False | 4 | 19438 | 13957.6 |
-| `chaos-03-same-line-conflict` | `same_line_conflict` | PASS | YES | 1.00 | 0 | False | 9 | 59156 | 23111.8 |
-| `chaos-04-mid-run-disconnect` | `mid_run_disconnect` | PASS | n/a | 1.00 | 0 | False | 7 | 26129 | 12735.7 |
-| `chaos-05-runtime-exception` | `runtime_exception` | PASS | YES | 1.00 | 0 | False | 7 | 43660 | 15438.3 |
-| `chaos-06-corrupted-lock` | `corrupted_env_lock` | PASS | YES | 1.00 | 0 | False | 9 | 64765 | 30102.4 |
-| `chaos-07-stale-evidence-trap` | `stale_evidence_trap` | PASS | n/a | 1.00 | 0 | False | 4 | 15506 | 9321.4 |
-| `chaos-08-duplicate-replay` | `duplicate_task_replay` | PASS | n/a | 1.00 | 0 | False | 4 | 12505 | 6306.6 |
+| `chaos-01-missing-dep` | `missing_dependency` | PASS | YES | 1.00 | 0 | False | 9 | 67566 | 15720.5 |
+| `chaos-02-upstream-edit` | `upstream_code_edit` | PASS | n/a | 1.00 | 0 | False | 3 | 12468 | 6681.2 |
+| `chaos-03-same-line-conflict` | `same_line_conflict` | PASS | YES | 1.00 | 0 | False | 10 | 79561 | 19389.8 |
+| `chaos-04-mid-run-disconnect` | `mid_run_disconnect` | PASS | n/a | 1.00 | 0 | False | 7 | 29397 | 9547.9 |
+| `chaos-05-runtime-exception` | `runtime_exception` | PASS | YES | 1.00 | 0 | False | 8 | 49481 | 11500.0 |
+| `chaos-06-corrupted-lock` | `corrupted_env_lock` | PASS | YES | 1.00 | 2 | False | 11 | 92760 | 17437.0 |
+| `chaos-07-stale-evidence-trap` | `stale_evidence_trap` | PASS | n/a | 1.00 | 1 | False | 4 | 17578 | 7909.9 |
+| `chaos-08-duplicate-replay` | `duplicate_task_replay` | PASS | n/a | 1.00 | 0 | False | 4 | 15159 | 4552.7 |
 
 ## chaos-01-missing-dep — Missing Python Dependency Auto-Healing
 
-- Called MCP tools: `['inspect_sync_status', 'get_dag_snapshot', 'check_env_diff', 'run_preflight_in_worktree', 'propose_worktree_patch', 'approve_and_execute_task', 'approve_and_execute_task', 'get_dag_snapshot', 'read_evidence_log', 'list_handoffs']` (local read helpers: `['list_repo_files', 'read_repo_file', 'read_repo_file']`)
+- Called MCP tools: `['inspect_sync_status', 'list_handoffs', 'get_dag_snapshot', 'check_env_diff', 'run_preflight_in_worktree', 'propose_worktree_patch', 'approve_and_execute_task', 'approve_and_execute_task', 'get_dag_snapshot', 'read_evidence_log']` (local read helpers: `['list_repo_files', 'read_repo_file', 'read_repo_file', 'read_repo_file']`)
 
 | Assertion | Metric | Expected | Actual | Result |
 |---|---|---|---|---|
@@ -31,7 +31,7 @@
 
 ## chaos-02-upstream-edit — Upstream Code Edit Invalidates Host Evidence
 
-- Called MCP tools: `['get_dag_snapshot', 'inspect_sync_status']` (local read helpers: `['list_repo_files', 'read_repo_file', 'read_repo_file', 'read_repo_file']`)
+- Called MCP tools: `['get_dag_snapshot', 'list_handoffs']` (local read helpers: `[]`)
 
 | Assertion | Metric | Expected | Actual | Result |
 |---|---|---|---|---|
@@ -42,7 +42,7 @@
 
 ## chaos-03-same-line-conflict — Two-Sided Same-Line Conflict Preserved
 
-- Called MCP tools: `['inspect_sync_status', 'run_preflight_in_worktree', 'propose_worktree_patch', 'approve_and_execute_task', 'approve_and_execute_task', 'get_dag_snapshot', 'read_evidence_log']` (local read helpers: `['read_repo_file', 'list_repo_files', 'read_repo_file', 'read_repo_file']`)
+- Called MCP tools: `['inspect_sync_status', 'get_dag_snapshot', 'list_handoffs', 'run_preflight_in_worktree', 'check_env_diff', 'read_worktree_file', 'propose_worktree_patch', 'approve_and_execute_task', 'approve_and_execute_task', 'get_dag_snapshot', 'read_evidence_log']` (local read helpers: `['list_repo_files', 'read_repo_file', 'read_repo_file']`)
 
 | Assertion | Metric | Expected | Actual | Result |
 |---|---|---|---|---|
@@ -64,7 +64,7 @@
 
 ## chaos-05-runtime-exception — Runtime Traceback Self-Healing
 
-- Called MCP tools: `['run_preflight_in_worktree', 'propose_worktree_patch', 'approve_and_execute_task', 'approve_and_execute_task', 'get_dag_snapshot', 'read_evidence_log']` (local read helpers: `['read_repo_file']`)
+- Called MCP tools: `['run_preflight_in_worktree', 'read_worktree_file', 'propose_worktree_patch', 'approve_and_execute_task', 'approve_and_execute_task', 'get_dag_snapshot', 'read_evidence_log']` (local read helpers: `[]`)
 
 | Assertion | Metric | Expected | Actual | Result |
 |---|---|---|---|---|
@@ -76,7 +76,7 @@
 
 ## chaos-06-corrupted-lock — Corrupted Lockfile Recovery
 
-- Called MCP tools: `['run_preflight_in_worktree', 'propose_worktree_patch', 'approve_and_execute_task', 'approve_and_execute_task', 'get_dag_snapshot', 'read_evidence_log']` (local read helpers: `['list_repo_files', 'read_repo_file', 'read_repo_file', 'read_repo_file', 'read_repo_file']`)
+- Called MCP tools: `['run_preflight_in_worktree', 'read_worktree_file', 'read_worktree_file', 'read_worktree_file', 'read_worktree_file', 'read_worktree_file', 'read_worktree_file', 'read_worktree_file', 'propose_worktree_patch', 'approve_and_execute_task', 'approve_and_execute_task', 'get_dag_snapshot', 'read_evidence_log']` (local read helpers: `['list_repo_files']`)
 
 | Assertion | Metric | Expected | Actual | Result |
 |---|---|---|---|---|
@@ -87,7 +87,7 @@
 
 ## chaos-07-stale-evidence-trap — Stale Evidence Trap Under Context Ablation
 
-- Called MCP tools: `['get_dag_snapshot', 'list_handoffs']` (local read helpers: `['read_repo_file']`)
+- Called MCP tools: `['get_dag_snapshot', 'list_handoffs', 'run_preflight_in_worktree']` (local read helpers: `[]`)
 
 | Assertion | Metric | Expected | Actual | Result |
 |---|---|---|---|---|

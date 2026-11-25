@@ -1,6 +1,6 @@
 {
   "experiment": "track5-context-ablation",
-  "generated_at_utc": "2026-11-24T14:09:53Z",
+  "generated_at_utc": "2026-11-24T22:01:41Z",
   "daemon_bin": "target\\debug\\relay-daemon.exe",
   "blake3_determinism_verified": true,
   "scaling": [
@@ -12,7 +12,7 @@
       "fresh_evidence_count": 0,
       "stale_evidence_count": 1,
       "exposed_stale_metrics_count": 1,
-      "context_bundle_hash": "blake3:70c08d79d9fd3021c0327a0fde6fb83392a2b97a1d6a4bd1e958fe704f466767"
+      "context_bundle_hash": "blake3:aed973172f162f74733a1061907cb6bc26fdd0f7e88e0db87b049e8b34f0ca49"
     },
     {
       "snapshot_id": "depth_1",
@@ -22,7 +22,7 @@
       "fresh_evidence_count": 0,
       "stale_evidence_count": 1,
       "exposed_stale_metrics_count": 1,
-      "context_bundle_hash": "blake3:1f78fe95d7cf444d1ab79566d870bfedc6454c90c524cefd3f05d08763f0f0f3"
+      "context_bundle_hash": "blake3:34a022177f97b3498b50152cc054f7f6cb14ee33be9257f264773901095900d2"
     },
     {
       "snapshot_id": "depth_1",
@@ -32,17 +32,17 @@
       "fresh_evidence_count": 0,
       "stale_evidence_count": 1,
       "exposed_stale_metrics_count": 0,
-      "context_bundle_hash": "blake3:5115338e1bd2e27ecee22a38d02100b7117eac5f1f2e0a89dff3ad3757c44cc0"
+      "context_bundle_hash": "blake3:6ca77fbd24f0c5731dc041b5af44a3bd80091aafcd37b370a1b15d6acbb85d61"
     },
     {
       "snapshot_id": "depth_3",
       "history_rounds": 3,
       "strategy": "full_transcript",
-      "estimated_tokens": 2065,
+      "estimated_tokens": 2068,
       "fresh_evidence_count": 0,
       "stale_evidence_count": 3,
       "exposed_stale_metrics_count": 3,
-      "context_bundle_hash": "blake3:efe5b6662ac059ccd116a5ace0c6408579a9df4a8619255fed84fa57cca10368"
+      "context_bundle_hash": "blake3:67b6dbe24355ff2b572021bdcd549b19ed950c7b8fec000ad8b831e78af6b3c8"
     },
     {
       "snapshot_id": "depth_3",
@@ -52,7 +52,7 @@
       "fresh_evidence_count": 0,
       "stale_evidence_count": 3,
       "exposed_stale_metrics_count": 3,
-      "context_bundle_hash": "blake3:389da510096a15163a67086f6ee85dca640196e7520426e9dfd5cec12c0c8d1c"
+      "context_bundle_hash": "blake3:4fa191b711c678f6476f09dd2c9b774c10d1eaaa3e876e00d4d11792066f355e"
     },
     {
       "snapshot_id": "depth_3",
@@ -62,17 +62,17 @@
       "fresh_evidence_count": 0,
       "stale_evidence_count": 3,
       "exposed_stale_metrics_count": 0,
-      "context_bundle_hash": "blake3:8d4c6638bbd1404e409d49031f5d26735ead6a46d3ef179cb24e1e44cd2bb37f"
+      "context_bundle_hash": "blake3:4c154451d918603d5759763d7fd4dffb279053c5df4a640259b40ce97324c792"
     },
     {
       "snapshot_id": "depth_6",
       "history_rounds": 6,
       "strategy": "full_transcript",
-      "estimated_tokens": 3970,
+      "estimated_tokens": 3974,
       "fresh_evidence_count": 0,
       "stale_evidence_count": 6,
       "exposed_stale_metrics_count": 6,
-      "context_bundle_hash": "blake3:1fd93d3465871376938c08a9b4e29e056c813f52d0bbb19797c7153df4cb2c14"
+      "context_bundle_hash": "blake3:3c7da6680861bd65f5e2531c57fb25d28c64430727720f3cb3e78adc7f4e48e7"
     },
     {
       "snapshot_id": "depth_6",
@@ -82,7 +82,7 @@
       "fresh_evidence_count": 0,
       "stale_evidence_count": 6,
       "exposed_stale_metrics_count": 6,
-      "context_bundle_hash": "blake3:7ec82fb494f43b40e846247cabb13f575b99c23852a8a7fddfa3dc320ee7f55a"
+      "context_bundle_hash": "blake3:488f991205f4e04da4eacdb097bf9aa0d7addde955dfecac3fc56b8e09a5c071"
     },
     {
       "snapshot_id": "depth_6",
@@ -92,27 +92,27 @@
       "fresh_evidence_count": 0,
       "stale_evidence_count": 6,
       "exposed_stale_metrics_count": 0,
-      "context_bundle_hash": "blake3:71e3a8a08f3683666e08b9881c89045deb6997cd9d307ba97016d8d6a060263a"
+      "context_bundle_hash": "blake3:bb00226c44848d006fd847c716d77d527711a3135acd823fcda003ec920e6116"
     },
     {
       "snapshot_id": "depth_10",
       "history_rounds": 10,
       "strategy": "full_transcript",
-      "estimated_tokens": 6514,
+      "estimated_tokens": 6517,
       "fresh_evidence_count": 0,
       "stale_evidence_count": 10,
       "exposed_stale_metrics_count": 10,
-      "context_bundle_hash": "blake3:474f8708d9b26f42c16a006cbc163c4b3968f6cd3dbcda8ed0319a3dd929ea7d"
+      "context_bundle_hash": "blake3:1ce9e85fc6d47bcf046c536481d80db6502c4180312ec90211790fee9f5a52f9"
     },
     {
       "snapshot_id": "depth_10",
       "history_rounds": 10,
       "strategy": "flat_summary",
-      "estimated_tokens": 1258,
+      "estimated_tokens": 1259,
       "fresh_evidence_count": 0,
       "stale_evidence_count": 10,
       "exposed_stale_metrics_count": 10,
-      "context_bundle_hash": "blake3:5b9a929c3dbb3d14532a6f8f2b1037d5582aaa8b281fa44fd917268b4a02685d"
+      "context_bundle_hash": "blake3:d81e2e8afa06b6a682cbf90671771465e840b39656252adb23033a885815d058"
     },
     {
       "snapshot_id": "depth_10",
@@ -122,17 +122,17 @@
       "fresh_evidence_count": 0,
       "stale_evidence_count": 10,
       "exposed_stale_metrics_count": 0,
-      "context_bundle_hash": "blake3:17bb2425b0c648853689ddc3a96ebd9cb105b12657e74cc3da8f9c25c593490a"
+      "context_bundle_hash": "blake3:1809eb1c513ff576e4f533c1344704fa8b971083c1a4e521f960c835d0bbe43b"
     },
     {
       "snapshot_id": "depth_mixed_6",
       "history_rounds": 6,
       "strategy": "full_transcript",
-      "estimated_tokens": 3807,
+      "estimated_tokens": 3811,
       "fresh_evidence_count": 1,
       "stale_evidence_count": 5,
       "exposed_stale_metrics_count": 5,
-      "context_bundle_hash": "blake3:f6ba31f4ec7d903927bd86aee1cb5960b7742d40f5b87b4585928eed12375f08"
+      "context_bundle_hash": "blake3:cee75ef5f94d71a85774b554620dec8f9040a61de15672a7b2fd8f108e149d08"
     },
     {
       "snapshot_id": "depth_mixed_6",
@@ -142,7 +142,7 @@
       "fresh_evidence_count": 1,
       "stale_evidence_count": 5,
       "exposed_stale_metrics_count": 5,
-      "context_bundle_hash": "blake3:62ace7900c2772f8ac186494435314125c558310bd613c5f3c6e1a744123c3e6"
+      "context_bundle_hash": "blake3:53e9b4b46eba13a3f08f6698102762e2f4ffb20aee9efb11f61d6a6fc23e72af"
     },
     {
       "snapshot_id": "depth_mixed_6",
@@ -152,7 +152,7 @@
       "fresh_evidence_count": 1,
       "stale_evidence_count": 5,
       "exposed_stale_metrics_count": 0,
-      "context_bundle_hash": "blake3:f6a9ff63f844125be5b4628b077c4daa664b1440c9da4090c6322f5f53191534"
+      "context_bundle_hash": "blake3:ad0667dc3b038c6e8d1bf4b49c65a5c884db40b82c14a625b1acf002cca6e8e7"
     }
   ],
   "matrix": [
@@ -160,134 +160,41 @@
       "model": "deepseek-flash",
       "strategy": "full_transcript",
       "n_queries": 6,
-      "stale_hallucination_count": 0,
-      "stale_hallucination_rate_pct": 0.0,
-      "cites_stale_metric_count": 0,
-      "cites_stale_metric_rate_pct": 0.0,
-      "pass_count": 6,
-      "pass_rate_pct": 100.0,
+      "n_errors": 0,
+      "stale_hallucination_count": 2,
+      "stale_hallucination_rate_pct": 33.3,
+      "cites_stale_metric_count": 2,
+      "cites_stale_metric_rate_pct": 33.3,
+      "pass_count": 4,
+      "pass_rate_pct": 66.7,
       "mixed_fresh_accurate": true,
       "constraints_recalled": true,
-      "avg_estimated_tokens": 3521.3,
-      "avg_prompt_tokens": 5727.8,
-      "median_latency_ms": 2799.3
+      "avg_estimated_tokens": 3523.5,
+      "avg_prompt_tokens": 5712.8,
+      "median_latency_ms": 2470.3
     },
     {
       "model": "deepseek-flash",
       "strategy": "flat_summary",
       "n_queries": 6,
-      "stale_hallucination_count": 3,
-      "stale_hallucination_rate_pct": 50.0,
-      "cites_stale_metric_count": 2,
-      "cites_stale_metric_rate_pct": 33.3,
-      "pass_count": 3,
-      "pass_rate_pct": 50.0,
-      "mixed_fresh_accurate": false,
-      "constraints_recalled": true,
-      "avg_estimated_tokens": 694,
-      "avg_prompt_tokens": 1332.5,
-      "median_latency_ms": 4992.6
-    },
-    {
-      "model": "deepseek-flash",
-      "strategy": "dag_bundle",
-      "n_queries": 6,
-      "stale_hallucination_count": 0,
-      "stale_hallucination_rate_pct": 0.0,
-      "cites_stale_metric_count": 0,
-      "cites_stale_metric_rate_pct": 0.0,
-      "pass_count": 6,
-      "pass_rate_pct": 100.0,
-      "mixed_fresh_accurate": true,
-      "constraints_recalled": true,
-      "avg_estimated_tokens": 905.2,
-      "avg_prompt_tokens": 1628.3,
-      "median_latency_ms": 2077.0
-    },
-    {
-      "model": "qwen3.5:4b",
-      "strategy": "full_transcript",
-      "n_queries": 6,
-      "stale_hallucination_count": 0,
-      "stale_hallucination_rate_pct": 0.0,
-      "cites_stale_metric_count": 0,
-      "cites_stale_metric_rate_pct": 0.0,
-      "pass_count": 6,
-      "pass_rate_pct": 100.0,
-      "mixed_fresh_accurate": true,
-      "constraints_recalled": true,
-      "avg_estimated_tokens": 3521.3,
-      "avg_prompt_tokens": 7077,
-      "median_latency_ms": 23303.5
-    },
-    {
-      "model": "qwen3.5:4b",
-      "strategy": "flat_summary",
-      "n_queries": 6,
-      "stale_hallucination_count": 3,
-      "stale_hallucination_rate_pct": 50.0,
-      "cites_stale_metric_count": 2,
-      "cites_stale_metric_rate_pct": 33.3,
-      "pass_count": 3,
-      "pass_rate_pct": 50.0,
-      "mixed_fresh_accurate": false,
-      "constraints_recalled": true,
-      "avg_estimated_tokens": 694,
-      "avg_prompt_tokens": 1520.2,
-      "median_latency_ms": 43805.4
-    },
-    {
-      "model": "qwen3.5:4b",
-      "strategy": "dag_bundle",
-      "n_queries": 6,
-      "stale_hallucination_count": 0,
-      "stale_hallucination_rate_pct": 0.0,
-      "cites_stale_metric_count": 0,
-      "cites_stale_metric_rate_pct": 0.0,
-      "pass_count": 6,
-      "pass_rate_pct": 100.0,
-      "mixed_fresh_accurate": true,
-      "constraints_recalled": true,
-      "avg_estimated_tokens": 905.2,
-      "avg_prompt_tokens": 1966.2,
-      "median_latency_ms": 25434.6
-    },
-    {
-      "model": "qwen3.5:9b",
-      "strategy": "full_transcript",
-      "n_queries": 6,
-      "stale_hallucination_count": 1,
-      "stale_hallucination_rate_pct": 16.7,
+      "n_errors": 0,
+      "stale_hallucination_count": 2,
+      "stale_hallucination_rate_pct": 33.3,
       "cites_stale_metric_count": 1,
       "cites_stale_metric_rate_pct": 16.7,
-      "pass_count": 5,
-      "pass_rate_pct": 83.3,
-      "mixed_fresh_accurate": true,
-      "constraints_recalled": true,
-      "avg_estimated_tokens": 3521.3,
-      "avg_prompt_tokens": 7077,
-      "median_latency_ms": 37631.5
-    },
-    {
-      "model": "qwen3.5:9b",
-      "strategy": "flat_summary",
-      "n_queries": 6,
-      "stale_hallucination_count": 3,
-      "stale_hallucination_rate_pct": 50.0,
-      "cites_stale_metric_count": 2,
-      "cites_stale_metric_rate_pct": 33.3,
-      "pass_count": 3,
-      "pass_rate_pct": 50.0,
+      "pass_count": 4,
+      "pass_rate_pct": 66.7,
       "mixed_fresh_accurate": false,
       "constraints_recalled": true,
-      "avg_estimated_tokens": 694,
-      "avg_prompt_tokens": 1519.7,
-      "median_latency_ms": 91482.3
+      "avg_estimated_tokens": 694.2,
+      "avg_prompt_tokens": 1335.8,
+      "median_latency_ms": 2751.7
     },
     {
-      "model": "qwen3.5:9b",
+      "model": "deepseek-flash",
       "strategy": "dag_bundle",
       "n_queries": 6,
+      "n_errors": 0,
       "stale_hallucination_count": 0,
       "stale_hallucination_rate_pct": 0.0,
       "cites_stale_metric_count": 0,
@@ -297,8 +204,110 @@
       "mixed_fresh_accurate": true,
       "constraints_recalled": true,
       "avg_estimated_tokens": 905.2,
-      "avg_prompt_tokens": 1966.2,
-      "median_latency_ms": 48684.6
+      "avg_prompt_tokens": 1607.8,
+      "median_latency_ms": 1933.6
+    },
+    {
+      "model": "qwen3.5:4b (no-think)",
+      "strategy": "full_transcript",
+      "n_queries": 6,
+      "n_errors": 0,
+      "stale_hallucination_count": 3,
+      "stale_hallucination_rate_pct": 50.0,
+      "cites_stale_metric_count": 2,
+      "cites_stale_metric_rate_pct": 33.3,
+      "pass_count": 3,
+      "pass_rate_pct": 50.0,
+      "mixed_fresh_accurate": false,
+      "constraints_recalled": true,
+      "avg_estimated_tokens": 3523.5,
+      "avg_prompt_tokens": 7155.7,
+      "median_latency_ms": 3341.4
+    },
+    {
+      "model": "qwen3.5:4b (no-think)",
+      "strategy": "flat_summary",
+      "n_queries": 6,
+      "n_errors": 0,
+      "stale_hallucination_count": 5,
+      "stale_hallucination_rate_pct": 83.3,
+      "cites_stale_metric_count": 4,
+      "cites_stale_metric_rate_pct": 66.7,
+      "pass_count": 1,
+      "pass_rate_pct": 16.7,
+      "mixed_fresh_accurate": false,
+      "constraints_recalled": true,
+      "avg_estimated_tokens": 694.2,
+      "avg_prompt_tokens": 1536.2,
+      "median_latency_ms": 2266.0
+    },
+    {
+      "model": "qwen3.5:4b (no-think)",
+      "strategy": "dag_bundle",
+      "n_queries": 6,
+      "n_errors": 0,
+      "stale_hallucination_count": 0,
+      "stale_hallucination_rate_pct": 0.0,
+      "cites_stale_metric_count": 0,
+      "cites_stale_metric_rate_pct": 0.0,
+      "pass_count": 6,
+      "pass_rate_pct": 100.0,
+      "mixed_fresh_accurate": true,
+      "constraints_recalled": true,
+      "avg_estimated_tokens": 905.2,
+      "avg_prompt_tokens": 1997.2,
+      "median_latency_ms": 2558.1
+    },
+    {
+      "model": "qwen3.5:9b (no-think)",
+      "strategy": "full_transcript",
+      "n_queries": 6,
+      "n_errors": 0,
+      "stale_hallucination_count": 2,
+      "stale_hallucination_rate_pct": 33.3,
+      "cites_stale_metric_count": 2,
+      "cites_stale_metric_rate_pct": 33.3,
+      "pass_count": 4,
+      "pass_rate_pct": 66.7,
+      "mixed_fresh_accurate": true,
+      "constraints_recalled": true,
+      "avg_estimated_tokens": 3523.5,
+      "avg_prompt_tokens": 7155.7,
+      "median_latency_ms": 11043.6
+    },
+    {
+      "model": "qwen3.5:9b (no-think)",
+      "strategy": "flat_summary",
+      "n_queries": 6,
+      "n_errors": 0,
+      "stale_hallucination_count": 5,
+      "stale_hallucination_rate_pct": 83.3,
+      "cites_stale_metric_count": 4,
+      "cites_stale_metric_rate_pct": 66.7,
+      "pass_count": 1,
+      "pass_rate_pct": 16.7,
+      "mixed_fresh_accurate": false,
+      "constraints_recalled": true,
+      "avg_estimated_tokens": 694.2,
+      "avg_prompt_tokens": 1536.2,
+      "median_latency_ms": 5736.1
+    },
+    {
+      "model": "qwen3.5:9b (no-think)",
+      "strategy": "dag_bundle",
+      "n_queries": 6,
+      "n_errors": 0,
+      "stale_hallucination_count": 0,
+      "stale_hallucination_rate_pct": 0.0,
+      "cites_stale_metric_count": 0,
+      "cites_stale_metric_rate_pct": 0.0,
+      "pass_count": 6,
+      "pass_rate_pct": 100.0,
+      "mixed_fresh_accurate": true,
+      "constraints_recalled": true,
+      "avg_estimated_tokens": 905.2,
+      "avg_prompt_tokens": 1997.2,
+      "median_latency_ms": 5551.8
     }
   ]
 }

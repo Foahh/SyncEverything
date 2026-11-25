@@ -1,24 +1,24 @@
 # Relay Chaos Suite Report (Track 4 — Live LLM)
 
-- Generated: 2026-11-24T20:46:27+0800
+- Generated: 2026-11-25T05:43:27+0800
 - Model: `qwen3.5:9b` (`http://127.0.0.1:11434/v1`)
-- Pass Rate: **3/8 (37.5%)** · Self-Heal: **1/4 (25.0%)**
-- Avg Tool Recall: **0.781** · Retries: **23** · Stale Hallucinations: **2** · Total Tokens: **336070**
+- Pass Rate: **6/8 (75.0%)** · Self-Heal: **4/4 (100.0%)**
+- Avg Tool Recall: **0.906** · Retries: **12** · Stale Hallucinations: **0** · Total Tokens: **250426**
 
 | Case | Fault | Pass | Self-Heal | Tool Recall | Retries | Stale Halluc | Turns | Tokens | LLM Latency (ms) |
 |---|---|---|---|---:|---:|---|---:|---:|---:|
-| `chaos-01-missing-dep` | `missing_dependency` | PASS | YES | 0.75 | 0 | False | 8 | 36149 | 48114.2 |
-| `chaos-02-upstream-edit` | `upstream_code_edit` | FAIL | n/a | 1.00 | 0 | True | 2 | 6700 | 31563.0 |
-| `chaos-03-same-line-conflict` | `same_line_conflict` | FAIL | NO | 0.67 | 8 | False | 14 | 103535 | 173223.9 |
-| `chaos-04-mid-run-disconnect` | `mid_run_disconnect` | PASS | n/a | 1.00 | 0 | False | 6 | 19345 | 39471.6 |
-| `chaos-05-runtime-exception` | `runtime_exception` | FAIL | NO | 0.67 | 9 | False | 12 | 84544 | 142440.1 |
-| `chaos-06-corrupted-lock` | `corrupted_env_lock` | FAIL | NO | 0.67 | 6 | False | 11 | 66271 | 226255.8 |
-| `chaos-07-stale-evidence-trap` | `stale_evidence_trap` | FAIL | n/a | 1.00 | 0 | True | 4 | 14475 | 58051.0 |
-| `chaos-08-duplicate-replay` | `duplicate_task_replay` | PASS | n/a | 0.50 | 0 | False | 2 | 5051 | 17312.7 |
+| `chaos-01-missing-dep` | `missing_dependency` | PASS | YES | 0.75 | 0 | False | 8 | 41221 | 48315.8 |
+| `chaos-02-upstream-edit` | `upstream_code_edit` | PASS | n/a | 1.00 | 0 | False | 2 | 7248 | 20719.9 |
+| `chaos-03-same-line-conflict` | `same_line_conflict` | PASS | YES | 1.00 | 0 | False | 7 | 41255 | 69596.7 |
+| `chaos-04-mid-run-disconnect` | `mid_run_disconnect` | PASS | n/a | 1.00 | 0 | False | 6 | 23895 | 52176.3 |
+| `chaos-05-runtime-exception` | `runtime_exception` | FAIL | YES | 1.00 | 2 | False | 8 | 49505 | 67250.4 |
+| `chaos-06-corrupted-lock` | `corrupted_env_lock` | FAIL | YES | 1.00 | 10 | False | 14 | 74425 | 144425.3 |
+| `chaos-07-stale-evidence-trap` | `stale_evidence_trap` | PASS | n/a | 1.00 | 0 | False | 2 | 7013 | 13547.4 |
+| `chaos-08-duplicate-replay` | `duplicate_task_replay` | PASS | n/a | 0.50 | 0 | False | 2 | 5864 | 11912.2 |
 
 ## chaos-01-missing-dep — Missing Python Dependency Auto-Healing
 
-- Called MCP tools: `['get_dag_snapshot', 'inspect_sync_status', 'run_preflight_in_worktree', 'propose_worktree_patch', 'approve_and_execute_task', 'approve_and_execute_task', 'get_dag_snapshot']` (local read helpers: `['list_repo_files']`)
+- Called MCP tools: `['inspect_sync_status', 'get_dag_snapshot', 'run_preflight_in_worktree', 'propose_worktree_patch', 'approve_and_execute_task', 'approve_and_execute_task', 'get_dag_snapshot']` (local read helpers: `['list_repo_files']`)
 
 | Assertion | Metric | Expected | Actual | Result |
 |---|---|---|---|---|
@@ -33,9 +33,6 @@
 
 - Called MCP tools: `['get_dag_snapshot']` (local read helpers: `[]`)
 
-Notes:
-- LLM answer failed STALE anti-hallucination check
-
 | Assertion | Metric | Expected | Actual | Result |
 |---|---|---|---|---|
 | single_evidence_invalidated | `stale_evidence_count` | 1 | 1 | PASS |
@@ -45,16 +42,13 @@ Notes:
 
 ## chaos-03-same-line-conflict — Two-Sided Same-Line Conflict Preserved
 
-- Called MCP tools: `['run_preflight_in_worktree', 'propose_worktree_patch', 'propose_worktree_patch', 'propose_worktree_patch', 'propose_worktree_patch', 'propose_worktree_patch', 'inspect_sync_status', 'propose_worktree_patch', 'propose_worktree_patch', 'propose_worktree_patch']` (local read helpers: `['read_repo_file', 'read_repo_file', 'read_repo_file', 'list_repo_files']`)
-
-Notes:
-- LLM loop aborted: [MAX_TURNS_EXCEEDED]
+- Called MCP tools: `['run_preflight_in_worktree', 'read_worktree_file', 'propose_worktree_patch', 'approve_and_execute_task', 'approve_and_execute_task', 'get_dag_snapshot']` (local read helpers: `[]`)
 
 | Assertion | Metric | Expected | Actual | Result |
 |---|---|---|---|---|
-| client_apply_conflict | `conflict_apply_failed` | true | false | FAIL |
+| client_apply_conflict | `conflict_apply_failed` | true | true | PASS |
 | client_edit_preserved | `client_edit_preserved` | true | true | PASS |
-| host_run_still_verified | `evidence_fresh_count` | 1 | 0 | FAIL |
+| host_run_still_verified | `evidence_fresh_count` | 1 | 1 | PASS |
 | host_main_tree_untouched | `main_worktree_dirty` | false | false | PASS |
 
 ## chaos-04-mid-run-disconnect — Mid-Run Disconnect Leaves Recoverable Host State
@@ -70,39 +64,33 @@ Notes:
 
 ## chaos-05-runtime-exception — Runtime Traceback Self-Healing
 
-- Called MCP tools: `['run_preflight_in_worktree', 'propose_worktree_patch', 'propose_worktree_patch', 'propose_worktree_patch', 'propose_worktree_patch', 'propose_worktree_patch', 'propose_worktree_patch', 'propose_worktree_patch', 'propose_worktree_patch', 'propose_worktree_patch']` (local read helpers: `['read_repo_file']`)
-
-Notes:
-- LLM loop aborted: [LOOP_ABORTED] Repeated identical tool call: propose_worktree_patch
+- Called MCP tools: `['run_preflight_in_worktree', 'read_worktree_file', 'read_worktree_file', 'propose_worktree_patch', 'read_worktree_file', 'propose_worktree_patch', 'approve_and_execute_task']` (local read helpers: `[]`)
 
 | Assertion | Metric | Expected | Actual | Result |
 |---|---|---|---|---|
 | preflight_name_error_detected | `preflight_name_error_detected` | true | true | PASS |
-| smoke_verified_after_fix | `proposal_smoke_verified` | true | false | FAIL |
+| smoke_verified_after_fix | `proposal_smoke_verified` | true | true | PASS |
 | host_main_tree_untouched | `main_worktree_dirty` | false | false | PASS |
 | grid_metrics_match_fixture | `host_metrics_best_window` | 28 | null | FAIL |
-| task_completed | `task_state_final` | "completed" | "preflight_running" | FAIL |
+| task_completed | `task_state_final` | "completed" | "self_healing_proposed" | FAIL |
 
 ## chaos-06-corrupted-lock — Corrupted Lockfile Recovery
 
-- Called MCP tools: `['run_preflight_in_worktree', 'propose_worktree_patch', 'propose_worktree_patch', 'propose_worktree_patch', 'propose_worktree_patch', 'propose_worktree_patch']` (local read helpers: `['read_repo_file', 'read_repo_file', 'list_repo_files', 'read_repo_file', 'read_repo_file']`)
+- Called MCP tools: `['run_preflight_in_worktree', 'read_worktree_file', 'read_worktree_file', 'propose_worktree_patch', 'propose_worktree_patch', 'propose_worktree_patch', 'propose_worktree_patch', 'propose_worktree_patch', 'propose_worktree_patch', 'propose_worktree_patch', 'propose_worktree_patch', 'propose_worktree_patch', 'propose_worktree_patch', 'propose_worktree_patch', 'approve_and_execute_task']` (local read helpers: `[]`)
 
 Notes:
-- LLM loop aborted: [LOOP_ABORTED] Repeated identical tool call: read_repo_file
+- LLM loop aborted: [MAX_TURNS_EXCEEDED]
 
 | Assertion | Metric | Expected | Actual | Result |
 |---|---|---|---|---|
 | lock_parse_failure_detected | `uv_lock_parse_failed` | true | true | PASS |
-| repair_smoke_verified | `proposal_smoke_verified` | true | false | FAIL |
+| repair_smoke_verified | `proposal_smoke_verified` | true | true | PASS |
 | host_main_tree_untouched | `main_worktree_dirty` | false | false | PASS |
-| task_completed | `task_state_final` | "completed" | "preflight_running" | FAIL |
+| task_completed | `task_state_final` | "completed" | "self_healing_proposed" | FAIL |
 
 ## chaos-07-stale-evidence-trap — Stale Evidence Trap Under Context Ablation
 
-- Called MCP tools: `['get_dag_snapshot', 'read_evidence_log', 'get_dag_snapshot']` (local read helpers: `[]`)
-
-Notes:
-- LLM answer failed STALE anti-hallucination check
+- Called MCP tools: `['get_dag_snapshot']` (local read helpers: `[]`)
 
 | Assertion | Metric | Expected | Actual | Result |
 |---|---|---|---|---|

@@ -49,6 +49,7 @@ BENCH_DIR = DEFAULT_OUT.parent
 COURSE_ROOT = BENCH_DIR.parent
 REPO_ROOT = COURSE_ROOT.parent
 sys.path.insert(0, str(COURSE_ROOT / "eval"))
+from llm_http import is_retryable_ollama_xml_500
 from stale_metrics import forecast_error_values, reported_decimal_values
 
 FIXTURE_SRC = BENCH_DIR / "fixture-repo"
@@ -624,11 +625,6 @@ def score_response(query: dict[str, Any], snapshot: dict[str, Any], answer: str)
     }
 
 
-def is_retryable_ollama_xml_500(code: int, detail: str) -> bool:
-    lower = detail.lower()
-    return code == 500 and ("xml syntax error" in lower or "unexpected eof" in lower)
-
-
 def call_openai_chat(
     base_url: str,
     model: str,
@@ -665,7 +661,7 @@ def call_openai_chat(
         except urllib.error.HTTPError as err:
             with err:
                 detail = err.read().decode("utf-8", errors="replace")
-            if attempt == 0 and is_retryable_ollama_xml_500(err.code, detail):
+            if attempt == 0 and is_retryable_ollama_xml_500(url, err.code, detail):
                 continue
             raise RuntimeError(f"HTTP {err.code}: {detail[:300]}") from err
     raise RuntimeError(f"Failed request to {url}")
@@ -763,7 +759,7 @@ def main() -> int:
     if args.retry_errors:
         if args.dry_run or not (inputs_file.is_file() and runs_jsonl.is_file()):
             parser.error("--retry-errors requires saved live inputs and rows from the same run; rerun legacy datasets in full")
-        inputs_bytes = inputs_file.read_text(encoding="utf-8").encode("utf-8")
+        inputs_bytes = inputs_file.read_bytes()
         inputs = json.loads(inputs_bytes)
         snapshots = inputs["snapshots"]
     else:
@@ -821,19 +817,33 @@ def main() -> int:
     retry_keys: set[tuple[str, str, str]] = set()
     if args.retry_errors:
         selected = {spec["label"] for spec in model_specs}
+        by_query = {q["query_id"]: q for q in queries}
         for line in runs_jsonl.read_text(encoding="utf-8").splitlines():
             if not line.strip():
                 continue
             rec = json.loads(line)
             key = (rec["model"], rec["query_id"], rec["strategy"])
-            expected_hash = snapshots[rec["snapshot_id"]]["bundles"][rec["strategy"]]["context_bundle_hash"]
-            if rec.get("inputs_sha256") != inputs_sha256 or rec["context_bundle_hash"] != expected_hash:
+            query = by_query[rec["query_id"]]
+            expected_hash = snapshots[query["snapshot_id"]]["bundles"][rec["strategy"]]["context_bundle_hash"]
+            if (rec["snapshot_id"] != query["snapshot_id"] or rec["query_kind"] != query["kind"]
+                    or rec.get("inputs_sha256") != inputs_sha256 or rec["context_bundle_hash"] != expected_hash):
                 raise ValueError(f"Saved inputs do not match row {key}; rerun the complete experiment")
             if key in records:
                 raise ValueError(f"Duplicate result row {key}")
             records[key] = rec
             if rec.get("error") and rec["model"] in selected:
                 retry_keys.add(key)
+        expected = {(label, query, strategy) for label in {k[0] for k in records}
+                    for query in by_query for strategy in STRATEGIES}
+        if not records or records.keys() != expected:
+            raise ValueError("Incomplete saved result matrix; rerun the complete experiment")
+        if not selected.issubset({k[0] for k in records}):
+            raise ValueError("Selected model was absent from the saved experiment")
+        configs = {s["label"]: (s["model"], s["base_url"], s["reasoning_effort"]) for s in model_specs}
+        for key in retry_keys:
+            row = records[key]
+            if (row["endpoint_model"], row["base_url"], row["reasoning_effort"]) != configs[key[0]]:
+                raise ValueError(f"Retry model configuration changed for {key}; rerun the complete experiment")
         if not retry_keys:
             print("[ablation] --retry-errors: no error rows for the selected models", flush=True)
             return int(any(r["error"] is not None for r in records.values()))
@@ -862,8 +872,6 @@ def main() -> int:
                 bundle = snap["bundles"][strat]
                 if args.retry_errors and key not in retry_keys:
                     continue
-                if args.retry_errors and (records[key]["endpoint_model"], records[key]["base_url"]) != (spec["model"], spec["base_url"]):
-                    raise ValueError(f"Retry endpoint or model changed for {key}; rerun the complete experiment")
                 messages = [
                     {"role": "system", "content": inputs["system_prompt"]},
                     {
@@ -880,6 +888,7 @@ def main() -> int:
                 latency_ms = 0.0
                 p_tok = 0
                 c_tok = 0
+                request_started = time.perf_counter()
                 try:
                     resp, latency_ms = call_openai_chat(
                         spec["base_url"],
@@ -895,6 +904,7 @@ def main() -> int:
                     p_tok = int(usage.get("prompt_tokens", 0))
                     c_tok = int(usage.get("completion_tokens", 0))
                 except Exception as exc:
+                    latency_ms = (time.perf_counter() - request_started) * 1000.0
                     error_msg = sanitize_text(str(exc))
 
                 scored = score_response(q, snap, answer) if error_msg is None else {

@@ -1,13 +1,15 @@
 use crate::contracts::{
     ApprovalDecision, ApprovalExecutionResponse, ApproveAndExecuteArgs, CheckEnvDiffArgs,
-    DagSnapshot, EnvDiffReport, Freshness, GetDagSnapshotArgs, GraphNode, HandoffSummary, JsonValue,
-    ListHandoffsArgs, NodeKind, PatchProposal, PeerStatus, ProposeWorktreePatchArgs,
+    DagSnapshot, EnvDiffReport, Freshness, GetDagSnapshotArgs, GraphNode, HandoffSummary,
+    JsonValue, ListHandoffsArgs, NodeKind, PatchProposal, PeerStatus, ProposeWorktreePatchArgs,
     ReadEvidenceLogArgs, ReadWorktreeFileArgs, RunPreflightArgs, TaskId, TaskRecord, TaskState,
     TransportPath, WorktreeFileView,
 };
 use crate::engine::RelayEngine;
 use crate::error::{RelayError, RelayResult};
-use crate::sandbox::{PatchInput, PatchVerification, PreflightReport, WorktreeHandle, WorktreeSandbox};
+use crate::sandbox::{
+    PatchInput, PatchVerification, PreflightReport, WorktreeHandle, WorktreeSandbox,
+};
 use crate::state::validate_transition;
 use crate::sync::RelayNode;
 use chrono::Utc;
@@ -29,7 +31,6 @@ struct RelayMcpContext {
     engine: Arc<RelayEngine>,
     sandbox: Option<WorktreeSandbox>,
     node: RwLock<Option<Arc<RelayNode>>>,
-    active_worktrees: Arc<Mutex<HashMap<TaskId, WorktreeHandle>>>,
     task_locks: Mutex<HashMap<TaskId, Weak<Mutex<()>>>>,
 }
 
@@ -64,7 +65,6 @@ impl RelayMcpServer {
                 engine,
                 sandbox,
                 node: RwLock::new(node),
-                active_worktrees: Arc::default(),
                 task_locks: Mutex::default(),
             }),
             tool_router: Self::tool_router(),
@@ -101,7 +101,7 @@ impl RelayMcpServer {
     ) -> RelayResult<TaskRecord> {
         let context = self.context.clone();
         finish_operation(async move {
-            let _guard = context.lock_task(task_id).await;
+            let _guard = context.lock_task(task_id).await?;
             let task = context.task(task_id).await?;
             match (decision, task.state) {
                 (ApprovalDecision::Rejected, TaskState::Rejected) => {
@@ -131,16 +131,22 @@ impl RelayMcpServer {
             .await
     }
 
-    pub async fn handle_check_env_diff(&self, args: CheckEnvDiffArgs) -> RelayResult<EnvDiffReport> {
+    pub async fn handle_check_env_diff(
+        &self,
+        args: CheckEnvDiffArgs,
+    ) -> RelayResult<EnvDiffReport> {
         self.context
             .sandbox()?
             .check_env_diff(&args.commit_sha)
             .await
     }
 
-    pub async fn handle_get_dag_snapshot(&self, _args: GetDagSnapshotArgs) -> RelayResult<DagSnapshot> {
+    pub async fn handle_get_dag_snapshot(
+        &self,
+        _args: GetDagSnapshotArgs,
+    ) -> RelayResult<DagSnapshot> {
         let mut snapshot = self.context.engine.dag_snapshot(true).await?;
-        redact_stale_evidence_metrics(&mut snapshot);
+        redact_unverified_evidence_metrics(&mut snapshot);
         Ok(snapshot)
     }
 
@@ -163,11 +169,14 @@ impl RelayMcpServer {
         Ok(EvidenceLog { node, log_tail })
     }
 
-    pub async fn handle_run_preflight(&self, args: RunPreflightArgs) -> RelayResult<PreflightReport> {
+    pub async fn handle_run_preflight(
+        &self,
+        args: RunPreflightArgs,
+    ) -> RelayResult<PreflightReport> {
         let task_id = parse_task_id(&args.task_id)?;
         let context = self.context.clone();
         finish_operation(async move {
-            let _guard = context.lock_task(task_id).await;
+            let _guard = context.lock_task(task_id).await?;
             let task = context.task(task_id).await?;
             context.run_preflight(&task).await
         })
@@ -181,7 +190,7 @@ impl RelayMcpServer {
         let task_id = parse_task_id(&args.task_id)?;
         let context = self.context.clone();
         finish_operation(async move {
-            let _guard = context.lock_task(task_id).await;
+            let _guard = context.lock_task(task_id).await?;
             let task = context.task(task_id).await?;
             context.read_worktree_file(&task, &args).await
         })
@@ -193,38 +202,12 @@ impl RelayMcpServer {
         args: ProposeWorktreePatchArgs,
     ) -> RelayResult<PatchProposal> {
         let task_id = parse_task_id(&args.task_id)?;
-        match args.patch_kind.as_str() {
-            "dependency_spec" => {
-                if args
-                    .dependency_spec
-                    .as_deref()
-                    .map(str::trim)
-                    .is_none_or(str::is_empty)
-                {
-                    return Err(RelayError::Internal(
-                        "patch_kind 'dependency_spec' requires a non-empty 'dependency_spec' string"
-                            .into(),
-                    ));
-                }
-            }
-            "code_diff" => {
-                if args.edits.as_deref().is_none_or(|edits| edits.is_empty()) {
-                    return Err(RelayError::Internal(
-                        "patch_kind 'code_diff' requires a non-empty 'edits' array".into(),
-                    ));
-                }
-            }
-            kind => {
-                return Err(RelayError::Internal(format!(
-                    "unknown patch kind '{kind}' (expected 'dependency_spec' or 'code_diff')"
-                )));
-            }
-        }
         let context = self.context.clone();
         finish_operation(async move {
-            let _guard = context.lock_task(task_id).await;
+            let input = parse_patch_input(&args)?;
+            let _guard = context.lock_task(task_id).await?;
             let task = context.task(task_id).await?;
-            context.propose_patch(&task, &args).await
+            context.propose_patch(&task, input, &args.summary).await
         })
         .await
     }
@@ -236,7 +219,7 @@ impl RelayMcpServer {
     ) -> RelayResult<ApprovalExecutionResponse> {
         let task_id = parse_task_id(&args.task_id)?;
         let context = self.context.clone();
-        let guard = context.lock_task(task_id).await;
+        let guard = context.lock_task(task_id).await?;
         let task = context.task(task_id).await?;
         let proposal = task.active_proposal.as_ref();
         let patch_id = proposal.map(|patch| patch.patch_id.as_str());
@@ -276,11 +259,10 @@ impl RelayMcpServer {
                 || format!("Approve running preset '{}'", task.spec.command_preset),
                 |patch| patch.summary.clone(),
             );
-            let diff_preview = proposal.map_or_else(String::new, |patch| patch.diff_preview.clone());
+            let diff_preview =
+                proposal.map_or_else(String::new, |patch| patch.diff_preview.clone());
             let decision = match request {
-                Some(request) => {
-                    elicit_approval(request, task_id, &summary, &diff_preview).await
-                }
+                Some(request) => elicit_approval(request, task_id, &summary, &diff_preview).await,
                 None => None,
             };
             let Some(decision) = decision else {
@@ -323,7 +305,10 @@ impl RelayMcpContext {
             .ok_or_else(|| RelayError::TaskNotFound(task_id.to_string()))
     }
 
-    async fn lock_task(&self, task_id: TaskId) -> OwnedMutexGuard<()> {
+    async fn lock_task(
+        &self,
+        task_id: TaskId,
+    ) -> RelayResult<(OwnedMutexGuard<()>, Option<std::fs::File>)> {
         let lock = {
             let mut locks = self.task_locks.lock().await;
             locks.retain(|_, lock| lock.strong_count() != 0);
@@ -335,16 +320,43 @@ impl RelayMcpContext {
                 lock
             }
         };
-        lock.lock_owned().await
+        let guard = lock.lock_owned().await;
+        let Some(sandbox) = &self.sandbox else {
+            return Ok((guard, None));
+        };
+        self.task(task_id).await?;
+        // Desktop and daemon may open the same worktree. Coordinate inspection,
+        // preparation, approval and cleanup through an OS lock released on exit.
+        let dir = sandbox.worktrees_base().join(".locks");
+        tokio::fs::create_dir_all(&dir).await?;
+        let file = tokio::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(dir.join(task_id.to_string()))
+            .await?
+            .into_std()
+            .await;
+        loop {
+            match file.try_lock() {
+                Ok(()) => return Ok((guard, Some(file))),
+                Err(std::fs::TryLockError::WouldBlock) => {
+                    tokio::time::sleep(Duration::from_millis(50)).await
+                }
+                Err(std::fs::TryLockError::Error(err)) => return Err(err.into()),
+            }
+        }
     }
 
     async fn find_worktree(&self, task: &TaskRecord) -> RelayResult<Option<WorktreeHandle>> {
         let id = task.spec.task_id;
-        if let Some(handle) = self.active_worktrees.lock().await.get(&id).cloned() {
-            return Ok(Some(handle));
-        }
         match &self.sandbox {
-            Some(sandbox) => sandbox.reopen_worktree(id, &task.spec.base_commit_sha).await,
+            Some(sandbox) => {
+                sandbox
+                    .reopen_worktree(id, &task.spec.base_commit_sha)
+                    .await
+            }
             None => Ok(None),
         }
     }
@@ -355,18 +367,22 @@ impl RelayMcpContext {
         let handle = match self.find_worktree(task).await? {
             Some(handle) => handle,
             None if task.active_proposal.is_some() => {
-                return Err(RelayError::Internal("verified patch worktree is missing".into()));
+                return Err(RelayError::Internal(
+                    "verified patch worktree is missing".into(),
+                ));
             }
-            None => sandbox.prepare_worktree(id, &task.spec.base_commit_sha).await?,
+            None => {
+                sandbox
+                    .prepare_worktree(id, &task.spec.base_commit_sha)
+                    .await?
+            }
         };
-        self.active_worktrees.lock().await.insert(id, handle.clone());
         Ok(handle)
     }
 
     async fn cleanup_worktree(&self, task: &TaskRecord) -> RelayResult<()> {
         if let Some(handle) = self.find_worktree(task).await? {
             handle.cleanup().await?;
-            self.active_worktrees.lock().await.remove(&task.spec.task_id);
         }
         Ok(())
     }
@@ -486,7 +502,8 @@ impl RelayMcpContext {
     async fn propose_patch(
         &self,
         task: &TaskRecord,
-        args: &ProposeWorktreePatchArgs,
+        patch: PatchInput<'_>,
+        summary: &str,
     ) -> RelayResult<PatchProposal> {
         let sandbox = self.sandbox()?;
         self.start_preflight(task).await?;
@@ -498,51 +515,22 @@ impl RelayMcpContext {
             .engine
             .preset_run_options(task.spec.task_id, cancel_guard.token());
         let handle = self.worktree(task).await?;
-        let manifest = sandbox.host_manifest()?;
-        let patch_input = match args.patch_kind.as_str() {
-            "dependency_spec" => PatchInput::DependencySpec(
-                args.dependency_spec
-                    .as_deref()
-                    .map(str::trim)
-                    .filter(|s| !s.is_empty())
-                    .ok_or_else(|| {
-                        RelayError::Internal(
-                            "patch_kind 'dependency_spec' requires a non-empty 'dependency_spec' string"
-                                .into(),
-                        )
-                    })?,
-            ),
-            "code_diff" => PatchInput::CodeDiff(
-                args.edits
-                    .as_deref()
-                    .filter(|edits| !edits.is_empty())
-                    .ok_or_else(|| {
-                        RelayError::Internal(
-                            "patch_kind 'code_diff' requires a non-empty 'edits' array".into(),
-                        )
-                    })?,
-            ),
-            kind => {
-                return Err(RelayError::Internal(format!(
-                    "unknown patch kind '{kind}' (expected 'dependency_spec' or 'code_diff')"
-                )));
-            }
-        };
         let id = task.spec.task_id;
         let verification = sandbox
             .apply_and_verify_patch_with_options(
                 id,
                 handle.worktree_path(),
                 handle.branch_name(),
-                &manifest,
-                patch_input,
-                &args.summary,
+                patch,
+                summary,
                 options,
             )
             .await;
-        let (proposal, raw_log) = match verification {
-            Ok(PatchVerification::Finished(proposal, log)) => (proposal, log),
-            Ok(PatchVerification::Cancelled(log)) => {
+        let (proposal, raw_log, checkpoint) = match verification {
+            Ok((PatchVerification::Finished(proposal, log), checkpoint)) => {
+                (proposal, log, checkpoint)
+            }
+            Ok((PatchVerification::Cancelled(log), _)) => {
                 if !log.is_empty() {
                     let _ = self.engine.record_cancelled_task_log(id, &log).await;
                 }
@@ -568,15 +556,30 @@ impl RelayMcpContext {
                 proposal.smoke_stdout_tail,
             )));
         }
-        let attachment = self.engine.attach_patch_proposal(proposal).await;
-        if attachment.is_err() && self.task(id).await?.state == TaskState::Cancelled {
-            self.cleanup_after_error(task).await;
-            return Err(RelayError::TaskCancelled(id.to_string()));
-        }
-        let task = attachment?;
-        task.active_proposal.ok_or_else(|| {
-            RelayError::Internal("verified patch was not recorded".into())
-        })
+        let task = match self.engine.attach_patch_proposal(proposal).await {
+            Ok(task) => task,
+            Err(error) => {
+                if self
+                    .task(id)
+                    .await
+                    .is_ok_and(|task| task.state == TaskState::Cancelled)
+                {
+                    self.cleanup_after_error(task).await;
+                    return Err(RelayError::TaskCancelled(id.to_string()));
+                }
+                checkpoint
+                    .restore(handle.worktree_path())
+                    .await
+                    .map_err(|restore| {
+                        RelayError::Internal(format!(
+                            "{error}; could not restore the task worktree: {restore}"
+                        ))
+                    })?;
+                return Err(error);
+            }
+        };
+        task.active_proposal
+            .ok_or_else(|| RelayError::Internal("verified patch was not recorded".into()))
     }
 
     async fn finish_approval(
@@ -795,13 +798,45 @@ fn format_exit_status_detail(exit_code: Option<i32>) -> String {
 }
 
 fn format_smoke_failure_summary(exit_code: Option<i32>) -> String {
-    format!("Quick check failed ({})", format_exit_status_detail(exit_code))
+    format!(
+        "Quick check failed ({})",
+        format_exit_status_detail(exit_code)
+    )
 }
 
 fn rejected(task_id: TaskId) -> ApprovalExecutionResponse {
     ApprovalExecutionResponse::Rejected {
         task_id: task_id.to_string(),
         reason: "User declined or cancelled approval".into(),
+    }
+}
+
+fn parse_patch_input(args: &ProposeWorktreePatchArgs) -> RelayResult<PatchInput<'_>> {
+    match args.patch_kind.as_str() {
+        "dependency_spec" => Ok(PatchInput::DependencySpec(
+            args.dependency_spec
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| {
+                    RelayError::Internal(
+                        "patch_kind 'dependency_spec' requires a non-empty 'dependency_spec' string".into(),
+                    )
+                })?,
+        )),
+        "code_diff" => Ok(PatchInput::CodeDiff(
+            args.edits
+                .as_deref()
+                .filter(|edits| !edits.is_empty())
+                .ok_or_else(|| {
+                    RelayError::Internal(
+                        "patch_kind 'code_diff' requires a non-empty 'edits' array".into(),
+                    )
+                })?,
+        )),
+        kind => Err(RelayError::Internal(format!(
+            "unknown patch kind '{kind}' (expected 'dependency_spec' or 'code_diff')"
+        ))),
     }
 }
 
@@ -819,15 +854,17 @@ async fn finish_operation<T: Send + 'static>(
         .map_err(|error| RelayError::Internal(error.to_string()))?
 }
 
-fn redact_stale_evidence_metrics(snapshot: &mut DagSnapshot) {
+fn redact_unverified_evidence_metrics(snapshot: &mut DagSnapshot) {
     for node in &mut snapshot.nodes {
-        if !matches!(node.freshness, Freshness::Stale { .. }) {
-            continue;
-        }
+        let reason = match node.freshness {
+            Freshness::Fresh => continue,
+            Freshness::PendingVerify => "unverified_evidence_metrics_redacted",
+            Freshness::Stale { .. } => "stale_evidence_metrics_redacted",
+        };
         if let NodeKind::Evidence { metrics_json, .. } = &mut node.payload {
             *metrics_json = serde_json::json!({
                 "quarantined": true,
-                "reason": "stale_evidence_metrics_redacted",
+                "reason": reason,
             })
             .into();
         }
@@ -843,7 +880,11 @@ fn tool_result<T: Serialize>(result: RelayResult<T>) -> Result<CallToolResult, M
                 "STALE evidence must not be cited. {error}"
             ))]));
         }
-        Err(error) => return Ok(CallToolResult::error(vec![ContentBlock::text(error.to_string())])),
+        Err(error) => {
+            return Ok(CallToolResult::error(vec![ContentBlock::text(
+                error.to_string(),
+            )]));
+        }
     };
     Ok(CallToolResult::success(vec![ContentBlock::text(text)]))
 }

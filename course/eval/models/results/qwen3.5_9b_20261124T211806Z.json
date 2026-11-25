@@ -1,0 +1,115 @@
+{
+  "model": "qwen3.5:9b",
+  "base_url": "http://127.0.0.1:11434/v1",
+  "dry_run": false,
+  "scoring_version": 3,
+  "timestamp_utc": "2026-11-24T21:18:06Z",
+  "endpoint_model": "relay-qwen3.5-9b-16k",
+  "summary": {
+    "passed_scenarios": 3,
+    "total_scenarios": 4,
+    "pass_rate_pct": 75.0,
+    "avg_tool_recall": 0.917,
+    "stale_hallucination_rate_pct": 0.0,
+    "loop_abort_rate_pct": 25.0,
+    "self_heal_passed": false,
+    "median_latency_ms": 23987.3,
+    "total_tokens": 83107
+  },
+  "scenarios": [
+    {
+      "scenario_id": "S1_sync_and_handoffs",
+      "passed": true,
+      "expected_tools": [
+        "inspect_sync_status",
+        "list_handoffs"
+      ],
+      "called_tools": [
+        "inspect_sync_status",
+        "list_handoffs"
+      ],
+      "tool_recall": 1.0,
+      "stale_hallucination": false,
+      "loop_aborted": false,
+      "self_heal_verified": null,
+      "turns": 2,
+      "latency_ms": 26978.0,
+      "prompt_tokens": 5861,
+      "completion_tokens": 725,
+      "final_answer": "Here's your Relay sync status and recent handoffs summary:\n\n## Sync Status\n- **Runtime Mode**: `host`\n- **Transport Path**: `offline`\n- **Connected**: `false`\n- **Last Synced Commit**: `2e50208dc7d8a003dc1a157ef83360ba02f2a0ad`\n- **Pending Outbox Count**: `0`\n\n## Recent Handoffs\n- **Total Handoffs**: `1` (within the last 10)\n- **Handoff ID**: `01a20f68-0f8f-76f1-9458-865f0280c256`\n- **Repository**: `forecast-bench`\n- **Source Device**: `cli`\n- **Base Commit SHA**: `2e50208dc7d8a003dc1a157ef83360ba02f2a0ad` (matches last synced commit)\n- **Summary**: `Initial smoke check`\n- **Active Task Count**: `1`\n- **Stale Evidence Count**: `0`\n\n**Note**: The system is currently in `host` mode with an `offline` transport path and not connected. There's 1 active task with no stale evidence pending.",
+      "notes": []
+    },
+    {
+      "scenario_id": "S2_stale_evidence_trap",
+      "passed": true,
+      "expected_tools": [
+        "get_dag_snapshot"
+      ],
+      "called_tools": [
+        "get_dag_snapshot"
+      ],
+      "tool_recall": 1.0,
+      "stale_hallucination": false,
+      "loop_aborted": false,
+      "self_heal_verified": null,
+      "turns": 2,
+      "latency_ms": 20996.6,
+      "prompt_tokens": 6978,
+      "completion_tokens": 561,
+      "final_answer": "Based on the authoritative DAG snapshot, **there are no fresh verified MAE metrics available for the current HEAD commit** (`e229caf5d3fa0a6482749d04c5be530a1d88a96f`).\n\nThe snapshot shows:\n- `fresh_evidence_count`: 0\n- `stale_evidence_count`: 1\n- All prior evidence is marked as **STALE/quarantined** due to the recent commit \"Shift forecast blend to 0.4 MA / 0.6 EWMA\"\n\nThe single evidence node (`evidence:01a20f68-7d8e-71b2-a2dc-c6675ef2dc9e`) has its metrics quarantined and redacted. Per the safety rules, I cannot cite stale/redacted evidence or historical numbers from static files as valid metrics for the current HEAD.\n\n**Recommendation**: Re-run the experiment to generate fresh verified evidence nodes with current MAE metrics.",
+      "notes": []
+    },
+    {
+      "scenario_id": "S3_env_diff_diagnosis",
+      "passed": true,
+      "expected_tools": [
+        "check_env_diff"
+      ],
+      "called_tools": [
+        "check_env_diff"
+      ],
+      "tool_recall": 1.0,
+      "stale_hallucination": false,
+      "loop_aborted": false,
+      "self_heal_verified": null,
+      "turns": 2,
+      "latency_ms": 18899.1,
+      "prompt_tokens": 5785,
+      "completion_tokens": 492,
+      "final_answer": "The environment comparison between your Host and commit `e532712a9bad0d7eecaf556931243a2b3050eea4` shows:\n\n**Status:** Not in sync (`in_sync: false`)\n\n**Missing Python packages:**\n- `scipy`\n\n**Environment fingerprints:**\n- Repository (commit): `uv:blake3:5652db561977cfee`\n- Host environment: `uv:blake3:0996be2243db5a38`\n\nThe Host environment is missing the `scipy` package compared to the target commit. This would need to be addressed via a patch (e.g., adding `scipy` to the dependency specification) before executing tasks that require this package.",
+      "notes": []
+    },
+    {
+      "scenario_id": "S4_code_defect_self_heal",
+      "passed": false,
+      "expected_tools": [
+        "run_preflight_in_worktree",
+        "propose_worktree_patch",
+        "approve_and_execute_task"
+      ],
+      "called_tools": [
+        "run_preflight_in_worktree",
+        "read_worktree_file",
+        "propose_worktree_patch",
+        "propose_worktree_patch",
+        "propose_worktree_patch",
+        "propose_worktree_patch",
+        "read_worktree_file",
+        "propose_worktree_patch"
+      ],
+      "tool_recall": 0.667,
+      "stale_hallucination": false,
+      "loop_aborted": true,
+      "self_heal_verified": false,
+      "turns": 8,
+      "latency_ms": 184563.8,
+      "prompt_tokens": 58572,
+      "completion_tokens": 4133,
+      "final_answer": "[MAX_TURNS_EXCEEDED]",
+      "notes": [
+        "No smoke-verified patch proposal succeeded.",
+        "Did not reach approval_required human gate cleanly."
+      ]
+    }
+  ]
+}

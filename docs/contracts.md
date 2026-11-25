@@ -14,8 +14,8 @@ Exposed over both **Stdio** (`relay-daemon mcp-stdio`, compatible with Claude Co
 | `inspect_sync_status` | `{}` | Returns current runtime mode, local/peer `NodeId`, transport path (`DirectLan` / `Relay` / `Offline`), last synced commit, and pending outbox count. |
 | `list_handoffs` | `{ limit?: u32 }` | Lists recent cross-device handoff records with base commit SHA, summary note, and active task states. |
 | `check_env_diff` | `{ commit_sha: String }` | Compares target commit's dependency manifest and lockfile fingerprint against the Host environment across supported package managers (`uv`, `cargo`, `bun`, `pnpm`, `yarn`, `npm`, `generic`), reporting `ecosystem`, `package_manager`, `missing_packages`, and change notes. |
-| `get_dag_snapshot` | `{}` | Returns the complete Decision-Evidence DAG (`nodes`, `edges`, `stale_count`, `fresh_evidence_count`, `stale_evidence_count`, `metric_authority_note`) with explicit `STALE` freshness flags and deterministically quarantines/redacts `metrics_json` on `STALE` evidence nodes at the MCP boundary so agents treat the DAG as the sole metric SSOT and never cite outdated metrics. |
-| `read_evidence_log` | `{ node_id: String, max_lines?: u32 }` | Reads artifact/evidence metrics and truncated log blob; deterministically blocks `STALE` evidence nodes. |
+| `get_dag_snapshot` | `{}` | Returns the complete Decision-Evidence DAG (`nodes`, `edges`, `stale_count`, `fresh_evidence_count`, `stale_evidence_count`, `metric_authority_note`) with explicit freshness flags. The MCP response redacts metrics for `Stale` and `PendingVerify` evidence. |
+| `read_evidence_log` | `{ node_id: String, max_lines?: u32 }` | Reads metrics and the truncated log for fresh evidence. Returns an error for `Stale` or `PendingVerify` evidence. |
 | `read_worktree_file` | `{ task_id: String, file_path: String, start_line?: u32, end_line?: u32 }` | Reads a UTF-8 file with 1-based line numbers strictly inside the task's isolated Git worktree (blocks `..`, symlink escape, `.git/`, `.venv/`, `.relay/`, `.env*`, and binary files). |
 
 ### Isolated Sandbox & Self-Healing Tools

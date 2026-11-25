@@ -7,8 +7,8 @@ SyncEverything (powered by the Relay engine) separates deterministic state manag
 | Tier | Default Target | When Selected | Allowed Tools / Scope |
 |---|---|---|---|
 | **Edge Fast-Path** | Local small model (`qwen3.5:4b`) or deterministic parser on laptop | Sync status checks, handoff summaries, `STALE` checks, note capture while offline or on battery | Read-only MCP tools (`inspect_sync_status`, `list_handoffs`, `get_dag_snapshot`, `read_evidence_log`, `check_env_diff`) |
-| **Host Local Ollama** | `qwen3.5:4b` / `qwen3.5:9b` via `http://127.0.0.1:11434/v1` | Default workstation preflight diagnosis, missing-dependency repair (`dependency_spec`), offline / strict-LAN privacy mode | Full 9-tool MCP set (`read_worktree_file`, `run_preflight_in_worktree`, `propose_worktree_patch`, `approve_and_execute_task`, plus read-only tools) |
-| **Cloud OpenAI-Compatible API** | User-configured endpoint (e.g., DeepSeek, OpenAI, OpenRouter) | Complex multi-file traceback diagnosis (`code_diff`), long log root-cause analysis, or upper-bound benchmark comparison | Full 9-tool MCP set (never receives quarantined `STALE` metric payloads or raw secrets) |
+| **Host Local Ollama** | `qwen3.5:4b` / `qwen3.5:9b` via `http://127.0.0.1:11434/v1` | Default workstation preflight diagnosis, missing-dependency repair, offline / strict-LAN privacy mode | All nine MCP tools, including `run_preflight_in_worktree`, `read_worktree_file`, `propose_worktree_patch`, and `approve_and_execute_task` |
+| **Cloud OpenAI-Compatible API** | User-configured endpoint (e.g., DeepSeek, OpenAI, OpenRouter) | Multi-file traceback diagnosis and `code_diff` repair with structured file edits, long log analysis, or model comparison | All nine MCP tools, with stale and unverified metrics redacted |
 
 ## Deterministic Fallbacks & Guardrails
 

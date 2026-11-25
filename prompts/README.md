@@ -31,5 +31,5 @@ SyncEverything (powered by the Relay engine) exposes its 9 MCP tools over the **
    ```
 2. Pick the matching template in `prompts/mcp-clients/` and replace `<RELAY_DAEMON_BIN>`, `<REPO_ROOT>`, and `<DATA_DIR>` with paths for your repository (or copy a prefilled snippet from **Workspace & AI Settings -> MCP** inside SyncEverything Desktop).
 3. Optional: attach `edge-fast-path.md` or `host-deep-path.md` to your agent's custom instructions (note that `RelayMcpServer` also advertises its core anti-hallucination rules automatically via MCP server `instructions` during `initialize`).
-4. Verify your agent sees all 9 MCP tools:
+4. Verify your agent sees all nine tools.
    `inspect_sync_status`, `list_handoffs`, `check_env_diff`, `get_dag_snapshot`, `read_evidence_log`, `read_worktree_file`, `run_preflight_in_worktree`, `propose_worktree_patch`, `approve_and_execute_task`.
