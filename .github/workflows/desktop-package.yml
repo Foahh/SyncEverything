@@ -1,0 +1,61 @@
+name: Package SyncEverything Desktop
+on:
+  workflow_dispatch:
+  push:
+    branches: [release/task-workbench-1125-2]
+permissions:
+  contents: read
+jobs:
+  package:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: windows-latest
+            bundle: nsis
+            installer: nsis/*.exe
+          - runner: macos-latest
+            bundle: dmg
+            installer: dmg/*.dmg
+    runs-on: ${{ matrix.runner }}
+    defaults:
+      run:
+        working-directory: crates/relay-desktop
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.5
+      - run: bun install --frozen-lockfile
+      - run: bun run format:check
+      - run: bun run lint
+      - run: bun test
+      - run: bun run tauri build --bundles ${{ matrix.bundle }} -- --locked
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SyncEverything-${{ runner.os }}-${{ runner.arch }}-${{ github.sha }}
+          path: target/release/bundle/${{ matrix.installer }}
+          if-no-files-found: error
+  publish:
+    needs: package
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: installers
+          merge-multiple: true
+      - name: Publish team installers
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          cd installers
+          sha256sum ./*.exe ./*.dmg > SHA256SUMS.txt
+          tag="workbench-${GITHUB_SHA:0:12}"
+          gh release create "$tag" ./*.exe ./*.dmg SHA256SUMS.txt \
+            --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --prerelease \
+            --title "SyncEverything desktop workbench · ${GITHUB_SHA:0:12}" \
+            --notes "Team build for Windows x64 and macOS Apple Silicon. Unsigned installers. Cross-device acceptance pending."
