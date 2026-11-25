@@ -114,16 +114,12 @@ function metricEntries(metrics: JsonValue): Array<[string, string]> {
 function CleanRunApprovalBody() {
   const { t } = useTranslation();
   return (
-    <>
-      <Alert className="border-emerald-500/25 bg-[var(--relay-fresh-soft)] text-emerald-800 dark:text-emerald-200">
-        <ShieldCheck className="text-emerald-600 dark:text-emerald-400" />
-        <AlertDescription className="text-emerald-800 dark:text-emerald-200">
-          {t("detail.cleanRunSafeNote")}
-        </AlertDescription>
-      </Alert>
-
-      <p className="text-[13px] leading-relaxed text-foreground">{t("detail.cleanRun")}</p>
-    </>
+    <Alert className="border-emerald-500/25 bg-[var(--relay-fresh-soft)] text-emerald-800 dark:text-emerald-200">
+      <ShieldCheck className="text-emerald-600 dark:text-emerald-400" aria-hidden="true" />
+      <AlertDescription className="text-emerald-800 dark:text-emerald-200">
+        {t("detail.cleanRun")}
+      </AlertDescription>
+    </Alert>
   );
 }
 

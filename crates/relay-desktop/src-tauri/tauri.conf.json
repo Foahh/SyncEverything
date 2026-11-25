@@ -12,7 +12,7 @@
   "app": {
     "windows": [
       {
-        "title": "SyncEverything — Cross-Device Local Agent Workbench",
+        "title": "SyncEverything",
         "width": 1440,
         "height": 900,
         "minWidth": 1080,

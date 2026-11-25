@@ -167,9 +167,9 @@ describe("formatError.ts mappings and helpers", () => {
       "接口 /models 返回 HTTP 401。",
     );
 
-    expect(formatDeviceOrigin("relay-copilot", tEn)).toBe("SyncEverything Agent");
-    expect(formatDeviceOrigin("relay-copilot", tZh)).toBe("SyncEverything Agent");
-    expect(formatDeviceOrigin("SyncEverything Agent", tZh)).toBe("SyncEverything Agent");
+    expect(formatDeviceOrigin("relay-copilot", tEn)).toBe("Agent");
+    expect(formatDeviceOrigin("relay-copilot", tZh)).toBe("Agent");
+    expect(formatDeviceOrigin("SyncEverything Agent", tZh)).toBe("Agent");
     expect(formatDeviceOrigin("Workstation", tZh)).toBe("算力主机");
     expect(formatDeviceOrigin("Laptop", tZh)).toBe("笔记本");
     expect(formatDeviceOrigin("My Custom Rig", tEn)).toBe("My Custom Rig");
@@ -232,12 +232,7 @@ describe("bilingual locale integrity", () => {
     }
 
     // No raw markdown backticks in plain UI strings
-    for (const key of [
-      "modals.pair.pastePlaceholder",
-      "modals.workspace.mcpHttpUrlHint",
-      "modals.workspace.mcpHttpHint",
-      "modals.workspace.mcpStdioHint",
-    ]) {
+    for (const key of ["modals.pair.pastePlaceholder", "modals.workspace.mcpHttpHint"]) {
       expect(tEn(key as never)).not.toContain("`");
       expect(tZh(key as never)).not.toContain("`");
     }

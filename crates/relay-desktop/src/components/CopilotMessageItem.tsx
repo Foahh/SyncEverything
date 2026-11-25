@@ -401,12 +401,6 @@ export function CopilotMessageItem({
           </Streamdown>
         )}
 
-        {!hasContent && message.approval != null && (
-          <p className="text-[13px] leading-relaxed text-foreground">
-            {t("copilot.approvalReady")}
-          </p>
-        )}
-
         {message.approval != null && (
           <InlineApprovalCard
             approval={message.approval}

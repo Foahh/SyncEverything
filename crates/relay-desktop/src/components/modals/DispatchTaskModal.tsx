@@ -16,7 +16,7 @@ import { cn } from "@/lib/utils";
 import { AlertCircle, FolderGit2, Play } from "lucide-react";
 import { useState, type FormEvent } from "react";
 import { useTranslation } from "react-i18next";
-import type { PresetInfo } from "../../bindings";
+import type { PresetInfo, TaskRecord_Serialize } from "../../bindings";
 import { formatErrorMessage } from "../../lib/formatError";
 
 export interface DispatchTaskFormValues {
@@ -31,6 +31,8 @@ interface DispatchTaskModalProps {
   isOpen: boolean;
   onOpenChange: (open: boolean) => void;
   headCommitSha: string | null;
+  runText: string;
+  seed?: TaskRecord_Serialize | null;
   presets: PresetInfo[];
   onDispatch: (values: DispatchTaskFormValues) => Promise<void>;
   isSubmitting: boolean;
@@ -50,24 +52,35 @@ function formatCommandPreview(preset: PresetInfo): string {
 }
 
 function DispatchTaskForm({
+  runText,
+  seed,
   presets,
   onDispatch,
   onCancel,
   isSubmitting,
 }: {
+  runText: string;
+  seed?: TaskRecord_Serialize | null;
   presets: PresetInfo[];
   onDispatch: (values: DispatchTaskFormValues) => Promise<void>;
   onCancel: () => void;
   isSubmitting: boolean;
 }) {
   const { t } = useTranslation();
-  const preferred = presets[0];
+  const preferred = presets.find((item) => item.name === seed?.spec.command_preset) ?? presets[0];
   const [taskId] = useState(() => crypto.randomUUID());
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [selectedName, setSelectedName] = useState(preferred.name);
-  const [params, setParams] = useState<Record<string, string>>(() => initialParamsFor(preferred));
+  const [params, setParams] = useState<Record<string, string>>(() =>
+    Object.fromEntries(
+      preferred.allowed_params.map((key) => [
+        key,
+        preferred.name === seed?.spec.command_preset ? (seed.spec.params[key] ?? "") : "",
+      ]),
+    ),
+  );
   const [userNote, setUserNote] = useState("");
-  const [requireApproval, setRequireApproval] = useState(false);
+  const [requireApproval, setRequireApproval] = useState(seed?.spec.require_approval ?? false);
 
   const selectedPreset = presets.find((item) => item.name === selectedName) ?? preferred;
 
@@ -142,7 +155,7 @@ function DispatchTaskForm({
           </div>
         </Field>
 
-        {selectedPreset.allowed_params.length > 0 ? (
+        {selectedPreset.allowed_params.length > 0 && (
           <div className="grid grid-cols-2 gap-3">
             {selectedPreset.allowed_params.map((param) => (
               <Field key={param}>
@@ -168,8 +181,6 @@ function DispatchTaskForm({
               </Field>
             ))}
           </div>
-        ) : (
-          <p className="text-[11px] text-muted-foreground">{t("modals.task.noParamsHint")}</p>
         )}
 
         <Field>
@@ -212,7 +223,7 @@ function DispatchTaskForm({
         </Button>
         <Button type="submit" size="lg" disabled={isSubmitting}>
           <Play data-icon="inline-start" />
-          <span className="relay-text-trim leading-none">{t("modals.task.submit")}</span>
+          <span className="relay-text-trim leading-none">{runText}</span>
         </Button>
       </DialogFooter>
     </form>
@@ -220,6 +231,8 @@ function DispatchTaskForm({
 }
 
 export function DispatchTaskModal({
+  runText,
+  seed,
   isOpen,
   onOpenChange,
   headCommitSha,
@@ -241,9 +254,9 @@ export function DispatchTaskModal({
               <Play className="size-4" />
             </div>
             <div className="flex flex-col gap-0.5">
-              <DialogTitle>{t("modals.task.title")}</DialogTitle>
+              <DialogTitle>{t("topbar.runTask")}</DialogTitle>
               <DialogDescription>
-                {t("modals.task.subtitle")} · <span className="font-mono-tech">{commitBadge}</span>
+                {runText} · <span className="font-mono-tech">{commitBadge}</span>
               </DialogDescription>
             </div>
           </div>
@@ -251,7 +264,9 @@ export function DispatchTaskModal({
 
         {presets.length > 0 ? (
           <DispatchTaskForm
-            key={presetsKey}
+            key={`${presetsKey}:${seed?.spec.task_id ?? "new"}`}
+            runText={runText}
+            seed={seed}
             presets={presets}
             onDispatch={onDispatch}
             onCancel={() => onOpenChange(false)}
@@ -291,7 +306,7 @@ export function DispatchTaskModal({
               </Button>
               <Button type="button" size="lg" disabled>
                 <Play data-icon="inline-start" />
-                <span className="relay-text-trim leading-none">{t("modals.task.submit")}</span>
+                <span className="relay-text-trim leading-none">{runText}</span>
               </Button>
             </DialogFooter>
           </div>
