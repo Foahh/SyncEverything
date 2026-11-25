@@ -56,7 +56,11 @@ import type {
   ProjectMcpFileStatus,
   WorkspaceInfo_Serialize,
 } from "../../bindings";
-import { formatErrorMessage } from "../../lib/formatError";
+import {
+  formatErrorMessage,
+  formatLlmProbeMessage,
+  isMcpPreviewChangedError,
+} from "../../lib/formatError";
 import {
   useInitWorkspaceManifest,
   useLlmSettings,
@@ -82,6 +86,12 @@ interface WorkspaceSettingsModalProps {
 interface FeedbackState {
   ok: boolean;
   text: string;
+}
+
+interface StatusBannerAction {
+  label: string;
+  onClick: () => void;
+  disabled?: boolean;
 }
 
 const TIER_DEFAULTS: Record<InferenceTier, { baseUrl: string; model: string }> = {
@@ -142,7 +152,13 @@ const MCP_STATUS_BADGE_CLASSES: Record<ProjectMcpFileStatus, string> = {
   unchanged: "bg-muted text-muted-foreground",
 };
 
-function StatusBanner({ feedback }: { feedback: FeedbackState | null }) {
+function StatusBanner({
+  feedback,
+  action,
+}: {
+  feedback: FeedbackState | null;
+  action?: StatusBannerAction | null;
+}) {
   if (!feedback) return null;
   return (
     <Alert
@@ -161,9 +177,29 @@ function StatusBanner({ feedback }: { feedback: FeedbackState | null }) {
         <AlertCircle />
       )}
       <AlertDescription
-        className={feedback.ok ? "text-emerald-800 dark:text-emerald-200" : undefined}
+        className={cn(
+          "flex flex-col gap-2",
+          feedback.ok && "text-emerald-800 dark:text-emerald-200",
+        )}
       >
-        {feedback.text}
+        <span className="break-words">{feedback.text}</span>
+        {action && (
+          <div>
+            <Button
+              type="button"
+              variant="outline"
+              size="xs"
+              disabled={action.disabled}
+              onClick={action.onClick}
+            >
+              <RefreshCw
+                data-icon="inline-start"
+                className={action.disabled ? "animate-spin" : undefined}
+              />
+              <span className="relay-text-trim leading-none">{action.label}</span>
+            </Button>
+          </div>
+        )}
       </AlertDescription>
     </Alert>
   );
@@ -195,7 +231,10 @@ function RepositorySettingsTab({
         setRepoPath(selected);
       }
     } catch (err) {
-      setFeedback({ ok: false, text: formatErrorMessage(err, t, "Unable to open folder dialog.") });
+      setFeedback({
+        ok: false,
+        text: formatErrorMessage(err, t, t("modals.workspace.errors.pickFolder")),
+      });
     } finally {
       setIsPicking(false);
     }
@@ -212,7 +251,10 @@ function RepositorySettingsTab({
         setFeedback({ ok: true, text: t("modals.workspace.repoOpened") });
       },
       onError: (err) => {
-        setFeedback({ ok: false, text: formatErrorMessage(err, t, "Could not open repository.") });
+        setFeedback({
+          ok: false,
+          text: formatErrorMessage(err, t, t("modals.workspace.errors.openRepo")),
+        });
       },
     });
   };
@@ -226,7 +268,7 @@ function RepositorySettingsTab({
       onError: (err) => {
         setFeedback({
           ok: false,
-          text: formatErrorMessage(err, t, "Could not generate relay.toml."),
+          text: formatErrorMessage(err, t, t("modals.workspace.errors.generateManifest")),
         });
       },
     });
@@ -242,7 +284,10 @@ function RepositorySettingsTab({
         });
       },
       onError: (err) => {
-        setFeedback({ ok: false, text: formatErrorMessage(err, t, "Git sync failed.") });
+        setFeedback({
+          ok: false,
+          text: formatErrorMessage(err, t, t("modals.workspace.errors.syncGit")),
+        });
       },
     });
   };
@@ -271,20 +316,22 @@ function RepositorySettingsTab({
                 : t("modals.workspace.noRepoSelected")}
             </span>
           </div>
-          <Badge
-            variant={workspace?.is_git_repo ? "secondary" : "outline"}
-            className={
-              workspace?.is_git_repo
-                ? "bg-emerald-500/12 text-emerald-700 dark:bg-emerald-500/20 dark:text-emerald-300"
-                : undefined
-            }
-          >
-            <span className="relay-text-trim leading-none">
-              {workspace?.is_git_repo
-                ? t("modals.workspace.watchingGit")
-                : t("modals.workspace.notGitRepo")}
-            </span>
-          </Badge>
+          {workspace?.repo_root && (
+            <Badge
+              variant={workspace.is_git_repo ? "secondary" : "outline"}
+              className={
+                workspace.is_git_repo
+                  ? "bg-emerald-500/12 text-emerald-700 dark:bg-emerald-500/20 dark:text-emerald-300"
+                  : undefined
+              }
+            >
+              <span className="relay-text-trim leading-none">
+                {workspace.is_git_repo
+                  ? t("modals.workspace.watchingGit")
+                  : t("modals.workspace.notGitRepo")}
+              </span>
+            </Badge>
+          )}
         </div>
 
         {workspace?.repo_root && (
@@ -297,26 +344,28 @@ function RepositorySettingsTab({
           </div>
         )}
 
-        <div className="flex flex-col gap-1.5">
-          <span className="text-[11px] font-medium text-muted-foreground">
-            {t("modals.workspace.presetsDiscovered")}
-          </span>
-          {workspace && workspace.presets.length > 0 ? (
-            <div className="flex flex-wrap gap-1.5">
-              {workspace.presets.map((preset) => (
-                <Badge key={preset.name} variant="outline" className="font-mono-tech">
-                  <span lang="en" className="relay-text-trim leading-none">
-                    {preset.name}
-                  </span>
-                </Badge>
-              ))}
-            </div>
-          ) : (
-            <span className="text-[11px] text-muted-foreground">
-              {t("modals.workspace.noPresets")}
+        {workspace?.repo_root && workspace.has_manifest && (
+          <div className="flex flex-col gap-1.5">
+            <span className="text-[11px] font-medium text-muted-foreground">
+              {t("modals.workspace.presetsDiscovered")}
             </span>
-          )}
-        </div>
+            {workspace.presets.length > 0 ? (
+              <div className="flex flex-wrap gap-1.5">
+                {workspace.presets.map((preset) => (
+                  <Badge key={preset.name} variant="outline" className="font-mono-tech">
+                    <span lang="en" className="relay-text-trim leading-none">
+                      {preset.name}
+                    </span>
+                  </Badge>
+                ))}
+              </div>
+            ) : (
+              <span className="text-[11px] text-muted-foreground">
+                {t("modals.workspace.noPresets")}
+              </span>
+            )}
+          </div>
+        )}
 
         {needsManifest && (
           <div className="flex items-center justify-between gap-2 rounded-md border border-dashed border-primary/40 bg-background/80 px-2.5 py-2">
@@ -464,7 +513,10 @@ function LlmSettingsTab({ initial }: { initial: LlmSettingsView_Serialize }) {
         setFeedback({ ok: true, text: t("modals.workspace.savedSuccess") });
       },
       onError: (err) => {
-        setFeedback({ ok: false, text: formatErrorMessage(err, t, "Unable to save AI settings.") });
+        setFeedback({
+          ok: false,
+          text: formatErrorMessage(err, t, t("modals.workspace.errors.saveLlm")),
+        });
       },
     });
   };
@@ -474,9 +526,12 @@ function LlmSettingsTab({ initial }: { initial: LlmSettingsView_Serialize }) {
     setIsTesting(true);
     try {
       const probe = await relayApi.testLlmConnection(buildUpdate());
-      setFeedback({ ok: probe.ok, text: probe.message });
+      setFeedback({ ok: probe.ok, text: formatLlmProbeMessage(probe.message, t) });
     } catch (err) {
-      setFeedback({ ok: false, text: formatErrorMessage(err, t, "Connection probe failed.") });
+      setFeedback({
+        ok: false,
+        text: formatErrorMessage(err, t, t("modals.workspace.errors.testLlm")),
+      });
     } finally {
       setIsTesting(false);
     }
@@ -682,7 +737,9 @@ function McpConfigTab({ workspace }: { workspace?: WorkspaceInfo_Serialize }) {
     key: string;
     data: ProjectMcpConfigPreview_Serialize;
   } | null>(null);
-  const [writeFeedback, setWriteFeedback] = useState<FeedbackState | null>(null);
+  const [writeFeedback, setWriteFeedback] = useState<
+    (FeedbackState & { needsRefresh?: boolean }) | null
+  >(null);
 
   const previewMutation = usePreviewProjectMcpConfig();
   const writeMutation = useWriteProjectMcpConfig();
@@ -758,7 +815,7 @@ function McpConfigTab({ workspace }: { workspace?: WorkspaceInfo_Serialize }) {
         setPreviewState(null);
         setWriteFeedback({
           ok: false,
-          text: formatErrorMessage(err, t, "Unable to preview project MCP configuration."),
+          text: formatErrorMessage(err, t, t("modals.workspace.errors.previewMcp")),
         });
       },
     });
@@ -801,16 +858,21 @@ function McpConfigTab({ workspace }: { workspace?: WorkspaceInfo_Serialize }) {
           setPreviewState(null);
           setWriteFeedback({
             ok: false,
-            text: formatErrorMessage(err, t, "Unable to write project MCP configuration."),
+            text: formatErrorMessage(err, t, t("modals.workspace.errors.writeMcp")),
+            needsRefresh: isMcpPreviewChangedError(err),
           });
         },
       },
     );
   };
 
+  const httpValidationErrorText = httpValidation.ok
+    ? null
+    : t(`modals.workspace.mcpHttpUrlErrors.${httpValidation.code}`);
+
   const snippetFallback =
-    transport === "streamable_http" && !httpValidation.ok
-      ? t("modals.workspace.mcpHttpUrlInvalid")
+    transport === "streamable_http" && httpValidationErrorText
+      ? httpValidationErrorText
       : t("modals.workspace.mcpOpenRepo");
 
   return (
@@ -959,10 +1021,8 @@ function McpConfigTab({ workspace }: { workspace?: WorkspaceInfo_Serialize }) {
             spellCheck={false}
             className="font-mono-tech text-xs"
           />
-          {!httpValidation.ok ? (
-            <p className="text-[11px] leading-snug text-destructive">
-              {t("modals.workspace.mcpHttpUrlInvalid")}
-            </p>
+          {httpValidationErrorText ? (
+            <p className="text-[11px] leading-snug text-destructive">{httpValidationErrorText}</p>
           ) : (
             <FieldDescription>{t("modals.workspace.mcpHttpUrlHint")}</FieldDescription>
           )}
@@ -977,16 +1037,6 @@ function McpConfigTab({ workspace }: { workspace?: WorkspaceInfo_Serialize }) {
               {selectedClient.configPath}
             </span>
           </span>
-          <Badge
-            variant={selectedClient.writable ? "secondary" : "outline"}
-            className="text-[10px]"
-          >
-            <span className="relay-text-trim leading-none">
-              {selectedClient.writable
-                ? t("modals.workspace.mcpProjectWriteBadge")
-                : t("modals.workspace.mcpCopyOnlyBadge")}
-            </span>
-          </Badge>
         </div>
         <pre
           lang="en"
@@ -1172,13 +1222,26 @@ function McpConfigTab({ workspace }: { workspace?: WorkspaceInfo_Serialize }) {
         </div>
       )}
 
-      <StatusBanner feedback={writeFeedback} />
+      <StatusBanner
+        feedback={writeFeedback}
+        action={
+          writeFeedback?.needsRefresh && canPreviewProject
+            ? {
+                label: previewMutation.isPending
+                  ? t("modals.workspace.mcpPreviewLoading")
+                  : t("modals.workspace.mcpRefreshPreviewBtn"),
+                onClick: handlePreviewProject,
+                disabled: previewMutation.isPending || writeMutation.isPending,
+              }
+            : null
+        }
+      />
 
-      {transport === "stdio" && (
-        <p className="text-[11px] leading-relaxed text-muted-foreground">
-          {t("modals.workspace.mcpHttpHint")}
-        </p>
-      )}
+      <p className="text-[11px] leading-relaxed text-muted-foreground">
+        {transport === "stdio"
+          ? t("modals.workspace.mcpStdioHint")
+          : t("modals.workspace.mcpHttpHint")}
+      </p>
     </div>
   );
 }

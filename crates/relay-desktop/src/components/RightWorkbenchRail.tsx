@@ -44,8 +44,9 @@ interface RightWorkbenchRailProps {
   isStreaming: boolean;
   streamingMessageId: string | null;
   sendError: string | null;
+  onDismissSendError?: () => void;
   llmSettings: LlmSettingsView_Serialize | undefined;
-  onSendMessage: (prompt: string) => Promise<void>;
+  onSendMessage: (prompt: string) => Promise<boolean>;
   onCancelTurn: () => Promise<void>;
   onClearChat: () => Promise<void>;
   isClearingChat: boolean;
@@ -77,6 +78,7 @@ export function RightWorkbenchRail({
   isStreaming,
   streamingMessageId,
   sendError,
+  onDismissSendError,
   llmSettings,
   onSendMessage,
   onCancelTurn,
@@ -212,6 +214,7 @@ export function RightWorkbenchRail({
           isStreaming={isStreaming}
           streamingMessageId={streamingMessageId}
           sendError={sendError}
+          onDismissSendError={onDismissSendError}
           llmSettings={llmSettings}
           onSendMessage={onSendMessage}
           onCancelTurn={onCancelTurn}

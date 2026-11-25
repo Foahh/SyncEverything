@@ -138,7 +138,11 @@ export function TaskLogViewer({
 
         {lines.length === 0 ? (
           <div className="flex min-h-[156px] items-center justify-center px-3 py-6 text-center text-xs text-slate-400">
-            {running || taskState === "queued" ? t("detail.noLogsYet") : t("detail.noLogsRecorded")}
+            {waitingForApproval
+              ? t("detail.logsAwaitingApproval")
+              : running || taskState === "queued"
+                ? t("detail.noLogsYet")
+                : t("detail.noLogsRecorded")}
           </div>
         ) : (
           <div className="flex flex-col gap-0.5 p-2.5">

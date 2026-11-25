@@ -1,4 +1,4 @@
-import { Alert, AlertDescription } from "@/components/ui/alert";
+import { Alert, AlertAction, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import {
   InputGroup,
@@ -14,10 +14,11 @@ import {
   MessageScrollerProvider,
   MessageScrollerViewport,
 } from "@/components/ui/message-scroller";
-import { AlertCircle, ArrowUp, Cpu, SlidersHorizontal, Sparkles, Square } from "lucide-react";
+import { AlertCircle, ArrowUp, Cpu, SlidersHorizontal, Sparkles, Square, X } from "lucide-react";
 import { useId, useState, type FormEvent, type KeyboardEvent } from "react";
 import { useTranslation } from "react-i18next";
 import type { AgentChatMessage_Serialize, LlmSettingsView_Serialize } from "../bindings";
+import { isLlmConfigurationError } from "../lib/formatError";
 import type { ApprovalInput } from "../lib/relayApi";
 import { CopilotMessageItem } from "./CopilotMessageItem";
 
@@ -26,12 +27,25 @@ interface AgentCopilotPanelProps {
   isStreaming: boolean;
   streamingMessageId: string | null;
   sendError: string | null;
+  onDismissSendError?: () => void;
   llmSettings: LlmSettingsView_Serialize | undefined;
-  onSendMessage: (prompt: string) => Promise<void>;
+  onSendMessage: (prompt: string) => Promise<boolean>;
   onCancelTurn: () => Promise<void>;
   onResolveApproval: (approval: ApprovalInput) => void;
   isResolvingApproval: boolean;
   onOpenLlmSettings: () => void;
+}
+
+function findPrecedingUserPrompt(
+  messages: AgentChatMessage_Serialize[],
+  index: number,
+): string | null {
+  for (let i = index - 1; i >= 0; i -= 1) {
+    if (messages[i].role === "user" && messages[i].content.trim().length > 0) {
+      return messages[i].content;
+    }
+  }
+  return null;
 }
 
 export function AgentCopilotPanel({
@@ -39,6 +53,7 @@ export function AgentCopilotPanel({
   isStreaming,
   streamingMessageId,
   sendError,
+  onDismissSendError,
   llmSettings,
   onSendMessage,
   onCancelTurn,
@@ -56,12 +71,16 @@ export function AgentCopilotPanel({
     t("copilot.suggestions.runAndCheck"),
   ];
 
-  const handleSubmit = (event: FormEvent<HTMLFormElement>) => {
+  const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     const trimmed = input.trim();
     if (!trimmed || isStreaming) return;
+    const submitted = input;
     setInput("");
-    void onSendMessage(trimmed);
+    const ok = await onSendMessage(trimmed);
+    if (!ok) {
+      setInput((current) => (current.trim().length === 0 ? submitted : current));
+    }
   };
 
   const handleKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
@@ -116,21 +135,32 @@ export function AgentCopilotPanel({
           <MessageScroller className="min-h-0 flex-1">
             <MessageScrollerViewport className="px-3.5 py-4">
               <MessageScrollerContent className="gap-4">
-                {messages.map((message) => (
-                  <MessageScrollerItem
-                    key={message.id}
-                    messageId={message.id}
-                    scrollAnchor={message.role === "user"}
-                  >
-                    <CopilotMessageItem
-                      message={message}
-                      isStreaming={isStreaming && streamingMessageId === message.id}
-                      onResolveApproval={onResolveApproval}
-                      isResolvingApproval={isResolvingApproval}
-                      onOpenLlmSettings={onOpenLlmSettings}
-                    />
-                  </MessageScrollerItem>
-                ))}
+                {messages.map((message, index) => {
+                  const retryPrompt =
+                    message.role === "assistant" && message.error != null
+                      ? findPrecedingUserPrompt(messages, index)
+                      : null;
+                  return (
+                    <MessageScrollerItem
+                      key={message.id}
+                      messageId={message.id}
+                      scrollAnchor={message.role === "user"}
+                    >
+                      <CopilotMessageItem
+                        message={message}
+                        isStreaming={isStreaming && streamingMessageId === message.id}
+                        onResolveApproval={onResolveApproval}
+                        isResolvingApproval={isResolvingApproval}
+                        onOpenLlmSettings={onOpenLlmSettings}
+                        onRetry={
+                          retryPrompt && !isStreaming
+                            ? () => void onSendMessage(retryPrompt)
+                            : undefined
+                        }
+                      />
+                    </MessageScrollerItem>
+                  );
+                })}
               </MessageScrollerContent>
             </MessageScrollerViewport>
             <MessageScrollerButton />
@@ -140,26 +170,52 @@ export function AgentCopilotPanel({
 
       {sendError && (
         <div className="px-3 pt-2">
-          <Alert variant="destructive" className="py-2">
+          <Alert
+            role="alert"
+            variant="destructive"
+            className="border-destructive/30 bg-[var(--relay-stale-soft)] py-2"
+          >
             <AlertCircle />
-            <AlertDescription className="flex items-center justify-between gap-2 text-xs">
-              <span className="min-w-0 truncate">{sendError}</span>
-              <Button
-                type="button"
-                variant="outline"
-                size="xs"
-                onClick={onOpenLlmSettings}
-                className="shrink-0"
-              >
-                <SlidersHorizontal data-icon="inline-start" />
-                <span className="relay-text-trim leading-none">{t("copilot.configureModel")}</span>
-              </Button>
+            <AlertDescription className="flex flex-col gap-2 text-xs">
+              <span className="min-w-0 break-words">{sendError}</span>
+              {isLlmConfigurationError(sendError) && (
+                <div>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="xs"
+                    onClick={onOpenLlmSettings}
+                    className="shrink-0"
+                  >
+                    <SlidersHorizontal data-icon="inline-start" />
+                    <span className="relay-text-trim leading-none">
+                      {t("copilot.configureModel")}
+                    </span>
+                  </Button>
+                </div>
+              )}
             </AlertDescription>
+            {onDismissSendError && (
+              <AlertAction>
+                <Button
+                  type="button"
+                  size="icon-xs"
+                  variant="ghost"
+                  aria-label={t("detail.close")}
+                  onClick={onDismissSendError}
+                >
+                  <X />
+                </Button>
+              </AlertAction>
+            )}
           </Alert>
         </div>
       )}
 
-      <form onSubmit={handleSubmit} className="shrink-0 border-t border-border bg-card p-3">
+      <form
+        onSubmit={(event) => void handleSubmit(event)}
+        className="shrink-0 border-t border-border bg-card p-3"
+      >
         <label htmlFor={inputId} className="sr-only">
           {t("copilot.inputLabel")}
         </label>
@@ -187,7 +243,7 @@ export function AgentCopilotPanel({
             >
               <Cpu className="size-3 shrink-0" />
               <span lang="en" className="font-mono-tech truncate text-[11px]">
-                {llmSettings?.model ?? "qwen3.5:4b"}
+                {llmSettings?.model || "—"}
               </span>
             </InputGroupButton>
 

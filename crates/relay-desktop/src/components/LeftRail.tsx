@@ -1,7 +1,9 @@
+import { Alert, AlertAction, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import {
+  AlertCircle,
   ArrowRight,
   CheckCircle2,
   ChevronDown,
@@ -14,6 +16,7 @@ import {
   Sparkles,
   Square,
   Terminal,
+  X,
 } from "lucide-react";
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
@@ -23,6 +26,7 @@ import type {
   TaskRecord_Serialize,
   TrustedPeerRecord_Serialize,
 } from "../bindings";
+import { formatTaskSummary } from "../lib/formatError";
 import { isTauriRuntime, needsTaskApproval } from "../lib/relayApi";
 import { isTaskCancellable, isTaskRunning, taskStateBadgeProps } from "../lib/taskLogStream";
 
@@ -39,6 +43,9 @@ interface LeftRailProps {
   onCancelTask: (taskId: string) => void;
   onSelectEvidenceNode: (nodeId: string) => void;
   onSwitchMode: (mode: RuntimeMode) => void;
+  isSwitchingMode?: boolean;
+  switchModeError?: string | null;
+  onDismissSwitchModeError?: () => void;
   onTriggerUpstreamEdit: () => void;
   onResetDemo: () => void;
   isSimulatingEdit: boolean;
@@ -59,6 +66,9 @@ export function LeftRail({
   onCancelTask,
   onSelectEvidenceNode,
   onSwitchMode,
+  isSwitchingMode = false,
+  switchModeError = null,
+  onDismissSwitchModeError,
   onTriggerUpstreamEdit,
   onResetDemo,
   isSimulatingEdit,
@@ -186,7 +196,9 @@ export function LeftRail({
 
                     {(task.preflight_summary || task.spec.user_note) && (
                       <p className="mt-1 line-clamp-2 text-[11.5px] leading-relaxed text-muted-foreground">
-                        {task.preflight_summary ?? task.spec.user_note}
+                        {task.preflight_summary
+                          ? formatTaskSummary(task.preflight_summary, t)
+                          : task.spec.user_note}
                       </p>
                     )}
 
@@ -286,9 +298,11 @@ export function LeftRail({
                     <button
                       key={mode}
                       type="button"
+                      disabled={isSwitchingMode}
+                      aria-pressed={active}
                       onClick={() => onSwitchMode(mode)}
                       className={cn(
-                        "cursor-pointer rounded-sm px-1.5 py-1 text-[10.5px] font-medium transition-all",
+                        "cursor-pointer rounded-sm px-1.5 py-1 text-[10.5px] font-medium transition-all disabled:pointer-events-none disabled:opacity-50",
                         active
                           ? "bg-background text-foreground shadow-2xs"
                           : "text-muted-foreground hover:text-foreground",
@@ -299,6 +313,31 @@ export function LeftRail({
                   );
                 })}
               </div>
+              {switchModeError && (
+                <Alert
+                  role="alert"
+                  variant="destructive"
+                  className="border-destructive/30 bg-[var(--relay-stale-soft)] py-1.5"
+                >
+                  <AlertCircle className="size-3.5" aria-hidden="true" />
+                  <AlertDescription className="text-[11px] leading-snug break-words">
+                    {switchModeError}
+                  </AlertDescription>
+                  {onDismissSwitchModeError && (
+                    <AlertAction>
+                      <Button
+                        type="button"
+                        size="icon-xs"
+                        variant="ghost"
+                        aria-label={t("detail.close")}
+                        onClick={onDismissSwitchModeError}
+                      >
+                        <X />
+                      </Button>
+                    </AlertAction>
+                  )}
+                </Alert>
+              )}
             </div>
 
             {import.meta.env.DEV && (

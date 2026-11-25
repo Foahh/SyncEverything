@@ -14,6 +14,7 @@ import {
 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import type { GraphNode, JsonValue, TaskLogSnapshot, TaskRecord_Serialize } from "../bindings";
+import { formatDeviceOrigin, formatErrorMessage, formatTaskSummary } from "../lib/formatError";
 import { needsTaskApproval, type ApprovalInput } from "../lib/relayApi";
 import { isTaskCancellable, taskStateBadgeProps, type TaskLogBuffer } from "../lib/taskLogStream";
 import { TaskLogViewer } from "./TaskLogViewer";
@@ -171,10 +172,12 @@ function NodePayloadSection({ node }: { node: GraphNode }) {
   if (payload.kind === "decision") {
     return (
       <div className="flex flex-col gap-4">
-        <div className="flex flex-col gap-1.5">
-          <div className="text-[11.5px] font-medium text-muted-foreground">{t("detail.why")}</div>
-          <p className="text-[13px] leading-relaxed text-foreground">{payload.rationale}</p>
-        </div>
+        {payload.rationale.trim().length > 0 && (
+          <div className="flex flex-col gap-1.5">
+            <div className="text-[11.5px] font-medium text-muted-foreground">{t("detail.why")}</div>
+            <p className="text-[13px] leading-relaxed text-foreground">{payload.rationale}</p>
+          </div>
+        )}
 
         {payload.constraints.length > 0 && (
           <div className="flex flex-col gap-1.5">
@@ -238,7 +241,9 @@ function NodeTechnicalDetails({ node }: { node: GraphNode }) {
       <div className="flex flex-col gap-2 border-t border-border px-3 py-2.5 text-[11.5px]">
         <div className="flex justify-between gap-2">
           <span className="text-muted-foreground">{t("detail.device")}</span>
-          <span className="font-mono-tech text-foreground">{node.device_origin}</span>
+          <span className="font-mono-tech text-foreground">
+            {formatDeviceOrigin(node.device_origin, t)}
+          </span>
         </div>
         <div className="flex justify-between gap-2">
           <span className="text-muted-foreground">{t("detail.updated")}</span>
@@ -292,13 +297,13 @@ function TaskInspectorBody({
         <Alert variant="destructive" className="border-destructive/30 bg-[var(--relay-stale-soft)]">
           <AlertCircle />
           <AlertTitle>{t("detail.taskError")}</AlertTitle>
-          <AlertDescription>{task.error_message}</AlertDescription>
+          <AlertDescription>{formatErrorMessage(task.error_message, t)}</AlertDescription>
         </Alert>
       )}
 
       {task.preflight_summary && (
         <p className="text-[12.5px] leading-relaxed text-muted-foreground">
-          {task.preflight_summary}
+          {formatTaskSummary(task.preflight_summary, t)}
         </p>
       )}
 

@@ -291,6 +291,11 @@ export function WorkspaceSwitcher({
                       >
                         {truncatedPath}
                       </span>
+                      {isMissing && (
+                        <span className="text-[10.5px] leading-snug text-muted-foreground">
+                          {t("workspaceSwitcher.missingHint")}
+                        </span>
+                      )}
                     </div>
                   </button>
 

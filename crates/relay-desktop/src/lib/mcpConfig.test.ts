@@ -108,7 +108,7 @@ describe("mcpConfig streamable HTTP snippet generation", () => {
     expect(parsedCodex.mcp_servers.relay.url).toBe(DEFAULT_MCP_HTTP_URL);
   });
 
-  test("supports custom HTTP URLs and trims surrounding spaces", () => {
+  test("supports custom HTTP URLs, trims pasted whitespace/newlines, and allows underscored hostnames", () => {
     const customUrl = "  https://gpu-host.internal:8443/mcp  ";
     const claude = JSON.parse(
       buildMcpSnippet("claude", SAMPLE_WORKSPACE, {
@@ -126,21 +126,45 @@ describe("mcpConfig streamable HTTP snippet generation", () => {
       httpUrl: customUrl,
     });
     expect(codex).toBe('[mcp_servers.relay]\nurl = "https://gpu-host.internal:8443/mcp"');
+
+    expect(validateMcpHttpUrl("\thttp://127.0.0.1:7608/mcp\r\n")).toEqual({
+      ok: true,
+      url: "http://127.0.0.1:7608/mcp",
+    });
+    expect(validateMcpHttpUrl("http://relay_host:7608/mcp\n")).toEqual({
+      ok: true,
+      url: "http://relay_host:7608/mcp",
+    });
+    expect(validateMcpHttpUrl("https://gpu_box_1.internal:8443/mcp")).toEqual({
+      ok: true,
+      url: "https://gpu_box_1.internal:8443/mcp",
+    });
+    expect(validateMcpHttpUrl("HTTP://127.0.0.1:7608/mcp")).toEqual({
+      ok: true,
+      url: "HTTP://127.0.0.1:7608/mcp",
+    });
   });
 
-  test("rejects invalid HTTP URLs", () => {
-    for (const invalid of [
-      "",
-      "   ",
-      "127.0.0.1:7608/mcp",
-      "file:///etc/passwd",
-      "http://",
-      "http://127.0.0.1:0/mcp",
-      "http://user:secret@127.0.0.1:7608/mcp",
-      "http://127.0.0.1:7608/mcp\n",
-      "http://127.0.0.1:7608/mcp extra",
-    ]) {
-      expect(validateMcpHttpUrl(invalid).ok).toBe(false);
+  test("rejects invalid HTTP URLs with specific validation codes", () => {
+    const cases: Array<[string, string]> = [
+      ["", "empty"],
+      ["   \r\n\t ", "empty"],
+      ["127.0.0.1:7608/mcp", "invalid_scheme"],
+      ["file:///etc/passwd", "invalid_scheme"],
+      ["http://", "missing_host"],
+      ["http://127.0.0.1:0/mcp", "invalid_port"],
+      ["http://user:secret@127.0.0.1:7608/mcp", "embedded_credentials"],
+      ["http://127.0.0.1:7608/mcp\nfoo", "control_chars"],
+      ["http://127.0.0.1:7608/\u0000mcp", "control_chars"],
+      ["http://127.0.0.1:7608/mcp extra", "whitespace"],
+      ["http://127.0.0.1:7608\\mcp", "invalid_url"],
+    ];
+    for (const [invalid, expectedCode] of cases) {
+      const result = validateMcpHttpUrl(invalid);
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.code).toBe(expectedCode);
+      }
       expect(
         buildMcpSnippet("claude", SAMPLE_WORKSPACE, {
           transport: "streamable_http",

@@ -1,11 +1,14 @@
 import { useQueryClient } from "@tanstack/react-query";
+import type { TFunction } from "i18next";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useTranslation } from "react-i18next";
 import type {
   AgentApprovalCard_Serialize,
   AgentChatMessage_Serialize,
   AgentChatStreamEvent_Serialize,
   AgentToolTrace_Serialize,
 } from "../bindings";
+import { formatErrorMessage } from "../lib/formatError";
 import { relayKeys, useChatMessages, useClearChatMessages } from "../lib/queries";
 import { relayApi } from "../lib/relayApi";
 
@@ -22,6 +25,7 @@ interface StreamingDraft {
 function applyStreamEvent(
   prev: StreamingDraft | null,
   event: AgentChatStreamEvent_Serialize,
+  t: TFunction,
 ): StreamingDraft {
   const base: StreamingDraft =
     prev && prev.messageId === event.message_id
@@ -47,7 +51,7 @@ function applyStreamEvent(
       };
     case "tool_started": {
       if (!event.trace) return base;
-      const exists = base.traces.some((t) => t.id === event.trace!.id);
+      const exists = base.traces.some((tr) => tr.id === event.trace!.id);
       return {
         ...base,
         active: true,
@@ -56,12 +60,12 @@ function applyStreamEvent(
     }
     case "tool_finished": {
       if (!event.trace) return base;
-      const found = base.traces.some((t) => t.id === event.trace!.id);
+      const found = base.traces.some((tr) => tr.id === event.trace!.id);
       return {
         ...base,
         active: true,
         traces: found
-          ? base.traces.map((t) => (t.id === event.trace!.id ? event.trace! : t))
+          ? base.traces.map((tr) => (tr.id === event.trace!.id ? event.trace! : tr))
           : [...base.traces, event.trace],
       };
     }
@@ -80,7 +84,9 @@ function applyStreamEvent(
       return {
         ...base,
         active: false,
-        error: event.error ?? "Copilot turn failed",
+        error: event.error
+          ? formatErrorMessage(event.error, t, t("copilot.turnFailed"))
+          : t("copilot.turnFailed"),
       };
     default:
       return base;
@@ -88,6 +94,13 @@ function applyStreamEvent(
 }
 
 export function useCopilotChat() {
+  const { t } = useTranslation();
+  const tRef = useRef(t);
+
+  useEffect(() => {
+    tRef.current = t;
+  }, [t]);
+
   const queryClient = useQueryClient();
   const { data: persisted = [] } = useChatMessages();
   const clearMutation = useClearChatMessages();
@@ -104,7 +117,7 @@ export function useCopilotChat() {
     void relayApi
       .subscribeAgentChatEvents((event) => {
         if (!active || clearing.current) return;
-        setDraft((prev) => applyStreamEvent(prev, event));
+        setDraft((prev) => applyStreamEvent(prev, event, tRef.current));
         if (event.kind === "turn_completed" || event.kind === "turn_error") {
           lastFinishedMessage.current = event.message_id;
           void queryClient.invalidateQueries({ queryKey: relayKeys.all }).then(() => {
@@ -163,14 +176,14 @@ export function useCopilotChat() {
   }, [persisted, draft]);
 
   const sendMessage = useCallback(
-    async (prompt: string) => {
+    async (prompt: string): Promise<boolean> => {
       const trimmed = prompt.trim();
-      if (!trimmed || clearing.current) return;
+      if (!trimmed || clearing.current) return false;
       const turn = ++generation.current;
       setSendError(null);
       try {
         const placeholder = await relayApi.sendChatMessage(trimmed);
-        if (turn !== generation.current) return;
+        if (turn !== generation.current) return false;
         setDraft((prev) =>
           lastFinishedMessage.current === placeholder.id || prev?.messageId === placeholder.id
             ? prev
@@ -185,14 +198,20 @@ export function useCopilotChat() {
               },
         );
         await queryClient.invalidateQueries({ queryKey: relayKeys.chat() });
+        return true;
       } catch (err) {
         if (turn === generation.current) {
-          setSendError(err instanceof Error ? err.message : String(err));
+          setSendError(formatErrorMessage(err, tRef.current, tRef.current("copilot.turnFailed")));
         }
+        return false;
       }
     },
     [queryClient],
   );
+
+  const clearSendError = useCallback(() => {
+    setSendError(null);
+  }, []);
 
   const cancelTurn = useCallback(async () => {
     await relayApi.cancelChatTurn();
@@ -208,7 +227,7 @@ export function useCopilotChat() {
       await clearMutation.mutateAsync();
       setDraft(null);
     } catch (error) {
-      setSendError(String(error));
+      setSendError(formatErrorMessage(error, tRef.current));
     } finally {
       clearing.current = false;
     }
@@ -219,6 +238,7 @@ export function useCopilotChat() {
     isStreaming: draft?.active ?? false,
     streamingMessageId: draft?.active ? draft.messageId : null,
     sendError,
+    clearSendError,
     sendMessage,
     cancelTurn,
     clearChat,

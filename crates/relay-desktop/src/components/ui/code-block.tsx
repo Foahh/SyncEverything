@@ -3,6 +3,7 @@
 import * as React from "react"
 import { cva, type VariantProps } from "class-variance-authority"
 import { cn } from "cn"
+import { useTranslation } from "react-i18next"
 
 import { Button } from "@/components/ui/button"
 import { CheckIcon, CopyIcon } from "lucide-react"
@@ -90,9 +91,18 @@ function CodeBlockCopyButton({
   size = "icon-xs",
   className,
   onClick,
+  copyLabel,
+  copiedLabel,
   ...props
-}: React.ComponentProps<typeof Button> & { value: string }) {
+}: React.ComponentProps<typeof Button> & {
+  value: string
+  copyLabel?: string
+  copiedLabel?: string
+}) {
+  const { t } = useTranslation()
   const [copied, setCopied] = React.useState(false)
+  const resolvedCopyLabel = copyLabel ?? t("ui.copy", { defaultValue: "Copy" })
+  const resolvedCopiedLabel = copiedLabel ?? t("ui.copied", { defaultValue: "Copied" })
 
   React.useEffect(() => {
     if (!copied) {
@@ -110,7 +120,7 @@ function CodeBlockCopyButton({
         data-copied={copied || undefined}
         variant={variant}
         size={size}
-        aria-label={copied ? "Copied" : "Copy"}
+        aria-label={copied ? resolvedCopiedLabel : resolvedCopyLabel}
         className={cn(className)}
         onClick={(event) => {
           onClick?.(event)
@@ -130,7 +140,7 @@ function CodeBlockCopyButton({
         )}
       </Button>
       <span aria-live="polite" className="sr-only">
-        {copied ? "Copied" : ""}
+        {copied ? resolvedCopiedLabel : ""}
       </span>
     </>
   )

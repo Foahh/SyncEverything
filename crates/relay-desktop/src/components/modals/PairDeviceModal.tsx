@@ -30,7 +30,7 @@ import {
   Trash2,
   X,
 } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import type {
   PeerRole,
@@ -161,6 +161,7 @@ function TrustedDeviceRow({
   const { t, i18n } = useTranslation();
   const [isEditing, setIsEditing] = useState(false);
   const [draftLabel, setDraftLabel] = useState(peer.label);
+  const [confirmingRevoke, setConfirmingRevoke] = useState(false);
 
   const isRevoked = peer.revoked_at !== null;
   const isCopied = copiedNodeId === peer.node_id;
@@ -326,6 +327,40 @@ function TrustedDeviceRow({
           <p className="text-[11px] leading-snug text-destructive/90">
             {t("modals.pair.revokedHint")}
           </p>
+        ) : confirmingRevoke ? (
+          <div className="flex w-full flex-col gap-2">
+            <p className="text-[11px] leading-snug text-destructive/90">
+              {t("modals.pair.revokeConfirmHint")}
+            </p>
+            <div className="flex items-center justify-end gap-1.5">
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                disabled={isBusy}
+                onClick={() => setConfirmingRevoke(false)}
+              >
+                <span className="relay-text-trim leading-none">
+                  {t("modals.pair.actions.cancelRename")}
+                </span>
+              </Button>
+              <Button
+                type="button"
+                size="sm"
+                variant="destructive"
+                disabled={isBusy}
+                onClick={() => {
+                  setConfirmingRevoke(false);
+                  onRevoke(peer);
+                }}
+              >
+                <ShieldBan data-icon="inline-start" aria-hidden="true" />
+                <span className="relay-text-trim leading-none">
+                  {t("modals.pair.actions.confirmRevoke")}
+                </span>
+              </Button>
+            </div>
+          </div>
         ) : (
           <div className="flex items-center gap-1.5">
             <Button
@@ -352,7 +387,7 @@ function TrustedDeviceRow({
               size="sm"
               variant="destructive"
               disabled={isBusy}
-              onClick={() => onRevoke(peer)}
+              onClick={() => setConfirmingRevoke(true)}
               aria-label={`${t("modals.pair.actions.revoke")} ${peer.label}`}
             >
               <ShieldBan data-icon="inline-start" aria-hidden="true" />
@@ -363,22 +398,26 @@ function TrustedDeviceRow({
           </div>
         )}
 
-        <Button
-          type="button"
-          size="sm"
-          variant="ghost"
-          disabled={isBusy}
-          onClick={() => onRemove(peer)}
-          aria-label={`${t("modals.pair.actions.remove")} ${peer.label}`}
-          className="ml-auto text-muted-foreground hover:text-destructive"
-        >
-          <Trash2 data-icon="inline-start" aria-hidden="true" />
-          <span className="relay-text-trim leading-none">{t("modals.pair.actions.remove")}</span>
-        </Button>
+        {!confirmingRevoke && (
+          <Button
+            type="button"
+            size="sm"
+            variant="ghost"
+            disabled={isBusy}
+            onClick={() => onRemove(peer)}
+            aria-label={`${t("modals.pair.actions.remove")} ${peer.label}`}
+            className="ml-auto text-muted-foreground hover:text-destructive"
+          >
+            <Trash2 data-icon="inline-start" aria-hidden="true" />
+            <span className="relay-text-trim leading-none">{t("modals.pair.actions.remove")}</span>
+          </Button>
+        )}
       </div>
     </li>
   );
 }
+
+type PeerActionKind = "rename" | "reconnect" | "revoke" | "remove";
 
 export function PairDeviceModal({ isOpen, onOpenChange, mode, status }: PairDeviceModalProps) {
   const { t } = useTranslation();
@@ -387,10 +426,8 @@ export function PairDeviceModal({ isOpen, onOpenChange, mode, status }: PairDevi
   const [copied, setCopied] = useState(false);
   const [copiedNodeId, setCopiedNodeId] = useState<string | null>(null);
   const [remoteInput, setRemoteInput] = useState("");
-  const [busyAction, setBusyAction] = useState<{
-    nodeId: string;
-    kind: "rename" | "reconnect" | "revoke" | "remove";
-  } | null>(null);
+  const [busyByNode, setBusyByNode] = useState<Record<string, PeerActionKind>>({});
+  const busyNodesRef = useRef(new Set<string>());
   const [feedback, setFeedback] = useState<{ ok: boolean; text: string } | null>(null);
 
   const { data: trustedPeers = [] } = useTrustedPeers();
@@ -463,11 +500,12 @@ export function PairDeviceModal({ isOpen, onOpenChange, mode, status }: PairDevi
   };
 
   const runPeerAction = async (
-    action: NonNullable<typeof busyAction>,
+    action: { nodeId: string; kind: PeerActionKind },
     mutate: () => Promise<string>,
   ) => {
-    if (busyAction) return false;
-    setBusyAction(action);
+    if (busyNodesRef.current.has(action.nodeId)) return false;
+    busyNodesRef.current.add(action.nodeId);
+    setBusyByNode((prev) => ({ ...prev, [action.nodeId]: action.kind }));
     setFeedback(null);
     try {
       setFeedback({ ok: true, text: await mutate() });
@@ -476,7 +514,12 @@ export function PairDeviceModal({ isOpen, onOpenChange, mode, status }: PairDevi
       setFeedback({ ok: false, text: formatErrorMessage(error, t) });
       return false;
     } finally {
-      setBusyAction(null);
+      busyNodesRef.current.delete(action.nodeId);
+      setBusyByNode((prev) => {
+        const next = { ...prev };
+        delete next[action.nodeId];
+        return next;
+      });
     }
   };
 
@@ -627,10 +670,8 @@ export function PairDeviceModal({ isOpen, onOpenChange, mode, status }: PairDevi
                     mode={mode}
                     isConnected={isConnected}
                     copiedNodeId={copiedNodeId}
-                    isBusy={busyAction !== null}
-                    isReconnecting={
-                      busyAction?.kind === "reconnect" && busyAction.nodeId === peer.node_id
-                    }
+                    isBusy={Boolean(busyByNode[peer.node_id])}
+                    isReconnecting={busyByNode[peer.node_id] === "reconnect"}
                     onCopyNodeId={(nodeId) => void handleCopyNodeId(nodeId)}
                     onRename={(nodeId, label) =>
                       runPeerAction({ nodeId, kind: "rename" }, async () => {

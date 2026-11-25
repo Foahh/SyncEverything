@@ -19,7 +19,20 @@ export interface McpSnippetOptions {
   httpUrl?: string | null;
 }
 
-export type HttpUrlValidationResult = { ok: true; url: string } | { ok: false; error: string };
+export type McpHttpUrlErrorCode =
+  | "empty"
+  | "control_chars"
+  | "whitespace"
+  | "invalid_scheme"
+  | "missing_host"
+  | "embedded_credentials"
+  | "invalid_url"
+  | "invalid_host"
+  | "invalid_port";
+
+export type HttpUrlValidationResult =
+  | { ok: true; url: string }
+  | { ok: false; code: McpHttpUrlErrorCode; error: string };
 
 export interface MergedProjectMcpJson {
   mergedContent: string;
@@ -33,7 +46,8 @@ export interface McpDiffLine {
 }
 
 const WHITESPACE_RE = /\s/;
-const ALLOWED_HOST_RE = /^[A-Za-z0-9.:\-[\]]+$/;
+const ALLOWED_HOST_RE = /^[A-Za-z0-9_.:\-[\]]+$/;
+const HTTP_SCHEME_RE = /^https?:\/\//i;
 
 function hasControlChar(value: string): boolean {
   for (let i = 0; i < value.length; i += 1) {
@@ -63,64 +77,82 @@ export function getMcpClientConfigPath(client: McpClientId): string {
 }
 
 export function validateMcpHttpUrl(raw: string): HttpUrlValidationResult {
-  if (hasControlChar(raw)) {
+  const trimmed = raw.trim();
+  if (!trimmed) {
+    return { ok: false, code: "empty", error: "MCP HTTP endpoint URL cannot be empty." };
+  }
+  if (hasControlChar(trimmed)) {
     return {
       ok: false,
+      code: "control_chars",
       error: "MCP HTTP endpoint URL cannot contain control characters.",
     };
   }
-  const trimmed = raw.trim();
-  if (!trimmed) {
-    return { ok: false, error: "MCP HTTP endpoint URL cannot be empty." };
-  }
   if (WHITESPACE_RE.test(trimmed)) {
-    return { ok: false, error: "MCP HTTP endpoint URL cannot contain whitespace." };
-  }
-  if (!trimmed.startsWith("http://") && !trimmed.startsWith("https://")) {
     return {
       ok: false,
+      code: "whitespace",
+      error: "MCP HTTP endpoint URL cannot contain whitespace.",
+    };
+  }
+  if (!HTTP_SCHEME_RE.test(trimmed)) {
+    return {
+      ok: false,
+      code: "invalid_scheme",
       error: "MCP HTTP endpoint URL must start with http:// or https://.",
     };
   }
   const rest = trimmed.slice(trimmed.indexOf("://") + 3);
   const authority = rest.split(/[/?#]/, 1)[0] ?? "";
   if (!authority) {
-    return { ok: false, error: "MCP HTTP endpoint URL must include a valid host." };
+    return {
+      ok: false,
+      code: "missing_host",
+      error: "MCP HTTP endpoint URL must include a valid host.",
+    };
   }
   if (authority.includes("@")) {
     return {
       ok: false,
+      code: "embedded_credentials",
       error: "MCP HTTP endpoint URL must not include embedded credentials.",
     };
   }
   if (trimmed.includes("\\") || authority.endsWith(":")) {
-    return { ok: false, error: "MCP HTTP endpoint URL is not a valid URL." };
+    return { ok: false, code: "invalid_url", error: "MCP HTTP endpoint URL is not a valid URL." };
   }
 
   let parsed: URL;
   try {
     parsed = new URL(trimmed);
   } catch {
-    return { ok: false, error: "MCP HTTP endpoint URL is not a valid URL." };
+    return { ok: false, code: "invalid_url", error: "MCP HTTP endpoint URL is not a valid URL." };
   }
   if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
     return {
       ok: false,
+      code: "invalid_scheme",
       error: "MCP HTTP endpoint URL must start with http:// or https://.",
     };
   }
   if (parsed.username || parsed.password) {
     return {
       ok: false,
+      code: "embedded_credentials",
       error: "MCP HTTP endpoint URL must not include embedded credentials.",
     };
   }
   if (!parsed.hostname || !ALLOWED_HOST_RE.test(parsed.hostname)) {
-    return { ok: false, error: "MCP HTTP endpoint URL contains an invalid host." };
+    return {
+      ok: false,
+      code: "invalid_host",
+      error: "MCP HTTP endpoint URL contains an invalid host.",
+    };
   }
   if (authority.endsWith(":0") || parsed.port === "0") {
     return {
       ok: false,
+      code: "invalid_port",
       error: "MCP HTTP endpoint URL port must be between 1 and 65535.",
     };
   }

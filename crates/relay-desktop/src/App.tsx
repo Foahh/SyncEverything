@@ -163,6 +163,13 @@ export default function App() {
     });
   };
 
+  const currentDeviceLabel =
+    status?.mode === "host"
+      ? t("sidebar.mode.host")
+      : status?.mode === "local_dual_sandbox"
+        ? t("sidebar.mode.local_dual_sandbox")
+        : t("sidebar.mode.client");
+
   const handleRecordDecision = async (values: {
     label: string;
     rationale: string;
@@ -179,7 +186,7 @@ export default function App() {
         constraints: values.constraints,
       },
       freshness: { status: "fresh" },
-      device_origin: status?.mode === "host" ? "Workstation" : "Laptop",
+      device_origin: currentDeviceLabel,
       created_at: now,
       updated_at: now,
     };
@@ -208,7 +215,7 @@ export default function App() {
       command_preset: values.preset,
       params: values.params,
       require_approval: values.requireApproval,
-      requested_by_device: status?.mode === "host" ? "Workstation" : "Laptop",
+      requested_by_device: currentDeviceLabel,
       user_note: values.userNote.trim() || null,
     });
     setSelectedTaskId(created.spec.task_id);
@@ -304,6 +311,11 @@ export default function App() {
           onCancelTask={handleCancelTask}
           onSelectEvidenceNode={handleSelectNode}
           onSwitchMode={(mode) => switchMode.mutate(mode)}
+          isSwitchingMode={switchMode.isPending}
+          switchModeError={
+            switchMode.error == null ? null : formatErrorMessage(switchMode.error, t)
+          }
+          onDismissSwitchModeError={() => switchMode.reset()}
           onTriggerUpstreamEdit={handleTriggerUpstreamEdit}
           onResetDemo={() => {
             setSelectedNodeId(null);
@@ -365,6 +377,7 @@ export default function App() {
           isStreaming={copilot.isStreaming}
           streamingMessageId={copilot.streamingMessageId}
           sendError={copilot.sendError}
+          onDismissSendError={copilot.clearSendError}
           llmSettings={llmSettings}
           onSendMessage={copilot.sendMessage}
           onCancelTurn={copilot.cancelTurn}
