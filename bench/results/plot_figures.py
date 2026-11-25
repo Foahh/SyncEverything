@@ -7,7 +7,9 @@ Usage (zero modifications to project pyproject.toml or Cargo.toml):
 
 from __future__ import annotations
 
+import argparse
 import csv
+import hashlib
 import json
 import statistics
 import sys
@@ -24,7 +26,7 @@ import numpy as np
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT / "eval"))
-from model_runs import load_model_runs
+from model_runs import SCORING_VERSION, load_model_runs
 
 BENCH_RESULTS = REPO_ROOT / "bench" / "results"
 CHAOS_RESULTS = REPO_ROOT / "bench" / "chaos-cases" / "results"
@@ -83,6 +85,9 @@ def save_figure(fig: plt.Figure, stem: str) -> None:
         if ext == "png":
             kwargs["dpi"] = 300
         fig.savefig(out, **kwargs)
+        if ext == "svg":
+            lines = out.read_text(encoding="utf-8").splitlines()
+            out.write_text("\n".join(line.rstrip() for line in lines) + "\n", encoding="utf-8", newline="\n")
     plt.close(fig)
     print(f"[plot] Saved {stem}.{{png,svg,pdf}}", flush=True)
 
@@ -285,11 +290,18 @@ def plot_fig2_context_ablation() -> None:
     with scaling_path.open("r", encoding="utf-8") as fh:
         scaling_rows = list(csv.DictReader(fh))
     hashes = {(r["snapshot_id"], r["strategy"]): r["context_bundle_hash"] for r in scaling_rows}
+    inputs_bytes = (BENCH_RESULTS / "context_ablation_inputs.json").read_bytes()
+    inputs = json.loads(inputs_bytes)
+    inputs_hash = hashlib.sha256(inputs_bytes).hexdigest()
+    snapshots = {q["query_id"]: q["snapshot_id"] for q in inputs["queries"]}
     for line in (BENCH_RESULTS / "context_ablation_runs.jsonl").read_text(encoding="utf-8").splitlines():
         if line.strip():
             row = json.loads(line)
-            if row["context_bundle_hash"] != hashes[(row["snapshot_id"], row["strategy"])]:
-                raise ValueError("Figure 2 requires measurements and scaling rows from identical context bundles")
+            snapshot, strategy = snapshots[row["query_id"]], row["strategy"]
+            expected = inputs["snapshots"][snapshot]["bundles"][strategy]["context_bundle_hash"]
+            if (row["inputs_sha256"] != inputs_hash or row["snapshot_id"] != snapshot
+                    or row["context_bundle_hash"] != expected or hashes[snapshot, strategy] != expected):
+                raise ValueError("Figure 2 requires measurements and scaling rows from the same saved inputs")
 
     strat_order = ["full_transcript", "flat_summary", "dag_bundle"]
     strat_labels = {
@@ -417,12 +429,12 @@ def plot_fig2_context_ablation() -> None:
     save_figure(fig, "fig2_context_ablation")
 
 
-def plot_fig3_model_pareto() -> None:
+def plot_fig3_model_pareto(scoring_version: int) -> None:
     grouped: dict[str, list[dict[str, Any]]] = {}
-    for d in load_model_runs(MODEL_RESULTS):
+    for d in load_model_runs(MODEL_RESULTS, scoring_version):
         grouped.setdefault(str(d["model"]), []).append(d)
     if not grouped:
-        raise ValueError("Figure 3 requires live MCP evaluation results")
+        raise ValueError(f"Figure 3 requires live MCP evaluation results with scoring version {scoring_version}")
 
     order = [
         "qwen3.5:4b (no-think)",
@@ -721,13 +733,13 @@ def plot_fig4_chaos_self_healing() -> None:
         marker="D",
         markersize=7.0,
         linewidth=2.0,
-        label="Total Patch Retries (Right Axis)",
+        label="Tool Errors in Repair Cases (Right Axis)",
         zorder=5,
     )
     retry_offsets = [(26, 22), (0, -36), (4, 22)]
     for rx, rt, ur, dr, off in zip(lx, total_retries, uv_retries, diff_retries, retry_offsets):
         ax2_r.annotate(
-            f"{rt} retries\n(uv={ur}, edit={dr})",
+            f"{rt} tool errors\n(C01={ur}, others={dr})",
             xy=(rx, rt),
             xytext=off,
             textcoords="offset points",
@@ -740,7 +752,7 @@ def plot_fig4_chaos_self_healing() -> None:
             zorder=10,
         )
     ax2_r.set_ylim(-1.2, max(total_retries + [10]) * 1.65)
-    ax2_r.set_ylabel("Total Patch Retries (Count)", color=OKABE["vermilion"])
+    ax2_r.set_ylabel("Tool Errors in Repair Cases", color=OKABE["vermilion"])
     ax2_r.tick_params(axis="y", colors=OKABE["vermilion"])
 
     h1, l1 = ax2.get_legend_handles_labels()
@@ -757,10 +769,13 @@ def plot_fig4_chaos_self_healing() -> None:
 
 
 def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--model-scoring-version", type=int, default=SCORING_VERSION)
+    args = parser.parse_args()
     setup_rcparams()
     plot_fig1_baseline_comparison()
     plot_fig2_context_ablation()
-    plot_fig3_model_pareto()
+    plot_fig3_model_pareto(args.model_scoring_version)
     plot_fig4_chaos_self_healing()
     print("[plot] All 4 publication figures generated cleanly.", flush=True)
     return 0

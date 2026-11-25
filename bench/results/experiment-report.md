@@ -1,7 +1,7 @@
 # Relay v1.0 — Track 5 Experimental Evaluation Report
 
 > **Post-optimization provenance (`feat/agent-tool-ergonomics`, `scoring_version: 3`, 2026-11-25).**
-> All four empirical suites below were re-executed end-to-end against the upgraded `relay-daemon` (`file_edits` + `read_worktree_file` + `PreflightReport.error_snippets` + mandatory stale visibility & `metric_authority_note` + Ollama XML-500 retry + configurable local `no-think`). All release-audit invariants are verified:
+> The results committed in `8f682ae` were collected against the upgraded `relay-daemon` (`file_edits` + `read_worktree_file` + `PreflightReport.error_snippets` + mandatory stale visibility & `metric_authority_note` + Ollama XML-500 retry + configurable local `no-think`). The recorded dataset contains the following observations.
 > - **Exp 1**: 36/36 live runs, 0 HTTP errors, 0 turn-budget violations (`llm_turns ≤ 12` whenever `corrections == 0`).
 > - **Exp 2**: 54/54 live queries, 0 errors, 54/54 `context_bundle_hash` match `context_ablation_scaling.csv`, 54/54 `inputs_sha256` match SHA-256 of `context_ablation_inputs.json`.
 > - **Exp 3**: 15/15 live runs in `scoring_version: 3` cohort (`N = 3` per model config), 0.0% stale hallucination across all 5 configs.
@@ -52,13 +52,13 @@ $$T_{\text{eff}}(t_h) = T_{\text{wall}} + N_{\text{suppl}} \cdot t_h + N_{\text{
 
 | Architecture | $t_h = 0\text{s}$ | $t_h = 15\text{s}$ | $t_h = 30\text{s}$ | $t_h = 60\text{s}$ | Notes |
 |---|---:|---:|---:|---:|---|
-| **`file_sync_only`** | 20.47 ± 5.83 s | 22.97 ± 10.03 s | 25.47 ± 15.34 s | 30.47 ± 26.64 s | Excludes 2 unrecovered loop aborts (`B1`, `B3`) |
-| **`static_template`** | 16.88 ± 4.13 s | 16.88 ± 4.13 s | 16.88 ± 4.13 s | 16.88 ± 4.13 s | Excludes 3 unrecovered `B3` aborts (0/3 pass on `B3`) |
+| **`file_sync_only`** | 20.47 ± 5.83 s | 22.97 ± 10.03 s | 25.47 ± 15.34 s | 30.47 ± 26.64 s | Includes 2 unrecovered loop aborts (`B1`, `B3`) |
+| **`static_template`** | 16.88 ± 4.13 s | 16.88 ± 4.13 s | 16.88 ± 4.13 s | 16.88 ± 4.13 s | Includes 3 unrecovered `B3` aborts (0/3 pass on `B3`) |
 | **`relay_v1`** | 26.92 ± 15.98 s | 30.67 ± 28.68 s | 34.42 ± 41.56 s | 41.92 ± 67.44 s | Includes `+5s` UI diff approval; all 3 corrections came from single `t1 B1` terminal-`Failed` outlier (other 11/12 runs: `17.5 s` wall, `0` corrections) |
 
 **Key Takeaways**:
 - **Highest autonomous completion & zero loop aborts**: `relay_v1` achieved **91.7% first-pass & 91.7% final completion** with **0 loop aborts** (vs. **66.7% / 83.3%** with 2 aborts on `file_sync_only` and **75.0% / 75.0%** with 3 aborts on `static_template`).
-- **Offline dependency healing (`B3`) & defect isolation (`B4`)**: Under strict 12-turn budgets, `static_template` failed `B3_missing_dep_heal` on **0/3 trials** (repeated shell command loops / turn exhaustion) and `file_sync_only` failed `B1` on **0/3 first-pass trials** (missing off-repo `alpha = 0.25` constraint). `relay_v1` passed `B2`, `B3`, and `B4` **9/9 (100%)** on the first pass with zero manual corrections while preserving `main` `README.md` WIP bytes cleanly across all 12 runs.
+- **Offline dependency healing (`B3`) & defect isolation (`B4`)**: Under strict 12-turn budgets, `static_template` passed `B3_missing_dep_heal` on **0/3 trials** (repeated shell command loops / turn exhaustion) and `file_sync_only` passed `B1` on **0/3 first-pass trials** (missing off-repo `alpha = 0.25` constraint). `relay_v1` passed `B2`, `B3`, and `B4` **9/9 (100%)** on the first pass with zero manual corrections while preserving `main` `README.md` WIP bytes cleanly across all 12 runs.
 - **Fail-closed FSM honesty on `t1 B1`**: On `relay_v1`'s single failure (`t1 B1`), the task entered terminal `Failed` state during initial execution; Relay's FSM strictly rejected `Failed -> PreflightRunning` re-entry, and the agent refused across all 3 Oracle correction turns to fabricate unverified metrics without a fresh DAG evidence node. Excluding that single outlier, the 11 passing `relay_v1` trials averaged **17.5 s** wall time with **0** manual corrections.
 
 ---
@@ -96,7 +96,7 @@ Across 5 progressive SQLite DAG checkpoints (`depth_1`, `depth_3`, `depth_6`, `d
 **Key Takeaways**:
 - **Physical quarantine eliminates stale hallucination completely**: Across all **18 live `dag_bundle` queries** on Cloud, 4B, and 9B, Relay achieved **0.0% stale hallucination**, **0 direct stale citations**, **100.0% query pass rate (`Q1–Q6`)**, and **100% mixed fresh-vs-stale accuracy (`Q5`)** while cutting depth-10 context size by **74.9%** (`6,517 → 1,638` tokens).
 - **Unstructured compression fails catastrophically on edge models**: Stripping freshness metadata and causal edges (`flat_summary`) triggers **83.3% stale hallucination** (only 1/6 pass) on both `qwen3.5:4b (no-think)` and `qwen3.5:9b (no-think)` and **33.3%** even on cloud `deepseek-flash`; raw `full_transcript` still leaks stale numbers in **33.3%–50.0%** of queries.
-- **9× faster edge context QA with `no-think`**: Switching local Qwen3.5 to Relay's default `no-think` edge profile reduced `dag_bundle` median latency from **25.4 s → 2.56 s** (4B) and **48.7 s → 5.55 s** (9B) while holding **100.0% accuracy**.
+- With local reasoning effort set to `none`, median DAG query latency was 2.56 s on 4B and 5.55 s on 9B. Different saved prompts, contexts and software were used in the earlier runs.
 
 ---
 
@@ -106,7 +106,7 @@ Across 5 progressive SQLite DAG checkpoints (`depth_1`, `depth_3`, `depth_6`, `d
 
 Evaluated in [eval/models/benchmark-report.md](../../eval/models/benchmark-report.md) across **N = 3 independent trials** per configuration (**15 live MCP runs**, `scoring_version: 3`, live `relay-daemon mcp-stdio` with 9 MCP tools):
 
-| Model Config | Endpoint | N | Pass Rate (Mean ± SD) | Tool Recall (Mean ± SD) | Stale Hallucination (Mean ± SD) | Loop Abort | Self-Heal (`S4`) | Median Latency ms (Mean ± SD) | Avg Tokens |
+| Model Config | Endpoint | N | Pass Rate (Mean ± SD) | Tool Recall (Mean ± SD) | Stale Hallucination (Mean ± SD) | Loop Abort | S4 smoke-verified proposal | Median Latency ms (Mean ± SD) | Avg Tokens |
 |---|---|---:|---:|---:|---:|---:|---|---:|---:|
 | **`deepseek-flash`** | Cloud API | 3 | **100.0% ± 0.0%** | **1.000 ± 0.000** | **0.0% ± 0.0%** | **0.0% ± 0.0%** | **3/3 (100.0%)** | **3,953.2 ± 333.4** | **49,324** |
 | **`qwen3.5:4b`** | Local Ollama | 3 | **100.0% ± 0.0%** | **1.000 ± 0.000** | **0.0% ± 0.0%** | **0.0% ± 0.0%** | **3/3 (100.0%)** | 11,922.6 ± 316.8 | 60,083 |
@@ -115,11 +115,11 @@ Evaluated in [eval/models/benchmark-report.md](../../eval/models/benchmark-repor
 | `qwen3.5:9b` | Local Ollama | 3 | 83.3% ± 14.4% | 0.972 ± 0.048 | **0.0% ± 0.0%** | 16.7% ± 14.4% | 2/3 (66.7%) | 25,076.8 ± 1,904.4 | 77,753 |
 
 **Key Takeaways**:
-- **Zero stale hallucination across all 15 runs**: Mandatory stale visibility plus `fresh_evidence_count` / `stale_evidence_count` / `metric_authority_note` drove `S2` stale hallucination to **0.0% ± 0.0%** on every single model configuration (Cloud, 4B, and 9B, thinking and `no-think`).
-- **Local quantized models match Cloud accuracy**: Both **`qwen3.5:9b (no-think)`** (`13.29 s`) and **`qwen3.5:4b`** (`11.92 s`) achieved **100.0% ± 0.0% pass rate, 1.000 tool recall, 0.0% loop abort, and 3/3 (100.0%) worktree self-healing**, matching Cloud `deepseek-flash` (`3.95 s`, 100.0%).
+- **Zero stale hallucination across all 15 runs**: The v3 scorer recorded **0.0% ± 0.0%** on the S2 trap for each model configuration (Cloud, 4B, and 9B, thinking and `no-think`).
+- In the archived v3 runs, `qwen3.5:9b (no-think)` and `qwen3.5:4b` matched the observed cloud pass count of 12/12 and reached the S4 approval gate in all three trials. Their median latencies were 13.29 s and 11.92 s, compared with 3.95 s for `deepseek-flash`.
 - **Clear Pareto frontier for edge routing**:
   - `qwen3.5:4b (no-think)` delivers near-cloud latency (**4.82 s** vs. **3.95 s**) with **83.3%** pass rate and **0.0%** stale leakage for interactive status/env/stale triage.
-  - `qwen3.5:9b (no-think)` outperforms thinking-mode `qwen3.5:9b` on both **pass rate (`100.0%` vs. `83.3%`)** and **speed (`13.29 s` vs. `25.08 s`, 1.89× faster)**, validating Relay's `no-think` local default.
+  - Across the three v3 trials per configuration, `qwen3.5:9b (no-think)` passed 12/12 scenarios with a 13.29 s median latency. Thinking mode passed 10/12 with a 25.08 s median latency.
 
 ---
 
@@ -127,58 +127,45 @@ Evaluated in [eval/models/benchmark-report.md](../../eval/models/benchmark-repor
 
 ![Figure 4 — Chaos Suite Fault-Injection Evaluation](./figures/fig4_chaos_self_healing.png)
 
-Consolidated from Track 4's deterministic offline suite and strict `--mode llm` logs ([bench/chaos-cases/results](../chaos-cases/results)):
+The table shows the archived Track 4 scorer’s outcomes. The scripted run’s P2P gate completed in 5,271.7 ms with a 35 ms RTT. [Archived runs](../chaos-cases/results)
 
-| Runner | Pass Rate | Self-Heal (`C01,C03,C05,C06`) | Tool Recall | Patch Retries (`uv` + `file_edits`) | Stale Leaks (`C02,C07`) | Total Tokens | Median LLM Latency (ms) |
+| Runner | Pass Rate | Self-Heal (`C01,C03,C05,C06`) | Tool Recall | Tool errors on repair cases (`uv` + `file_edits`) | Stale Leaks (`C02,C07`) | Reported Tokens | Median LLM Latency (ms) |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| **Scripted (+P2P Loopback)** | **8/8 (100.0%)** | **4/4 (100.0%)** | **1.000** | 0 | **0** | — | 5,271.7 (P2P gate, RTT 35 ms) |
+| **Scripted (+P2P Loopback)** | **8/8 (100.0%)** | **4/4 (100.0%)** | **1.000** | 0 | **0** | — | — |
 | **`deepseek-flash` (Cloud)** | **8/8 (100.0%)** | **4/4 (100.0%)** | **1.000** | 2 (`0 + 2`)* | **0** | 363,970 | **10,524.0** |
 | **`qwen3.5:4b` (Local no-think)** | **7/8 (87.5%)** | **4/4 (100.0%)** | 0.906 | 4 (`0 + 4`)* | **0** | **231,087** | 22,493.0 |
 | **`qwen3.5:9b` (Local no-think)** | 6/8 (75.0%) | **4/4 (100.0%)** | 0.906 | 12 (`0 + 12`) | **0** | 250,426 | 50,246.1 |
 
-*\*Note: Patch retries column counts retries on patch cases (`C01`, `C03`, `C05`, `C06`); total retries across all 8 cases were `3` on `deepseek-flash` (+1 on `C07`), `6` on `qwen3.5:4b` (+2 on `C04`), and `12` on `qwen3.5:9b`.*
+*\*Note: The repair-case error column counts tool/helper errors and unverified proposals on (`C01`, `C03`, `C05`, `C06`); total retries across all 8 cases were `3` on `deepseek-flash` (+1 on `C07`), `6` on `qwen3.5:4b` (+2 on `C04`), and `12` on `qwen3.5:9b`.*
 
 **Key Takeaways**:
-- **100% smoke-verified self-healing across Cloud, 4B, and 9B**: Every evaluated model — including a **3.3 GB local 4B model** — achieved **4/4 (100.0%) smoke-verified self-healing** across missing dependency wheels (`C01`), same-line conflict worktree patches (`C03`), Python `NameError` runtime defects (`C05`), and corrupted `uv.lock` TOML recovery (`C06`), with **0 stale leaks** across `C02` and `C07`.
-- **Remaining edge failure modes are workflow-gating, not patch syntax**: `qwen3.5:4b (no-think)` passed **7/8 (87.5%)** — including all 4 self-heal cases end-to-end — failing only `C04` (repeated identical `approve_and_execute_task` call after reconnect). `qwen3.5:9b (no-think)` passed **6/8 (75.0%)** and successfully smoke-verified both `C05` and `C06` patches, halting only at the final approval-confirmation turn (`C05` yielded to human approval text without re-calling `approved_via_ui=true`; `C06` exhausted the 14-turn cap right after `approval_required`).
+- The historical judge assigned 4/4 self-heals to each model. For C03, it inferred a heal from a completed task. The revised judge reads the smoke-verified proposal explicitly. The two stale-trap cases recorded zero leaks for all three models.
+- **Remaining edge failure modes are workflow-gating, not patch syntax**: `qwen3.5:4b (no-think)` passed **7/8 (87.5%)** — including all four repair cases — failing only `C04` (repeated identical `approve_and_execute_task` call after reconnect). `qwen3.5:9b (no-think)` passed **6/8 (75.0%)** and smoke-verified both `C05` and `C06` patches, halting only at the final approval-confirmation turn (`C05` yielded to human approval text without re-calling `approved_via_ui=true`; `C06` exhausted the 14-turn cap right after `approval_required`).
 
 ---
 
-## 工具接口消融（`code_diff` → `file_edits` + `read_worktree_file`）
+## Historical cohorts and attribution
 
-To isolate the impact of Relay's three-layer agent-ergonomics upgrade (`file_edits` structured search/replace + `read_worktree_file` + `PreflightReport.error_snippets` + idempotent failed-patch rollback + mandatory stale visibility & `metric_authority_note` + local `no-think` default), we compare the pre-optimization baseline on `main` (`76c87058`, unified `code_diff`, no worktree file reader, optional `include_stale`) directly against `feat/agent-tool-ergonomics` (`scoring_version: 3`) on identical hardware and fixture repos.
+The pre-upgrade Track 3 archive contains 15 unversioned v1 runs. Commit `76c8705` contains these results and a v2 scorer, but no live v2 results. Commit `8f682ae` adds 15 live v3 runs. Both groups have three runs per configuration. The prompts, scoring rules, tool interfaces, retry policy, and model settings changed together. These groups describe two deployments and do not isolate the effect of any one change.
 
-### Track 3 Before vs. After (`N = 3` per Model Config)
+| Model | Passed S4 scenarios, v1 → v3 | S2 responses flagged by each cohort’s scorer, v1 → v3 |
+|---|---:|---:|
+| DeepSeek Flash | 2/3 → 3/3 | 1/3 → 0/3 |
+| Qwen 4B | 0/3 → 3/3 | 2/3 → 0/3 |
+| Qwen 4B (no-think) | 0/3 → 1/3 | 2/3 → 0/3 |
+| Qwen 9B | 0/3 → 1/3 | 3/3 → 0/3 |
+| Qwen 9B (no-think) | 0/3 → 3/3 | 3/3 → 0/3 |
 
-| Model Config | Pass Rate (`Before → After`) | `S4` Self-Heal (`Before → After`) | `S2` Stale Hallucination (`Before → After`) | Median Latency ms (`Before → After`) |
-|---|---:|---:|---:|---:|
-| **`deepseek-flash`** | 83.3% → **100.0%** (+16.7 pp) | 2/3 (66.7%) → **3/3 (100.0%)** | 8.3% → **0.0%** | 5,171.0 → **3,953.2** (-23.6%) |
-| **`qwen3.5:9b (no-think)`** | 50.0% → **100.0%** (**+50.0 pp**) | 0/3 (0.0%) → **3/3 (100.0%)** | 25.0% → **0.0%** | 9,231.0 → 13,290.1 *(completes full S4)* |
-| **`qwen3.5:4b`** | 58.3% → **100.0%** (**+41.7 pp**) | 0/3 (0.0%) → **3/3 (100.0%)** | 16.7% → **0.0%** | 17,091.2 → **11,922.6** (-30.2%) |
-| **`qwen3.5:4b (no-think)`** | 58.3% → **83.3%** (+25.0 pp) | 0/3 (0.0%) → **1/3 (33.3%)** | 16.7% → **0.0%** | 5,825.1 → **4,816.5** (-17.3%) |
-| **`qwen3.5:9b`** | 50.0% → **83.3%** (+33.3 pp) | 0/3 (0.0%) → **2/3 (66.7%)** | 25.0% → **0.0%** | 38,105.8 → **25,076.8** (-34.2%) |
+Each row uses three S2 opportunities. The original JSON summaries divided S2 flags by all 12 scenario attempts per model. Qwen 9B had two smoke-verified S4 proposals in v3 and passed the complete S4 approval-gate scenario once.
 
-### Track 4 Chaos Suite Before vs. After (8 Fault Classes)
+The archived Track 4 local case pass counts changed from 3/8 to 7/8 (4B) and 3/8 to 6/8 (9B). DeepSeek passed 8/8 in both suites. The earlier reports are available from Git at `76c8705:bench/chaos-cases/results/`. The current local runs use reasoning effort `none`. Track 4 counts repeated tool/helper errors and unverified proposals under “retries”. The historical artifacts do not identify how many failures were patch-format errors or HTTP retries.
 
-| Runner | Pass Rate (`Before → After`) | Self-Heal `C01,C03,C05,C06` (`Before → After`) | Tool Recall (`Before → After`) | Patch Retries (`Before → After`) | Stale Leaks `C02,C07` (`Before → After`) | Total Tokens (`Before → After`) |
-|---|---:|---:|---:|---:|---:|---:|
-| **`deepseek-flash`** | 8/8 (100%) → **8/8 (100%)** | 4/4 (100%) → **4/4 (100%)** | 1.000 → **1.000** | 0 → 2 | 0 → **0** | 299,127 → 363,970 |
-| **`qwen3.5:4b`** | 3/8 (37.5%) → **7/8 (87.5%)** (**+50.0 pp**) | 1/4 (25.0%) → **4/4 (100.0%)** | 0.781 → **0.906** | 11 → **4** (-63.6%) | 2 → **0** | 220,128 → 231,087 |
-| **`qwen3.5:9b`** | 3/8 (37.5%) → **6/8 (75.0%)** (**+37.5 pp**) | 1/4 (25.0%) → **4/4 (100.0%)** | 0.781 → **0.906** | 23 → **12** (-47.8%) | 2 → **0** | 336,070 → **250,426** (-25.5%) |
+### Validation for the release
 
-### Root-Cause Attribution
-
-1. **Structured `file_edits` + `read_worktree_file` + `error_snippets` unlocks small-model self-healing**: Under `code_diff`, local 4B/9B models failed **100% of blind code-defect repairs** (`0/12` in Track 3 `S4`; `0/6` across `C03`/`C05`/`C06` in Track 4 with 11–23 retries) due to fragile unified-diff hunk header arithmetic and missing source context. Replacing unified diffs with exact search/replace `file_edits`, full-file overwrite (`old_text: null`) for broken lockfiles, worktree-confined `read_worktree_file`, generic traceback `error_snippets`, and idempotent rollback on failed smoke lifted local self-healing to **3/3 (100%)** in Track 3 (`qwen3.5:4b` & `qwen3.5:9b (no-think)`) and **4/4 (100%)** on both 4B and 9B in Track 4 while cutting patch retries by **48%–64%**.
-2. **Mandatory stale visibility & generic SSOT `metric_authority_note` closes the last hallucination gap**: Removing the optional `include_stale` toggle and attaching top-level `fresh_evidence_count` / `stale_evidence_count` + `metric_authority_note` (without hardcoding any repo filenames) reduced Track 3 stale hallucinations from **8.3%–25.0% → 0.0%** across all 5 model configs and Track 4 stale leaks from **2/2 → 0/2** on both local models.
-3. **Edge `no-think` default dramatically improves local responsiveness without sacrificing quality**: On RTX 5060 Laptop (8 GB VRAM), `no-think` cut Exp 2 `dag_bundle` latency by **~9×** (`25.4 s → 2.56 s` on 4B; `48.7 s → 5.55 s` on 9B) at **100% accuracy**, and made `qwen3.5:9b (no-think)` strictly dominate thinking-mode `qwen3.5:9b` in Track 3 (**100.0% at 13.3 s** vs. **83.3% at 25.1 s**).
-
----
-
-## Defense Slides Summary Bullets (Track 6 Ready)
-
-1. **Tool Interface Ergonomics Matters More Than Parameter Count**: Upgrading Relay's patch primitive from raw unified `code_diff` to structured `file_edits` + `read_worktree_file` + traceback `error_snippets` lifted local 4B/9B self-healing from **0% → 100%** (Track 3 `qwen3.5:9b (no-think)` & `qwen3.5:4b`) and Track 4 chaos pass rates from **37.5% → 87.5%** (4B) / **75.0%** (9B) — matching cloud reliability on edge hardware.
-2. **Physical STALE Quarantine Beats Prompt Engineering Alone**: Relay's `dag_bundle` + mandatory stale redaction + `metric_authority_note` achieved **0.0% stale hallucination** across **100% of runs** in Exp 2 (18/18), Exp 3 (15/15), and Exp 4 (24/24) while shrinking depth-10 context size by **74.9%**, whereas `flat_summary` triggered **83.3%** hallucination on local 4B/9B models.
-3. **Higher Autonomous Reliability Across Cross-Device Continuation**: Across 36 controlled baseline runs (Exp 1), `relay_v1` achieved **91.7% first-pass & final completion** with **0 loop aborts** and **100% clean main working trees** (vs. **66.7% / 83.3%** File-Sync and **75.0% / 75.0%** Static-Template with 0/3 on offline dependency healing `B3`).
+- Run the five Track 3 configurations three times with scorer v4. This scorer rejects model-supplied approval before execution, requires the gate to identify the verified proposal, and measures stale leakage per S2 opportunity. Figure 3 and the model matrix above use the archived v3 cohort. The raw files lack approval-call arguments and complete tool replies for retrospective v4 scoring.
+- Repeat Track 4 C03 for each model to verify the recorded patch passed smoke and applied to the clean index before testing the dirty checkout. Run the complete eight-case suite for release-level aggregate results.
+- Keep Exp 2 frozen bundles and the input SHA-256 together for any targeted retry. Provider-reported token counts cover successful responses. LLM latency includes HTTP waiting and retries, excludes local tool execution, and is distinct from Exp 1 wall time.
+- To estimate a component’s effect, run matched trials with the same fixture, scorer, prompts, endpoint model and reasoning settings, changing only that component.
 
 ---
 

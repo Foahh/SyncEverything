@@ -63,12 +63,39 @@ class ReleaseScoringTests(unittest.TestCase):
     def test_report_and_figure_use_a_single_live_scoring_cohort(self):
         with tempfile.TemporaryDirectory() as tmp:
             folder = Path(tmp)
-            (folder / "old.json").write_text('{"model":"old"}', encoding="utf-8")
-            new = {"model": "new", "scoring_version": SCORING_VERSION}
+            (folder / "old.json").write_text('{"model":"old","base_url":"local"}', encoding="utf-8")
+            new = {"model": "new", "base_url": "local", "scoring_version": SCORING_VERSION}
             (folder / "oracle.json").write_text(json.dumps({**new, "dry_run": True}), encoding="utf-8")
-            self.assertEqual([r["model"] for r in load_model_runs(folder)], ["old"])
+            self.assertEqual(load_model_runs(folder), [])
+            self.assertEqual([r["model"] for r in load_model_runs(folder, 1)], ["old"])
             (folder / "new.json").write_text(json.dumps(new), encoding="utf-8")
             self.assertEqual(load_model_runs(folder), [new])
+            (folder / "other.json").write_text(json.dumps({**new, "reasoning_effort": "none"}), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "share label"):
+                load_model_runs(folder)
+
+    def test_model_supplied_approval_never_reaches_the_stdio_server(self):
+        run = MODELS["run_agent_loop"]
+        mcp = Mock()
+        mcp.openai_tools.return_value = []
+        turns = [model_reply(("approve_and_execute_task", {"task_id": "task", "approved_via_ui": True})), model_reply()]
+        with patch.dict(run.__globals__, call_openai_chat=Mock(side_effect=turns)):
+            _, _, _, _, _, _, _, outcomes = run(mcp, "", "", "", "", None, 3)
+        mcp.call_tool.assert_not_called()
+        self.assertEqual(outcomes, [("approve_and_execute_task", True, MODELS["APPROVAL_DENIED"])])
+
+    def test_dry_tool_calls_record_no_llm_turns_tokens_or_latency(self):
+        mcp = Mock()
+        mcp.call_tool.return_value = (False, "[]")
+        result = MODELS["run_agent_loop"](mcp, "", "", "", "", None, 3, [("list_handoffs", {})])
+        self.assertEqual(result[0], ["list_handoffs"])
+        self.assertEqual(result[3:7], (0.0, 0, 0, 0))
+
+    def test_server_error_retries_are_local_and_specific_to_xml(self):
+        retry = MODELS["is_retryable_ollama_xml_500"]
+        self.assertFalse(retry("https://api.example/v1", 500, "XML syntax error: unexpected EOF"))
+        self.assertFalse(retry("http://localhost:11434/v1", 500, "database connection: unexpected EOF"))
+        self.assertFalse(retry("http://localhost:11434/v1", 503, "XML syntax error"))
 
     def test_chaos_approval_requires_reviewer_message_for_same_patch(self):
         run = CHAOS["run_llm_agent_loop"]

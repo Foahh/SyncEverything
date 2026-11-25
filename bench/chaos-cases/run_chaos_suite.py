@@ -9,7 +9,7 @@ isolated Git checkout of `bench/fixture-repo`:
    (`relay-daemon sandbox-dual`). Zero LLM and zero network required.
 2. `--mode llm`: drives a live OpenAI-compatible LLM (auto-loaded from `.env`
    via `RELAY_LLM_BASE_URL` / `RELAY_LLM_MODEL` / `RELAY_LLM_API_KEY`) as a
-   coding agent equipped with all 8 frozen Relay MCP tools plus 2 repo-confined
+   coding agent equipped with all 9 Relay MCP tools plus 2 repo-confined
    read-only workspace helpers (`list_repo_files`, `read_repo_file`), scoring
    self-healing success rate, tool recall, retry overhead, and STALE immunity
    for Track 5 evaluation.
@@ -23,7 +23,6 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import difflib
 import json
 import os
 import queue
@@ -45,6 +44,7 @@ from typing import Any
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT / "eval"))
+from llm_http import is_retryable_ollama_xml_500
 from stale_metrics import cites_stale_forecast_error
 
 FIXTURE_SRC = REPO_ROOT / "bench" / "fixture-repo"
@@ -199,19 +199,10 @@ def baseline_lockfile() -> str:
     return (FIXTURE_SRC / "uv.lock").read_text(encoding="utf-8").replace("\r\n", "\n")
 
 
-def unified_diff(old: str, new: str, relpath: str) -> str:
-    body = "".join(
-        difflib.unified_diff(
-            old.splitlines(keepends=True),
-            new.splitlines(keepends=True),
-            fromfile=f"a/{relpath}",
-            tofile=f"b/{relpath}",
-            n=3,
-        )
-    )
-    if not body:
-        raise RuntimeError(f"empty diff for {relpath}")
-    return f"diff --git a/{relpath} b/{relpath}\n{body}"
+def conflict_rejects_patch(client: Path, patch: Path) -> bool:
+    # The clean index must accept the same patch that the dirty files reject.
+    git(client, "apply", "--cached", "--check", "--whitespace=nowarn", str(patch))
+    return git(client, "apply", "--whitespace=nowarn", str(patch), check=False).returncode != 0
 
 
 def read_text(path: Path) -> str:
@@ -882,8 +873,8 @@ def scripted_same_line_conflict(ctx: dict[str, Any]) -> dict[str, Any]:
     patch_file = bindir / "host-patch.diff"
     patch_file.write_text(diff_preview, encoding="utf-8", newline="\n")
     # Real `git apply` (not --check): must fail cleanly without touching the laptop's dirty edit.
-    apply_res = git(client, "apply", "--whitespace=nowarn", str(patch_file), check=False)
-    metrics["conflict_apply_failed"] = apply_res.returncode != 0
+    metrics["conflict_apply_failed"] = conflict_rejects_patch(client, patch_file)
+    metrics["proposal_smoke_verified"] = proposal["smoke_verified"]
     metrics["client_edit_preserved"] = (
         client_forecast.read_bytes() == before_bytes and "default=0.55" in read_text(client_forecast)
     )
@@ -1225,11 +1216,6 @@ def is_loopback_url(url: str) -> bool:
     return host in {"127.0.0.1", "localhost", "::1"}
 
 
-def is_retryable_ollama_xml_500(code: int, detail: str) -> bool:
-    lower = detail.lower()
-    return code == 500 and ("xml syntax error" in lower or "unexpected eof" in lower)
-
-
 def call_openai_chat(
     base_url: str,
     model: str,
@@ -1269,8 +1255,9 @@ def call_openai_chat(
             elapsed_ms = (time.perf_counter() - t0) * 1000.0
             return json.loads(raw), elapsed_ms
         except urllib.error.HTTPError as err:
-            detail = err.read().decode("utf-8", errors="replace")
-            if attempt == 0 and is_retryable_ollama_xml_500(err.code, detail):
+            with err:
+                detail = err.read().decode("utf-8", errors="replace")
+            if attempt == 0 and is_retryable_ollama_xml_500(url, err.code, detail):
                 continue
             raise RuntimeError(f"HTTP {err.code} from {url}: {detail[:400]}") from err
     raise RuntimeError(f"Failed request to {url}")
@@ -1635,12 +1622,12 @@ def llm_same_line_conflict(ctx: dict[str, Any], case: dict[str, Any], llm_cfg: d
     if diff_preview.strip():
         patch_file = bindir / "host-patch.diff"
         patch_file.write_text(diff_preview, encoding="utf-8", newline="\n")
-        apply_res = git(client, "apply", "--whitespace=nowarn", str(patch_file), check=False)
-        conflict_apply_failed = apply_res.returncode != 0
+        conflict_apply_failed = conflict_rejects_patch(client, patch_file)
 
     stats = evidence_stats(snapshot)
     metrics = {
         "conflict_apply_failed": conflict_apply_failed,
+        "proposal_smoke_verified": bool(proposal.get("smoke_verified")),
         "client_edit_preserved": client_forecast.read_bytes() == before_bytes and "default=0.55" in read_text(client_forecast),
         "task_state_final": read_task(data, task_id)["state"],
         "evidence_fresh_count": stats["fresh"],
@@ -2073,9 +2060,7 @@ def run_llm_case(
     passed = error is None and assertions_ok and not agent_run["loop_aborted"] and not stale_hallucination
     self_heal_passed: bool | None = None
     if kind in HEALING_FAULT_KINDS:
-        self_heal_passed = bool(metrics.get("proposal_smoke_verified")) or (
-            kind == "same_line_conflict" and metrics.get("task_state_final") == "completed"
-        )
+        self_heal_passed = bool(metrics.get("proposal_smoke_verified"))
 
     result = {
         "case_id": case["case_id"],

@@ -67,7 +67,9 @@ class AblationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp, \
              patch.object(ablation, "build_all_snapshots", return_value=snapshots) as build, \
              patch.object(ablation, "find_daemon_binary", return_value=Path("daemon")), \
-             patch.object(ablation, "resolve_model_specs", side_effect=[models, models[:1]]), \
+             patch.object(ablation, "resolve_model_specs", side_effect=[
+                 models, [{**models[0], "reasoning_effort": "none"}], models[:1]
+             ]), \
              patch.object(ablation, "call_openai_chat", side_effect=chat), \
              contextlib.redirect_stdout(io.StringIO()):
             args = ["ablation", "--out", tmp]
@@ -77,6 +79,8 @@ class AblationTests(unittest.TestCase):
             before = [json.loads(line) for line in runs.read_text().splitlines()]
             self.assertIsNone(before[0]["stale_hallucination"])
             with patch.object(sys, "argv", [*args, "--retry-errors", "--models", "first"]):
+                with self.assertRaisesRegex(ValueError, "configuration changed"):
+                    ablation.main()
                 self.assertEqual(ablation.main(), 0)
             after = [json.loads(line) for line in runs.read_text().splitlines()]
             self.assertEqual(len(after), 36)

@@ -5,18 +5,20 @@ from pathlib import Path
 from typing import Any
 
 
-SCORING_VERSION = 3
+SCORING_VERSION = 4
 
 
-def load_model_runs(directory: Path) -> list[dict[str, Any]]:
-    current, historical = [], []
+def load_model_runs(directory: Path, scoring_version: int = SCORING_VERSION) -> list[dict[str, Any]]:
+    runs = []
+    configs = {}
     for path in sorted(directory.glob("*.json")):
         run = json.loads(path.read_text(encoding="utf-8"))
         if run.get("dry_run"):
             continue
-        version = run.get("scoring_version", 1)
-        if version == SCORING_VERSION:
-            current.append(run)
-        elif version == 1:
-            historical.append(run)
-    return current or historical
+        if run.get("scoring_version", 1) == scoring_version:
+            label = run["model"]
+            config = (run["base_url"], run.get("endpoint_model", label), run.get("reasoning_effort"))
+            if configs.setdefault(label, config) != config:
+                raise ValueError(f"Multiple endpoint/model/reasoning configurations share label {label!r}")
+            runs.append(run)
+    return runs
