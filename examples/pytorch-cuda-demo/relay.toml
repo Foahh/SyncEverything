@@ -1,6 +1,6 @@
 [project]
 repo_id = "pytorch-cuda-demo"
-name = "PyTorch CUDA Demo"
+name = "IMU Gesture Classifier (PyTorch CUDA Demo)"
 smoke_preset = "smoke"
 
 [presets.smoke]
@@ -8,10 +8,10 @@ description = "Verify PyTorch runtime, accelerator selection (CUDA/MPS/CPU), and
 program = "uv"
 args = ["run", "python", "train.py", "--smoke"]
 timeout_secs = 120
-allowed_params = ["device"]
+allowed_params = ["device", "hidden"]
 
 [presets.train]
-description = "Train a 3-layer MLP on synthetic concentric-spiral rings and emit JSON metrics"
+description = "Train baseline 3-layer IMU gesture MLP (hidden=128) and emit JSON metrics"
 program = "uv"
 args = [
   "run",
@@ -23,6 +23,27 @@ args = [
   "0.005",
   "--hidden",
   "128",
+  "--batch_size",
+  "256",
+  "--samples",
+  "4096",
+]
+timeout_secs = 180
+allowed_params = ["epochs", "lr", "hidden", "batch_size", "samples", "seed", "device"]
+
+[presets.train_compact]
+description = "Train compressed edge IMU gesture MLP (hidden=32, -92% params) and emit JSON metrics"
+program = "uv"
+args = [
+  "run",
+  "python",
+  "train.py",
+  "--epochs",
+  "40",
+  "--lr",
+  "0.005",
+  "--hidden",
+  "32",
   "--batch_size",
   "256",
   "--samples",

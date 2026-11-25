@@ -85,7 +85,7 @@ Or connect Claude Code, Cursor, or Codex CLI over **Stdio** (`relay-daemon mcp-s
 
 ## Examples
 
-- **PyTorch CUDA / MPS / CPU Demo ([`examples/pytorch-cuda-demo/`](examples/pytorch-cuda-demo/))**: A seeded 4-class spiral MLP training and evaluation project with automatic accelerator selection (`CUDA -> MPS -> CPU`), structured JSON metrics captured into the DAG, and [`smoke` / `train` / `eval` presets](examples/pytorch-cuda-demo/relay.toml) ready for two-machine LAN compute relay.
+- **PyTorch CUDA / MPS / CPU Demo ([`examples/pytorch-cuda-demo/`](examples/pytorch-cuda-demo/))**: A seeded 6-axis wearable IMU 4-class gesture classifier compression project with automatic accelerator selection (`CUDA -> MPS -> CPU`), structured JSON metrics (`val_acc`, `param_count`, `model_kb`, `device_name`) captured into the DAG, and [`smoke` / `train` / `train_compact` / `eval` presets](examples/pytorch-cuda-demo/relay.toml) ready for two-machine compute relay.
 - **Self-Hosted Workspace ([`relay.toml`](relay.toml))**: This repository ships a root `relay.toml` with `check`, `test_core`, and `test` Cargo presets so you can immediately open the SyncEverything repository itself as a live workspace and run tasks through the Relay engine.
 
 ---
