@@ -123,15 +123,14 @@ function CopilotToolRow({ trace }: { trace: AgentToolTrace_Serialize }) {
   const knownKey = KNOWN_TOOL_KEYS[trace.tool_name];
   const label = knownKey ? t(knownKey) : trace.tool_name;
   const isRunning = trace.status === "running";
-  const statusLabel =
-    trace.status === "error" ? t("copilot.tools.failed", { name: trace.tool_name }) : label;
+  const statusLabel = trace.status === "error" ? t("copilot.tools.failed", { name: label }) : label;
   const lineStatus = isRunning ? "running" : trace.status === "error" ? "error" : undefined;
 
   const line = (
     <TraceLine status={lineStatus}>
       <TraceIcon>{toolIcon(trace.tool_name)}</TraceIcon>
       <TraceTitle>
-        {isRunning ? t("copilot.tools.runningPrefix", { name: trace.tool_name }) : statusLabel}
+        {isRunning ? t("copilot.tools.runningPrefix", { name: label }) : statusLabel}
       </TraceTitle>
       {trace.duration_ms != null && <TraceDescription>{trace.duration_ms}ms</TraceDescription>}
     </TraceLine>
@@ -376,7 +375,7 @@ export function CopilotMessageItem({
           </Trace>
         )}
 
-        {message.content.length > 0 && (
+        {message.content.length > 0 ? (
           <Streamdown
             plugins={STREAMDOWN_PLUGINS}
             mode={isStreaming ? "streaming" : "static"}
@@ -386,6 +385,13 @@ export function CopilotMessageItem({
           >
             {message.content}
           </Streamdown>
+        ) : (
+          !isStreaming &&
+          message.approval != null && (
+            <p className="text-[13px] leading-relaxed text-muted-foreground">
+              {t("copilot.approvalIntro")}
+            </p>
+          )
         )}
 
         {message.approval != null && (

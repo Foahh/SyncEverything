@@ -420,7 +420,7 @@ function LlmSettingsTab({ initial }: { initial: LlmSettingsView_Serialize }) {
         setFeedback({ ok: true, text: t("modals.workspace.savedSuccess") });
       },
       onError: (err) => {
-        setFeedback({ ok: false, text: formatErrorMessage(err, t, "Unable to save AI settings.") });
+        setFeedback({ ok: false, text: formatErrorMessage(err, t) });
       },
     });
   };
@@ -432,11 +432,19 @@ function LlmSettingsTab({ initial }: { initial: LlmSettingsView_Serialize }) {
       const probe = await relayApi.testLlmConnection(buildUpdate());
       setFeedback({ ok: probe.ok, text: probe.message });
     } catch (err) {
-      setFeedback({ ok: false, text: formatErrorMessage(err, t, "Connection probe failed.") });
+      setFeedback({ ok: false, text: formatErrorMessage(err, t) });
     } finally {
       setIsTesting(false);
     }
   };
+
+  const visibleReasoningOptions = REASONING_EFFORT_OPTIONS.filter(
+    (option) =>
+      option.value !== "auto" || tier !== "cloud_open_ai_compat" || reasoningEffort === "auto",
+  );
+  const hasCustomReasoning =
+    Boolean(initial.reasoning_effort) &&
+    !REASONING_EFFORT_OPTIONS.some((option) => option.value === initial.reasoning_effort);
 
   return (
     <form onSubmit={handleSave} className="flex flex-col gap-4">
@@ -562,31 +570,52 @@ function LlmSettingsTab({ initial }: { initial: LlmSettingsView_Serialize }) {
         </Field>
 
         <Field>
-          <FieldLabel id="llm-reasoning-label" htmlFor="llm-reasoning-effort">
-            {t("modals.workspace.reasoningEffortLabel")}
-          </FieldLabel>
-          <FieldDescription id="llm-reasoning-hint">
-            {t("modals.workspace.reasoningEffortHint")}
-          </FieldDescription>
-          <select
-            id="llm-reasoning-effort"
-            name="reasoning_effort"
-            aria-labelledby="llm-reasoning-label"
-            aria-describedby="llm-reasoning-hint"
-            value={reasoningEffort}
-            onChange={(event) => setReasoningEffort(event.target.value)}
-            className="h-8 w-full rounded-md border border-input bg-background px-2 text-sm focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/50"
+          <FieldTitle>{t("modals.workspace.reasoningEffortLabel")}</FieldTitle>
+          <FieldDescription>{t("modals.workspace.reasoningEffortHint")}</FieldDescription>
+          <div
+            className="flex flex-wrap gap-1.5"
+            role="group"
+            aria-label={t("modals.workspace.reasoningEffortLabel")}
           >
-            {REASONING_EFFORT_OPTIONS.map((option) => (
-              <option key={option.value} value={option.value}>
-                {t(option.labelKey)}
-              </option>
-            ))}
-            {initial.reasoning_effort &&
-              !REASONING_EFFORT_OPTIONS.some(
-                (option) => option.value === initial.reasoning_effort,
-              ) && <option value={initial.reasoning_effort}>{initial.reasoning_effort}</option>}
-          </select>
+            {visibleReasoningOptions.map((option) => {
+              const active = reasoningEffort === option.value;
+              return (
+                <button
+                  key={option.value || "default"}
+                  type="button"
+                  aria-pressed={active}
+                  onClick={() => setReasoningEffort(option.value)}
+                  className={cn(
+                    "cursor-pointer rounded-md border px-2.5 py-1.5 text-center text-[11.5px] font-medium transition-all",
+                    active
+                      ? "border-primary bg-primary/8 text-foreground ring-1 ring-primary/25"
+                      : "border-border bg-muted/40 text-muted-foreground hover:border-foreground/20 hover:text-foreground",
+                  )}
+                >
+                  <span className="relay-text-trim whitespace-nowrap leading-none">
+                    {t(option.labelKey)}
+                  </span>
+                </button>
+              );
+            })}
+            {hasCustomReasoning && initial.reasoning_effort && (
+              <button
+                type="button"
+                aria-pressed={reasoningEffort === initial.reasoning_effort}
+                onClick={() => setReasoningEffort(initial.reasoning_effort ?? "")}
+                className={cn(
+                  "cursor-pointer rounded-md border px-2.5 py-1.5 text-center text-[11.5px] font-medium transition-all",
+                  reasoningEffort === initial.reasoning_effort
+                    ? "border-primary bg-primary/8 text-foreground ring-1 ring-primary/25"
+                    : "border-border bg-muted/40 text-muted-foreground hover:border-foreground/20 hover:text-foreground",
+                )}
+              >
+                <span className="relay-text-trim whitespace-nowrap leading-none">
+                  {initial.reasoning_effort}
+                </span>
+              </button>
+            )}
+          </div>
         </Field>
 
         <Field>
@@ -788,7 +817,9 @@ export function WorkspaceSettingsModal({
           </TabsContent>
 
           <TabsContent value="llm">
-            {llmSettings && <LlmSettingsTab initial={llmSettings} />}
+            {llmSettings && (
+              <LlmSettingsTab key={workspace?.repo_root ?? "global"} initial={llmSettings} />
+            )}
           </TabsContent>
 
           <TabsContent value="mcp">

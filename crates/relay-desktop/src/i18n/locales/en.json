@@ -134,6 +134,7 @@
     "configureModel": "Configure AI Model",
     "errorTitle": "Could not complete request",
     "approvalTitle": "Confirmation required",
+    "approvalIntro": "Please review the details below and confirm before continuing.",
     "cleanRunSummary": "Quick check passed. Confirm to run {{preset}} on your workstation.",
     "approvalPending": "Waiting",
     "approvalApproved": "Approved",
@@ -147,21 +148,21 @@
       "runAndCheck": "Inspect the project graph and run an available preset"
     },
     "tools": {
-      "inspect_sync_status": "Checked sync status",
-      "list_handoffs": "Listed handoffs",
-      "check_env_diff": "Checked Python environment",
-      "get_dag_snapshot": "Inspected project graph",
+      "inspect_sync_status": "Check sync status",
+      "list_handoffs": "Read handoff history",
+      "check_env_diff": "Check Python environment",
+      "get_dag_snapshot": "Read project graph",
       "read_evidence_log": "Read verified result log",
-      "run_preflight_in_worktree": "Ran isolated pre-check",
-      "read_worktree_file": "Read worktree file",
-      "propose_worktree_patch": "Prepared verified fix",
-      "approve_and_execute_task": "Requested run confirmation",
-      "submit_task": "Submitted task preset",
-      "record_decision": "Saved decision note",
+      "run_preflight_in_worktree": "Run isolated pre-check",
+      "read_worktree_file": "Read isolated copy file",
+      "propose_worktree_patch": "Prepare verified fix",
+      "approve_and_execute_task": "Request run confirmation",
+      "submit_task": "Submit task preset",
+      "record_decision": "Save note",
       "read_repo_file": "Read repository file",
-      "git_diff": "Checked uncommitted Git diff",
-      "runningPrefix": "Running {{name}}…",
-      "failed": "Tool failed · {{name}}"
+      "git_diff": "Check uncommitted changes",
+      "runningPrefix": "{{name}}…",
+      "failed": "{{name}} failed"
     }
   },
   "modals": {
@@ -265,14 +266,14 @@
       "apiKeyEnvLabel": "Or read key from environment variable (optional)",
       "apiKeyEnvPlaceholder": "e.g., DEEPSEEK_API_KEY or OPENAI_API_KEY",
       "reasoningEffortLabel": "Reasoning effort",
-      "reasoningEffortHint": "Local Ollama and Edge default to Off. Cloud uses the provider’s setting.",
+      "reasoningEffortHint": "Off by default for local models for faster tool use. Cloud models follow the provider default unless set here.",
       "reasoningEffortOption": {
-        "default": "Use tier default",
+        "default": "Recommended",
         "none": "Off",
         "low": "Low",
         "medium": "Medium",
         "high": "High",
-        "auto": "Let the provider choose"
+        "auto": "Provider default"
       },
       "testBtn": "Test Connection",
       "testingBtn": "Testing…",

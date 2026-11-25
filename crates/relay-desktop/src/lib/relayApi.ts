@@ -266,8 +266,8 @@ async function runMockCopilotTurn(
           ? `检测到 **${dag.stale_evidence_count} 项过期结果**（当前提交 \`${shortHead}\`），旧指标已自动隔离。\n\n建议在 \`relay.toml\` 中选择预设重新执行。`
           : `Found **${dag.stale_evidence_count} outdated result(s)** against HEAD \`${shortHead}\`. Quarantined metrics are excluded from reasoning.\n\nRe-run a preset from \`relay.toml\` to record fresh results.`
         : isZh
-          ? `当前没有过期结果（\`stale_evidence_count = 0\`）。请先打开包含 \`relay.toml\` 的本地 Git 仓库，或运行首个预设任务。`
-          : `No outdated results right now (\`stale_evidence_count = 0\`). Open a local Git repository with \`relay.toml\` or run your first preset task.`;
+          ? `当前没有过期结果。请先打开包含 \`relay.toml\` 的本地 Git 仓库，或运行首个预设任务。`
+          : `No outdated results right now. Open a local Git repository with \`relay.toml\` or run your first preset task.`;
   } else if (
     lower.includes("env") ||
     lower.includes("sync") ||
