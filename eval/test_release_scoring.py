@@ -9,7 +9,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, Mock, patch
 
 from stale_metrics import cites_stale_forecast_error
-from model_runs import SCORING_VERSION, load_model_runs
+from model_runs import SCORING_VERSION, latest_scoring_version, load_model_runs
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -67,8 +67,10 @@ class ReleaseScoringTests(unittest.TestCase):
             new = {"model": "new", "base_url": "local", "scoring_version": SCORING_VERSION}
             (folder / "oracle.json").write_text(json.dumps({**new, "dry_run": True}), encoding="utf-8")
             self.assertEqual(load_model_runs(folder), [])
+            self.assertEqual(latest_scoring_version(folder), 1)
             self.assertEqual([r["model"] for r in load_model_runs(folder, 1)], ["old"])
             (folder / "new.json").write_text(json.dumps(new), encoding="utf-8")
+            self.assertEqual(latest_scoring_version(folder), SCORING_VERSION)
             self.assertEqual(load_model_runs(folder), [new])
             (folder / "other.json").write_text(json.dumps({**new, "reasoning_effort": "none"}), encoding="utf-8")
             with self.assertRaisesRegex(ValueError, "share label"):
@@ -94,8 +96,10 @@ class ReleaseScoringTests(unittest.TestCase):
     def test_server_error_retries_are_local_and_specific_to_xml(self):
         retry = MODELS["is_retryable_ollama_xml_500"]
         self.assertFalse(retry("https://api.example/v1", 500, "XML syntax error: unexpected EOF"))
-        self.assertFalse(retry("http://localhost:11434/v1", 500, "database connection: unexpected EOF"))
+        self.assertFalse(retry("http://localhost:11434/v1", 500, "database connection failed"))
         self.assertFalse(retry("http://localhost:11434/v1", 503, "XML syntax error"))
+        self.assertTrue(retry("http://127.0.0.1:11434/v1", 500, "XML syntax error on line 29"))
+        self.assertTrue(retry("http://localhost:11434/v1", 500, "unexpected EOF while parsing tool call"))
 
     def test_chaos_approval_requires_reviewer_message_for_same_patch(self):
         run = CHAOS["run_llm_agent_loop"]

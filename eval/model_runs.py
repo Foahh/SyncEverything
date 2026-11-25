@@ -8,6 +8,16 @@ from typing import Any
 SCORING_VERSION = 4
 
 
+def latest_scoring_version(directory: Path) -> int:
+    versions = [
+        int(run.get("scoring_version", 1))
+        for path in sorted(directory.glob("*.json"))
+        for run in (json.loads(path.read_text(encoding="utf-8")),)
+        if not run.get("dry_run")
+    ]
+    return max(versions) if versions else SCORING_VERSION
+
+
 def load_model_runs(directory: Path, scoring_version: int = SCORING_VERSION) -> list[dict[str, Any]]:
     runs = []
     configs = {}

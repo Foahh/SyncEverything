@@ -26,7 +26,7 @@ import numpy as np
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT / "eval"))
-from model_runs import SCORING_VERSION, load_model_runs
+from model_runs import latest_scoring_version, load_model_runs
 
 BENCH_RESULTS = REPO_ROOT / "bench" / "results"
 CHAOS_RESULTS = REPO_ROOT / "bench" / "chaos-cases" / "results"
@@ -770,14 +770,20 @@ def plot_fig4_chaos_self_healing() -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--model-scoring-version", type=int, default=SCORING_VERSION)
+    parser.add_argument(
+        "--model-scoring-version",
+        type=int,
+        default=None,
+        help="Optional explicit Track 3 scoring_version cohort (defaults to the latest saved live cohort)",
+    )
     args = parser.parse_args()
+    scoring_version = args.model_scoring_version or latest_scoring_version(MODEL_RESULTS)
     setup_rcparams()
     plot_fig1_baseline_comparison()
     plot_fig2_context_ablation()
-    plot_fig3_model_pareto(args.model_scoring_version)
+    plot_fig3_model_pareto(scoring_version)
     plot_fig4_chaos_self_healing()
-    print("[plot] All 4 publication figures generated cleanly.", flush=True)
+    print(f"[plot] All 4 publication figures generated cleanly (Track 3 cohort v{scoring_version}).", flush=True)
     return 0
 
 

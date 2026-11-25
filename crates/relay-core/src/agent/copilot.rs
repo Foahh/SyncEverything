@@ -384,7 +384,7 @@ impl LlmClient {
                 &mut on_delta,
             )?;
         }
-        if !finished {
+        if !finished && content.is_empty() && partials.is_empty() {
             return Err(RelayError::Llm("completion stream ended prematurely".into()));
         }
 
@@ -489,8 +489,10 @@ where
     if data.is_empty() {
         return Ok(false);
     }
-    let chunk = serde_json::from_str::<Value>(data)
-        .map_err(|error| RelayError::Llm(format!("invalid completion event: {error}")))?;
+    let Ok(chunk) = serde_json::from_str::<Value>(data) else {
+        tracing::debug!("Skipping non-JSON SSE completion frame");
+        return Ok(false);
+    };
     if chunk.get("error").is_some_and(|error| !error.is_null()) {
         return Err(RelayError::Llm("provider reported an error during streaming".into()));
     }
@@ -648,5 +650,19 @@ mod tests {
         )
         .unwrap_err();
         assert!(error.to_string().contains("provider reported an error during streaming"));
+
+        // Non-JSON keepalive frames should be skipped without aborting the stream.
+        let mut content = String::new();
+        assert!(
+            !process_sse_line(
+                "data: keepalive",
+                &mut content,
+                &mut Map::new(),
+                &mut BTreeMap::new(),
+                &mut |_| unreachable!(),
+            )
+            .unwrap()
+        );
+        assert!(content.is_empty());
     }
 }

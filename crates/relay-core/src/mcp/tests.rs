@@ -8,8 +8,8 @@ use tokio::process::Command;
 const REPO_ID: &str = "test-forecast";
 
 #[tokio::test]
-async fn mcp_quarantines_pending_evidence_and_rejects_removed_snapshot_fields() {
-    assert!(serde_json::from_str::<GetDagSnapshotArgs>(r#"{"include_stale":false}"#).is_err());
+async fn mcp_quarantines_pending_evidence_and_ignores_extra_snapshot_fields() {
+    assert!(serde_json::from_str::<GetDagSnapshotArgs>(r#"{"include_stale":false}"#).is_ok());
     let engine = Arc::new(RelayEngine::in_memory(REPO_ID, None).await.unwrap());
     let now = Utc::now();
     engine
