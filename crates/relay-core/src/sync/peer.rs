@@ -62,8 +62,18 @@ impl PeerState {
     }
 
     pub(super) fn disconnect(&mut self, peer: EndpointId) {
+        self.disconnect_inner(peer, None);
+    }
+
+    pub(super) fn disconnect_except(&mut self, peer: EndpointId, keep_stable_id: usize) {
+        self.disconnect_inner(peer, Some(keep_stable_id));
+    }
+
+    fn disconnect_inner(&mut self, peer: EndpointId, keep_stable_id: Option<usize>) {
         if let Some(conn) = self.outbound.as_ref().filter(|conn| conn.remote_id() == peer) {
-            conn.close(1u32.into(), b"peer revoked");
+            if keep_stable_id != Some(conn.stable_id()) {
+                conn.close(1u32.into(), b"peer revoked");
+            }
             self.outbound = None;
             self.rtt = None;
         }
@@ -73,7 +83,9 @@ impl PeerState {
             .and_then(WeakConnectionHandle::upgrade)
             .filter(|conn| conn.remote_id() == peer)
         {
-            conn.close(1u32.into(), b"peer revoked");
+            if keep_stable_id != Some(conn.stable_id()) {
+                conn.close(1u32.into(), b"peer revoked");
+            }
             self.inbound = None;
         }
         if self.selected == Some(peer) {
@@ -160,10 +172,12 @@ impl PeerState {
         remote: Option<EndpointId>,
         engine: &RelayEngine,
     ) -> PeerStatus {
+        let remote_node_id = remote.map(|id| id.to_string());
         PeerStatus {
             mode: engine.observed_runtime_mode(),
             local_node_id: local.to_string(),
-            remote_node_id: remote.map(|id| id.to_string()),
+            pending_outbox_count: engine.observed_outbox_count_for_peer(remote_node_id.as_deref()),
+            remote_node_id,
             transport_path: TransportPath::Offline,
             connected: false,
             rtt_ms: None,
@@ -172,7 +186,6 @@ impl PeerState {
             } else {
                 None
             },
-            pending_outbox_count: engine.observed_outbox_count(),
         }
     }
 }

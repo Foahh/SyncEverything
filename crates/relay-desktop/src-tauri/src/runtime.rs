@@ -116,7 +116,7 @@ impl DesktopRuntime {
             Network::start(mode, &repo_data_dir, &engine, sandbox.clone()).await?;
         let reconnect = network
             .start_auto_reconnect(&engine)
-            .map(|events| (network.local.clone(), events));
+            .map(|(generation, events)| (network.local.clone(), generation, events));
 
         let origin = network.executor_node().id().to_string();
         if let Some(sb) = &sandbox {
@@ -159,8 +159,8 @@ impl DesktopRuntime {
         });
         runtime.listen(events, mode);
         runtime.start_task_log_forwarder();
-        if let Some((node, reconnect_events)) = reconnect {
-            runtime.listen_reconnects(node, reconnect_events);
+        if let Some((node, generation, reconnect_events)) = reconnect {
+            runtime.listen_reconnects(node, generation, reconnect_events);
         }
         runtime.start_peer_sync();
         runtime.start_git_head_watcher();
@@ -330,12 +330,12 @@ impl DesktopRuntime {
             }
             let reconnect = next
                 .start_auto_reconnect(&runtime.engine)
-                .map(|events| (next.local.clone(), events));
+                .map(|(generation, events)| (next.local.clone(), generation, events));
             runtime.mcp.set_node(next.executor_node().clone());
             let previous = guard.replace(next);
             runtime.listen(events, mode);
-            if let Some((node, reconnect_events)) = reconnect {
-                runtime.listen_reconnects(node, reconnect_events);
+            if let Some((node, generation, reconnect_events)) = reconnect {
+                runtime.listen_reconnects(node, generation, reconnect_events);
             }
             if let Some(previous) = previous {
                 previous.shutdown().await;
@@ -367,7 +367,10 @@ impl DesktopRuntime {
         Ok(ticket)
     }
 
-    pub(crate) async fn connect_ticket(&self, ticket_json: &str) -> RelayResult<PeerStatus> {
+    pub(crate) async fn connect_ticket(
+        self: &Arc<Self>,
+        ticket_json: &str,
+    ) -> RelayResult<PeerStatus> {
         if self.engine.repo_root().is_none() {
             return Err(RelayError::Git("Open the same Git repository on both devices before pairing.".into()));
         }
@@ -391,14 +394,7 @@ impl DesktopRuntime {
             ));
         }
 
-        network.cancel_auto_reconnect();
-        let local_id = network.local.id().to_string();
-        if let Err(error) = network.local.ping_peer(address.clone(), &local_id).await {
-            if let Some(previous) = &network.remote {
-                network.local.set_remote_peer(previous.clone());
-            }
-            return Err(error);
-        }
+        self.manual_ping_peer(network, address.clone()).await?;
         if network.remote.as_ref().map(|peer| peer.id) != Some(address.id) {
             network.last_pushed_commit = None;
         }
@@ -429,7 +425,10 @@ impl DesktopRuntime {
         Ok(updated)
     }
 
-    pub(crate) async fn reconnect_trusted_peer(&self, node_id: &str) -> RelayResult<PeerStatus> {
+    pub(crate) async fn reconnect_trusted_peer(
+        self: &Arc<Self>,
+        node_id: &str,
+    ) -> RelayResult<PeerStatus> {
         let peer = self
             .engine
             .get_trusted_peer(node_id)
@@ -457,14 +456,7 @@ impl DesktopRuntime {
             ));
         }
 
-        network.cancel_auto_reconnect();
-        let local_id = network.local.id().to_string();
-        if let Err(error) = network.local.ping_peer(address.clone(), &local_id).await {
-            if let Some(previous) = &network.remote {
-                network.local.set_remote_peer(previous.clone());
-            }
-            return Err(error);
-        }
+        self.manual_ping_peer(network, address.clone()).await?;
         if network.remote.as_ref().map(|active| active.id) != Some(address.id) {
             network.last_pushed_commit = None;
         }
@@ -475,6 +467,27 @@ impl DesktopRuntime {
             self.refresh_from_host(network).await?;
         }
         Ok(network.local.peer_status())
+    }
+
+    async fn manual_ping_peer(
+        self: &Arc<Self>,
+        network: &mut Network,
+        address: iroh::EndpointAddr,
+    ) -> RelayResult<()> {
+        if let Err((error, restarted)) = network
+            .manual_ping_peer(&self.engine, address, None)
+            .await
+        {
+            if let Some((generation, reconnect_events)) = restarted {
+                if *self.shutdown.borrow() {
+                    network.cancel_auto_reconnect();
+                } else {
+                    self.listen_reconnects(network.local.clone(), generation, reconnect_events);
+                }
+            }
+            return Err(error);
+        }
+        Ok(())
     }
 
     pub(crate) async fn revoke_trusted_peer(
@@ -805,7 +818,12 @@ impl DesktopRuntime {
                 network.last_pushed_commit = Some(meta.base_commit_sha);
             }
         }
-        if self.engine.pending_outbox_count().await? > 0 {
+        if self
+            .engine
+            .pending_outbox_count_for_peer(Some(&host.id.to_string()))
+            .await?
+            > 0
+        {
             let delivered = network.local.flush_outbox(host.clone()).await?;
             if delivered > 0 {
                 emit_state(
@@ -862,7 +880,12 @@ impl DesktopRuntime {
         }
     }
 
-    fn listen_reconnects(self: &Arc<Self>, node: Arc<relay_core::sync::RelayNode>, mut reconnects: ReconnectEvents) {
+    fn listen_reconnects(
+        self: &Arc<Self>,
+        node: Arc<relay_core::sync::RelayNode>,
+        generation: u64,
+        mut reconnects: ReconnectEvents,
+    ) {
         let runtime = Arc::downgrade(self);
         let mut shutdown_rx = self.shutdown.subscribe();
         tauri::async_runtime::spawn(async move {
@@ -884,8 +907,7 @@ impl DesktopRuntime {
                         let Some(network) = guard.as_mut() else {
                             break;
                         };
-                        if !Arc::ptr_eq(&network.local, &node)
-                            || network.auto_reconnect.is_none()
+                        if !network.can_accept_reconnect(&node, generation)
                             || !matches!(
                                 runtime.engine.get_trusted_peer(&reconnected.record.node_id).await,
                                 Ok(Some(peer)) if !peer.is_revoked()

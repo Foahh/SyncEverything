@@ -12,9 +12,11 @@ use iroh::protocol::{AcceptError, ProtocolHandler};
 use iroh_blobs::{BlobsProtocol, Hash};
 use serde::{Serialize, de::DeserializeOwned};
 use std::sync::Arc;
+use std::time::Duration;
 use tracing::{debug, warn};
 
 const MAX_PAYLOAD: usize = 16 * 1024 * 1024;
+const REVOKED_FLUSH_TIMEOUT: Duration = Duration::from_millis(250);
 
 /// Wrapper around `BlobsProtocol` that enforces the host revocation gate before accepting blob transfers.
 #[derive(Debug, Clone)]
@@ -93,11 +95,23 @@ impl RelayRpcHandler {
             Err(RelayError::Serde(err)) => error_response("invalid_request", err.to_string()),
             Err(err) => return Err(err),
         };
+        let is_revoked = matches!(
+            &response,
+            WireResponse::Error { code, .. } if code == "PEER_REVOKED"
+        );
         let frame = match encode_frame(&response) {
             Ok(frame) => frame,
             Err(err) => encode_frame(&error_response("invalid_response", err.to_string()))?,
         };
-        write_frame(&mut send, &frame).await
+        let write_result = write_frame(&mut send, &frame).await;
+        if is_revoked {
+            if write_result.is_ok() {
+                let _ = tokio::time::timeout(REVOKED_FLUSH_TIMEOUT, send.stopped()).await;
+            }
+            self.node.disconnect_peer(conn.remote_id());
+            conn.close(1u32.into(), b"PEER_REVOKED");
+        }
+        write_result
     }
 
     async fn handle(&self, conn: &Connection, request: WireRequest) -> RelayResult<WireResponse> {
@@ -169,6 +183,8 @@ impl RelayRpcHandler {
                         revoked_at: None,
                     };
                     if engine.upsert_trusted_peer(&record).await?.is_revoked() {
+                        warn!(node_id = %remote_node_id, "Rejected Ping from revoked peer after handshake");
+                        self.node.disconnect_peer_except(id, conn.stable_id());
                         return Ok(error_response("PEER_REVOKED", format!("peer {remote_node_id} has been revoked by this host")));
                     }
                 }

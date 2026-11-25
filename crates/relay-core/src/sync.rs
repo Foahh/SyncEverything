@@ -213,16 +213,7 @@ impl RelayNode {
 
     /// Close active inbound/outbound QUIC connections for `peer_id` and clear its selection.
     pub fn disconnect_peer(&self, peer_id: EndpointId) {
-        self.shared.peer().disconnect(peer_id);
-        self.shared.active_connections.lock().expect("connection state lock poisoned").retain(|(id, _), handle| {
-            if *id != peer_id {
-                return true;
-            }
-            if let Some(conn) = handle.upgrade() {
-                conn.close(1u32.into(), b"peer disconnected");
-            }
-            false
-        });
+        self.shared.disconnect_peer(peer_id);
     }
 
     /// Register stored addresses for all active (non-revoked) trusted peers.
@@ -507,15 +498,16 @@ impl RelayNode {
         let engine = &self.shared.engine;
         let _guard = engine.lock_outbox_flush().await;
         self.shared.require_nonrevoked(peer_addr.id).await?;
+        let peer_id = peer_addr.id.to_string();
         let mut delivered = 0;
-        for (seq, payload) in engine.claim_peer_outbox(&peer_addr.id.to_string()).await? {
+        for (seq, payload) in engine.list_peer_pending_outbox(&peer_id).await? {
             let request = serde_json::from_value(payload)?;
             let expected = reply_kind(&request);
             let response = self.send_rpc(peer_addr.clone(), request).await?;
             if response_kind(&response) != expected {
                 return Err(unexpected_response(response, expected));
             }
-            engine.mark_outbox_delivered(seq).await?;
+            engine.mark_peer_outbox_delivered(seq, &peer_id).await?;
             delivered += 1;
         }
         Ok(delivered)
@@ -525,6 +517,41 @@ impl RelayNode {
 impl NodeState {
     fn peer(&self) -> MutexGuard<'_, PeerState> {
         self.peer.lock().expect("peer state lock poisoned")
+    }
+
+    pub(super) fn disconnect_peer(&self, peer_id: EndpointId) {
+        self.peer().disconnect(peer_id);
+        self.active_connections
+            .lock()
+            .expect("connection state lock poisoned")
+            .retain(|(id, _), handle| {
+                if *id != peer_id {
+                    return true;
+                }
+                if let Some(conn) = handle.upgrade() {
+                    conn.close(1u32.into(), b"peer disconnected");
+                }
+                false
+            });
+    }
+
+    pub(super) fn disconnect_peer_except(&self, peer_id: EndpointId, keep_stable_id: usize) {
+        self.peer().disconnect_except(peer_id, keep_stable_id);
+        self.active_connections
+            .lock()
+            .expect("connection state lock poisoned")
+            .retain(|(id, _), handle| {
+                if *id != peer_id {
+                    return true;
+                }
+                if let Some(conn) = handle.upgrade() {
+                    if conn.stable_id() == keep_stable_id {
+                        return true;
+                    }
+                    conn.close(1u32.into(), b"peer revoked");
+                }
+                false
+            });
     }
 
     fn track_connection(&self, connection: &Connection) -> ActiveConnection<'_> {

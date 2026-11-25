@@ -9,9 +9,9 @@ use crate::error::{RelayError, RelayResult};
 use crate::sandbox::{HeadSyncOutcome, PresetRunOptions};
 use crate::state::{is_active, validate_transition};
 use crate::storage::{
-    RelayStore, fetch_task, fetch_task_log_ref, fetch_tasks, insert_task, write_edge,
-    write_freshness, write_handoff, write_log_blob, write_node, write_outbox, write_task,
-    write_task_log_ref,
+    OutboxSnapshot, RelayStore, fetch_task, fetch_task_log_ref, fetch_tasks, insert_task,
+    write_edge, write_freshness, write_handoff, write_log_blob, write_node, write_outbox,
+    write_task, write_task_log_ref,
 };
 use chrono::Utc;
 use serde_json::Value;
@@ -119,7 +119,7 @@ pub struct RelayEngine {
     store: RelayStore,
     dag: Arc<Mutex<CachedDag>>,
     mode: watch::Sender<RuntimeMode>,
-    pending_outbox: Arc<AtomicU32>,
+    outbox_counts: Arc<StdRwLock<OutboxSnapshot>>,
     metadata_writes: Arc<Mutex<()>>,
     outbox_flush: Arc<Mutex<()>>,
     cancellation_handles: Arc<StdRwLock<HashMap<TaskId, CancellationEntry>>>,
@@ -173,14 +173,14 @@ impl RelayEngine {
             .get_runtime_mode(&repo_id)
             .await?
             .unwrap_or(default_mode);
-        let pending_outbox = store.count_repo_pending_outbox(Some(&repo_id)).await?;
+        let outbox_counts = store.load_outbox_snapshot(&repo_id).await?;
         let (log_tx, _) = broadcast::channel(TASK_LOG_BROADCAST_CAPACITY);
         Ok(Self {
             repo_id,
             store,
             dag: Arc::new(Mutex::new(CachedDag { graph, revision })),
             mode: watch::Sender::new(mode),
-            pending_outbox: Arc::new(AtomicU32::new(pending_outbox)),
+            outbox_counts: Arc::new(StdRwLock::new(outbox_counts)),
             metadata_writes: Arc::new(Mutex::new(())),
             outbox_flush: Arc::new(Mutex::new(())),
             cancellation_handles: Arc::new(StdRwLock::new(HashMap::new())),
@@ -605,7 +605,7 @@ impl RelayEngine {
                 .persist_submitted_task(&record, false, Some((&payload, node_id.as_deref())))
                 .await?;
             if inserted {
-                engine.pending_outbox.fetch_add(1, Ordering::Relaxed);
+                engine.record_outbox_enqueued(node_id.as_deref());
             }
             Ok(record)
         })
@@ -676,7 +676,7 @@ impl RelayEngine {
             let _guard = guard;
             let (record, queued) = engine.cancel_task_inner(task_id, Some((&payload, node_id.as_deref()))).await?;
             if queued {
-                engine.pending_outbox.fetch_add(1, Ordering::Relaxed);
+                engine.record_outbox_enqueued(node_id.as_deref());
             }
             Ok(record)
         })
@@ -874,7 +874,7 @@ impl RelayEngine {
             let (record, _) = engine
                 .resolve_ui_approval_inner(task_id, patch_id.as_deref(), decision, Some((&payload, node_id.as_deref())), false)
                 .await?;
-            engine.pending_outbox.fetch_add(1, Ordering::Relaxed);
+            engine.record_outbox_enqueued(node_id.as_deref());
             Ok(record)
         })
         .await
@@ -1085,7 +1085,24 @@ impl RelayEngine {
         &self,
         peer: &TrustedPeerRecord,
     ) -> RelayResult<TrustedPeerRecord> {
-        self.store.upsert_trusted_peer(peer).await
+        let guard = self.metadata_writes.clone().lock_owned().await;
+        let engine = self.clone();
+        let peer = peer.clone();
+        tokio::spawn(async move {
+            let _guard = guard;
+            let stored = engine.store.upsert_trusted_peer(&peer).await?;
+            if stored.is_revoked() {
+                engine
+                    .outbox_counts
+                    .write()
+                    .expect("outbox counts lock poisoned")
+                    .revoked_peers
+                    .insert(stored.node_id.clone());
+            }
+            Ok(stored)
+        })
+        .await
+        .map_err(|err| RelayError::Internal(err.to_string()))?
     }
 
     pub async fn list_trusted_peers(&self) -> RelayResult<Vec<TrustedPeerRecord>> {
@@ -1113,11 +1130,43 @@ impl RelayEngine {
     }
 
     pub async fn revoke_trusted_peer(&self, node_id: &str) -> RelayResult<TrustedPeerRecord> {
-        self.store.revoke_trusted_peer(node_id).await
+        let guard = self.metadata_writes.clone().lock_owned().await;
+        let engine = self.clone();
+        let node_id = node_id.to_owned();
+        tokio::spawn(async move {
+            let _guard = guard;
+            let updated = engine.store.revoke_trusted_peer(&node_id).await?;
+            engine
+                .outbox_counts
+                .write()
+                .expect("outbox counts lock poisoned")
+                .revoked_peers
+                .insert(updated.node_id.clone());
+            Ok(updated)
+        })
+        .await
+        .map_err(|err| RelayError::Internal(err.to_string()))?
     }
 
     pub async fn remove_trusted_peer(&self, node_id: &str) -> RelayResult<bool> {
-        self.store.remove_trusted_peer(node_id).await
+        let guard = self.metadata_writes.clone().lock_owned().await;
+        let engine = self.clone();
+        let node_id = node_id.to_owned();
+        tokio::spawn(async move {
+            let _guard = guard;
+            let removed = engine.store.remove_trusted_peer(&node_id).await?;
+            if removed {
+                engine
+                    .outbox_counts
+                    .write()
+                    .expect("outbox counts lock poisoned")
+                    .revoked_peers
+                    .remove(&node_id);
+            }
+            Ok(removed)
+        })
+        .await
+        .map_err(|err| RelayError::Internal(err.to_string()))?
     }
 
     pub async fn enqueue_outbox(&self, payload: &Value) -> RelayResult<i64> {
@@ -1128,7 +1177,7 @@ impl RelayEngine {
         tokio::spawn(async move {
             let _guard = guard;
             let seq = engine.store.enqueue_outbox(&engine.repo_id, &payload).await?;
-            engine.pending_outbox.fetch_add(1, Ordering::Relaxed);
+            engine.record_outbox_enqueued(None);
             Ok(seq)
         })
         .await
@@ -1136,24 +1185,47 @@ impl RelayEngine {
     }
 
     pub async fn pending_outbox_count(&self) -> RelayResult<u32> {
-        self.store.count_repo_pending_outbox(Some(&self.repo_id)).await
+        self.pending_outbox_count_for_peer(None).await
+    }
+
+    pub async fn pending_outbox_count_for_peer(&self, node_id: Option<&str>) -> RelayResult<u32> {
+        self.store
+            .count_repo_pending_outbox_for_peer(Some(&self.repo_id), node_id)
+            .await
     }
 
     pub async fn mark_outbox_delivered(&self, seq: i64) -> RelayResult<()> {
+        self.mark_outbox_delivered_inner(seq, None).await
+    }
+
+    pub(crate) async fn mark_peer_outbox_delivered(
+        &self,
+        seq: i64,
+        node_id: &str,
+    ) -> RelayResult<()> {
+        self.mark_outbox_delivered_inner(seq, Some(node_id.to_owned()))
+            .await
+    }
+
+    async fn mark_outbox_delivered_inner(
+        &self,
+        seq: i64,
+        delivered_to: Option<String>,
+    ) -> RelayResult<()> {
         let guard = self.metadata_writes.clone().lock_owned().await;
         let engine = self.clone();
         tokio::spawn(async move {
             let _guard = guard;
-            if engine
+            if let Some(prior_recipient) = engine
                 .store
-                .mark_repo_outbox_delivered(Some(&engine.repo_id), seq)
+                .mark_repo_outbox_delivered(Some(&engine.repo_id), seq, delivered_to.as_deref())
                 .await?
             {
-                let _ = engine
-                    .pending_outbox
-                    .try_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
-                        count.checked_sub(1)
-                    });
+                engine
+                    .outbox_counts
+                    .write()
+                    .expect("outbox counts lock poisoned")
+                    .record_delivered(prior_recipient.as_deref());
             }
             Ok(())
         })
@@ -1165,22 +1237,42 @@ impl RelayEngine {
     pub(crate) async fn list_pending_outbox(&self) -> RelayResult<Vec<(i64, String, Value)>> {
         let _guard = self.metadata_writes.lock().await;
         let items = self.store.list_pending_outbox(Some(&self.repo_id)).await?;
-        let count = u32::try_from(items.len())
-            .map_err(|_| RelayError::Internal("pending outbox count exceeds u32".into()))?;
-        self.pending_outbox.store(count, Ordering::Relaxed);
+        let snapshot = self.store.load_outbox_snapshot(&self.repo_id).await?;
+        *self
+            .outbox_counts
+            .write()
+            .expect("outbox counts lock poisoned") = snapshot;
         Ok(items)
     }
 
-    pub(crate) async fn claim_peer_outbox(&self, node_id: &str) -> RelayResult<Vec<(i64, Value)>> {
-        self.store.claim_peer_outbox(&self.repo_id, node_id).await
+    pub(crate) async fn list_peer_pending_outbox(
+        &self,
+        node_id: &str,
+    ) -> RelayResult<Vec<(i64, Value)>> {
+        self.store.list_peer_pending_outbox(&self.repo_id, node_id).await
     }
 
     pub(crate) async fn lock_outbox_flush(&self) -> MutexGuard<'_, ()> {
         self.outbox_flush.lock().await
     }
 
+    #[cfg(test)]
     pub(crate) fn observed_outbox_count(&self) -> u32 {
-        self.pending_outbox.load(Ordering::Relaxed)
+        self.observed_outbox_count_for_peer(None)
+    }
+
+    pub(crate) fn observed_outbox_count_for_peer(&self, node_id: Option<&str>) -> u32 {
+        self.outbox_counts
+            .read()
+            .expect("outbox counts lock poisoned")
+            .count_for_peer(node_id)
+    }
+
+    fn record_outbox_enqueued(&self, node_id: Option<&str>) {
+        self.outbox_counts
+            .write()
+            .expect("outbox counts lock poisoned")
+            .record_enqueued(node_id);
     }
 
     pub async fn runtime_mode(&self) -> RuntimeMode {

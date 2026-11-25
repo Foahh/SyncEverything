@@ -9,7 +9,62 @@ use serde_json::Value;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
 use sqlx::types::Json;
 use sqlx::{Sqlite, SqliteConnection, SqlitePool, Transaction};
+use std::collections::{BTreeSet, HashMap};
 use std::path::Path;
+
+#[derive(Debug, Default)]
+pub(crate) struct OutboxSnapshot {
+    pub(crate) unassigned: u32,
+    pub(crate) by_peer: HashMap<String, u32>,
+    pub(crate) revoked_peers: BTreeSet<String>,
+}
+
+impl OutboxSnapshot {
+    pub(crate) fn record_enqueued(&mut self, node_id: Option<&str>) {
+        match node_id {
+            None => self.unassigned = self.unassigned.saturating_add(1),
+            Some(node_id) => {
+                let entry = self.by_peer.entry(node_id.to_owned()).or_insert(0);
+                *entry = entry.saturating_add(1);
+            }
+        }
+    }
+
+    pub(crate) fn record_delivered(&mut self, prior_recipient: Option<&str>) {
+        match prior_recipient {
+            None => self.unassigned = self.unassigned.saturating_sub(1),
+            Some(node_id) => {
+                if let Some(count) = self.by_peer.get_mut(node_id) {
+                    *count = count.saturating_sub(1);
+                    if *count == 0 {
+                        self.by_peer.remove(node_id);
+                    }
+                }
+            }
+        }
+    }
+
+    pub(crate) fn count_for_peer(&self, peer_id: Option<&str>) -> u32 {
+        match peer_id {
+            Some(node_id) => {
+                if self.revoked_peers.contains(node_id) {
+                    return 0;
+                }
+                let scoped = self.by_peer.get(node_id).copied().unwrap_or(0);
+                self.unassigned.saturating_add(scoped)
+            }
+            None => {
+                let active_scoped = self
+                    .by_peer
+                    .iter()
+                    .filter(|(node_id, _)| !self.revoked_peers.contains(node_id.as_str()))
+                    .map(|(_, &count)| count)
+                    .fold(0u32, u32::saturating_add);
+                self.unassigned.saturating_add(active_scoped)
+            }
+        }
+    }
+}
 
 /// SQLite schema for the DAG, task records, handoffs, logs, and offline sync.
 pub const SCHEMA_SQL: &str = r#"
@@ -436,65 +491,146 @@ impl RelayStore {
     }
 
     pub async fn mark_outbox_delivered(&self, seq: i64) -> RelayResult<()> {
-        self.mark_repo_outbox_delivered(None, seq).await?;
+        self.mark_repo_outbox_delivered(None, seq, None).await?;
         Ok(())
     }
 
-    pub(crate) async fn claim_peer_outbox(
+    pub(crate) async fn list_peer_pending_outbox(
         &self,
         repo_id: &str,
         node_id: &str,
     ) -> RelayResult<Vec<(i64, Value)>> {
-        let mut tx = self.begin_write().await?;
-        // Unassigned work is attached to the first host before any request can be sent.
-        sqlx::query(
-            "INSERT OR IGNORE INTO sync_outbox_recipients (seq, node_id)
-             SELECT seq, ? FROM sync_outbox WHERE repo_id = ? AND delivered = 0",
-        )
-        .bind(node_id)
-        .bind(repo_id)
-        .execute(&mut *tx)
-        .await?;
         let rows = sqlx::query_as::<_, (i64, Json<Value>)>(
             "SELECT o.seq, o.payload_json FROM sync_outbox o
-             JOIN sync_outbox_recipients r ON r.seq = o.seq
-             WHERE o.repo_id = ? AND o.delivered = 0 AND r.node_id = ? ORDER BY o.seq",
+             LEFT JOIN sync_outbox_recipients r ON r.seq = o.seq
+             WHERE o.repo_id = ?1 AND o.delivered = 0 AND (r.node_id IS NULL OR r.node_id = ?2)
+             ORDER BY o.seq",
         )
         .bind(repo_id)
         .bind(node_id)
-        .fetch_all(&mut *tx)
+        .fetch_all(&self.pool)
         .await?;
-        tx.commit().await?;
-        Ok(rows.into_iter().map(|(seq, Json(payload))| (seq, payload)).collect())
+        Ok(rows
+            .into_iter()
+            .map(|(seq, Json(payload))| (seq, payload))
+            .collect())
     }
 
+    /// Mark an outbox entry delivered and attach `delivered_to` if it was unassigned.
+    ///
+    /// Returns `Ok(Some(prior_recipient))` when an undelivered row was marked delivered,
+    /// or `Ok(None)` when the row did not match or was already delivered.
     pub(crate) async fn mark_repo_outbox_delivered(
         &self,
         repo_id: Option<&str>,
         seq: i64,
-    ) -> RelayResult<bool> {
-        let result = sqlx::query(
+        delivered_to: Option<&str>,
+    ) -> RelayResult<Option<Option<String>>> {
+        let mut tx = self.begin_write().await?;
+        let existing = sqlx::query_as::<_, (Option<String>,)>(
+            "SELECT r.node_id FROM sync_outbox o
+             LEFT JOIN sync_outbox_recipients r ON r.seq = o.seq
+             WHERE o.seq = ?1 AND o.delivered = 0 AND (?2 IS NULL OR o.repo_id = ?2)",
+        )
+        .bind(seq)
+        .bind(repo_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        let Some((prior_recipient,)) = existing else {
+            tx.rollback().await?;
+            return Ok(None);
+        };
+        sqlx::query(
             "UPDATE sync_outbox SET delivered = 1
              WHERE seq = ?1 AND delivered = 0 AND (?2 IS NULL OR repo_id = ?2)",
         )
         .bind(seq)
         .bind(repo_id)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await?;
-        Ok(result.rows_affected() != 0)
+        if prior_recipient.is_none()
+            && let Some(node_id) = delivered_to
+        {
+            sqlx::query(
+                "INSERT OR IGNORE INTO sync_outbox_recipients (seq, node_id) VALUES (?1, ?2)",
+            )
+            .bind(seq)
+            .bind(node_id)
+            .execute(&mut *tx)
+            .await?;
+        }
+        tx.commit().await?;
+        Ok(Some(prior_recipient))
     }
 
     pub async fn count_pending_outbox(&self) -> RelayResult<u32> {
-        self.count_repo_pending_outbox(None).await
+        self.count_repo_pending_outbox_for_peer(None, None).await
     }
 
-    pub(crate) async fn count_repo_pending_outbox(&self, repo_id: Option<&str>) -> RelayResult<u32> {
+    pub(crate) async fn count_repo_pending_outbox_for_peer(
+        &self,
+        repo_id: Option<&str>,
+        node_id: Option<&str>,
+    ) -> RelayResult<u32> {
         Ok(sqlx::query_scalar(
-            "SELECT COUNT(*) FROM sync_outbox WHERE delivered = 0 AND (?1 IS NULL OR repo_id = ?1)",
+            "SELECT COUNT(*)
+             FROM sync_outbox o
+             LEFT JOIN sync_outbox_recipients r ON r.seq = o.seq
+             WHERE o.delivered = 0
+               AND (?1 IS NULL OR o.repo_id = ?1)
+               AND (
+                   (?2 IS NULL AND (
+                       r.node_id IS NULL
+                       OR NOT EXISTS (
+                           SELECT 1 FROM trusted_peers tp
+                           WHERE tp.node_id = r.node_id AND tp.revoked_at IS NOT NULL
+                       )
+                   ))
+                   OR (?2 IS NOT NULL
+                       AND (r.node_id IS NULL OR r.node_id = ?2)
+                       AND NOT EXISTS (
+                           SELECT 1 FROM trusted_peers tp
+                           WHERE tp.node_id = ?2 AND tp.revoked_at IS NOT NULL
+                       )
+                   )
+               )",
         )
         .bind(repo_id)
+        .bind(node_id)
         .fetch_one(&self.pool)
         .await?)
+    }
+
+    pub(crate) async fn load_outbox_snapshot(&self, repo_id: &str) -> RelayResult<OutboxSnapshot> {
+        let mut tx = self.pool.begin().await?;
+        let grouped = sqlx::query_as::<_, (Option<String>, u32)>(
+            "SELECT r.node_id, COUNT(*)
+             FROM sync_outbox o
+             LEFT JOIN sync_outbox_recipients r ON r.seq = o.seq
+             WHERE o.repo_id = ?1 AND o.delivered = 0
+             GROUP BY r.node_id",
+        )
+        .bind(repo_id)
+        .fetch_all(&mut *tx)
+        .await?;
+        let revoked = sqlx::query_scalar::<_, String>(
+            "SELECT node_id FROM trusted_peers WHERE revoked_at IS NOT NULL",
+        )
+        .fetch_all(&mut *tx)
+        .await?;
+        tx.commit().await?;
+
+        let mut snapshot = OutboxSnapshot::default();
+        for (recipient, count) in grouped {
+            match recipient {
+                None => snapshot.unassigned = count,
+                Some(node_id) => {
+                    snapshot.by_peer.insert(node_id, count);
+                }
+            }
+        }
+        snapshot.revoked_peers.extend(revoked);
+        Ok(snapshot)
     }
 
     pub async fn list_chat_messages(

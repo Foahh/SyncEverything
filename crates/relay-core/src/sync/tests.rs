@@ -380,11 +380,20 @@ async fn outbox_replays_tasks_only_to_their_selected_workstation() {
     assert_eq!(client.flush_outbox(second.addr()).await.unwrap(), 1);
     assert!(second_engine.get_task(first_task).await.unwrap().is_none());
     assert!(second_engine.get_task(second_task).await.unwrap().is_some());
+    assert_eq!(client.peer_status().pending_outbox_count, 0);
+    assert_eq!(
+        client_engine
+            .pending_outbox_count_for_peer(Some(&second.id().to_string()))
+            .await
+            .unwrap(),
+        0
+    );
     assert_eq!(client_engine.pending_outbox_count().await.unwrap(), 1);
 
     assert_eq!(client.flush_outbox(first.addr()).await.unwrap(), 1);
     assert!(first_engine.get_task(first_task).await.unwrap().is_some());
     assert!(first_engine.get_task(second_task).await.unwrap().is_none());
+    assert_eq!(client.peer_status().pending_outbox_count, 0);
     assert_eq!(client_engine.pending_outbox_count().await.unwrap(), 0);
 
     client.shutdown().await.unwrap();
@@ -1065,4 +1074,345 @@ async fn simultaneous_identity_initialization_uses_one_persisted_key() {
         load_or_create_secret_key(&temp.0)
     );
     assert_eq!(first.unwrap().public(), second.unwrap().public());
+}
+
+#[tokio::test]
+async fn failed_flush_to_peer_a_does_not_strand_unassigned_outbox_for_peer_b() {
+    let temp = TempDir::new();
+    let (client, client_engine) = start_local(&temp, "unstranded-client", None).await;
+    client_engine
+        .set_runtime_mode(RuntimeMode::Client)
+        .await
+        .unwrap();
+
+    // Interactive Peer A has no open pairing window so it rejects unpaired RPCs.
+    let peer_a_engine = Arc::new(RelayEngine::in_memory(REPO, None).await.unwrap());
+    let (events_a, _rx_a) = mpsc::unbounded_channel();
+    let peer_a = RelayNode::start_with_events(
+        &temp.join("unstranded-peer-a"),
+        peer_a_engine.clone(),
+        RelayNodeConfig {
+            profile: NetworkProfile::LocalOnly,
+            sandbox: None,
+        },
+        events_a,
+    )
+    .await
+    .unwrap();
+    let (peer_b, peer_b_engine) = start_local(&temp, "unstranded-peer-b", None).await;
+
+    let delta = dag_delta(COMMIT);
+    client_engine
+        .enqueue_outbox(
+            &serde_json::to_value(WireRequest::SyncDagDelta {
+                delta: delta.clone(),
+            })
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    let task_id = Uuid::now_v7();
+    client_engine
+        .queue_peer_task(
+            TaskSpec {
+                task_id,
+                repo_id: REPO.into(),
+                base_commit_sha: COMMIT.into(),
+                command_preset: "smoke".into(),
+                params: BTreeMap::new(),
+                require_approval: true,
+                requested_by_device: client.id().to_string(),
+                user_note: None,
+            },
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(client.peer_status().pending_outbox_count, 2);
+
+    // 1. Failing flush against an unreachable peer must not pin unassigned entries.
+    let unreachable_peer = EndpointAddr::new(iroh::SecretKey::generate().public());
+    assert!(client.flush_outbox(unreachable_peer).await.is_err());
+    assert_eq!(client.peer_status().pending_outbox_count, 2);
+    assert!(!client.peer_status().connected);
+
+    // 2. Failing flush against Peer A (rejected as unpaired) must not pin unassigned entries either.
+    assert!(client.flush_outbox(peer_a.addr()).await.is_err());
+    assert_eq!(client.peer_status().pending_outbox_count, 2);
+    assert!(!client.peer_status().connected);
+    assert!(peer_a_engine.dag_snapshot(true).await.unwrap().nodes.is_empty());
+    assert!(peer_a_engine.get_task(task_id).await.unwrap().is_none());
+
+    // 3. Peer B later connects and receives both unassigned entries in order.
+    assert_eq!(client.flush_outbox(peer_b.addr()).await.unwrap(), 2);
+    assert_eq!(client.peer_status().pending_outbox_count, 0);
+    assert_eq!(client_engine.pending_outbox_count().await.unwrap(), 0);
+    assert_eq!(client.flush_outbox(peer_b.addr()).await.unwrap(), 0);
+    assert_delta(&peer_b_engine.dag_snapshot(true).await.unwrap(), &delta, COMMIT);
+    assert!(peer_b_engine.get_task(task_id).await.unwrap().is_some());
+
+    client.shutdown().await.unwrap();
+    peer_a.shutdown().await.unwrap();
+    peer_b.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn pending_outbox_count_scopes_to_active_peer_and_excludes_other_or_revoked_peers() {
+    let temp = TempDir::new();
+    let (client, client_engine) = start_local(&temp, "count-client", None).await;
+    client_engine
+        .set_runtime_mode(RuntimeMode::Client)
+        .await
+        .unwrap();
+    let (peer_a, _peer_a_engine) = start_local(&temp, "count-peer-a", None).await;
+    let (peer_b, peer_b_engine) = start_local(&temp, "count-peer-b", None).await;
+    let revoked_id = iroh::SecretKey::generate().public().to_string();
+
+    let now = Utc::now();
+    client_engine
+        .upsert_trusted_peer(&TrustedPeerRecord {
+            node_id: revoked_id.clone(),
+            label: "Revoked Workstation".into(),
+            role: PeerRole::Host,
+            ticket_or_addrs: String::new(),
+            paired_at: now,
+            last_seen_at: now,
+            revoked_at: Some(now),
+        })
+        .await
+        .unwrap();
+
+    let make_spec = |id| TaskSpec {
+        task_id: id,
+        repo_id: REPO.into(),
+        base_commit_sha: COMMIT.into(),
+        command_preset: "smoke".into(),
+        params: BTreeMap::new(),
+        require_approval: true,
+        requested_by_device: client.id().to_string(),
+        user_note: None,
+    };
+    let task_a = Uuid::now_v7();
+    let task_revoked = Uuid::now_v7();
+    let task_b = Uuid::now_v7();
+    client_engine
+        .queue_peer_task(make_spec(task_a), Some(peer_a.id().to_string()))
+        .await
+        .unwrap();
+    client_engine
+        .queue_peer_task(make_spec(task_revoked), Some(revoked_id.clone()))
+        .await
+        .unwrap();
+    client_engine
+        .queue_peer_task(make_spec(task_b), Some(peer_b.id().to_string()))
+        .await
+        .unwrap();
+    let delta = dag_delta(COMMIT);
+    client_engine
+        .enqueue_outbox(
+            &serde_json::to_value(WireRequest::SyncDagDelta {
+                delta: delta.clone(),
+            })
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    // Offline with no selected host: counts Peer A + Peer B + unassigned (3), excludes revoked peer.
+    assert_eq!(client.peer_status().remote_node_id, None);
+    assert_eq!(client.peer_status().pending_outbox_count, 3);
+    assert_eq!(client_engine.pending_outbox_count().await.unwrap(), 3);
+    assert_eq!(
+        client_engine
+            .pending_outbox_count_for_peer(Some(&revoked_id))
+            .await
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        client_engine
+            .pending_outbox_count_for_peer(Some(&peer_b.id().to_string()))
+            .await
+            .unwrap(),
+        2
+    );
+
+    // Connected to Peer B: reports Peer B + unassigned (2), ignoring Peer A and revoked peer.
+    client.ping_peer(peer_b.addr(), "client").await.unwrap();
+    let status = client.peer_status();
+    assert!(status.connected);
+    assert_eq!(status.remote_node_id.as_deref(), Some(peer_b.id().to_string().as_str()));
+    assert_eq!(status.pending_outbox_count, 2);
+
+    // After flushing to Peer B: connected status reports 0 even though Peer A & revoked peer still have queued rows.
+    assert_eq!(client.flush_outbox(peer_b.addr()).await.unwrap(), 2);
+    assert_eq!(client.peer_status().pending_outbox_count, 0);
+    assert_eq!(
+        client_engine
+            .pending_outbox_count_for_peer(Some(&peer_b.id().to_string()))
+            .await
+            .unwrap(),
+        0
+    );
+    assert_eq!(client_engine.pending_outbox_count().await.unwrap(), 1);
+    assert!(peer_b_engine.get_task(task_b).await.unwrap().is_some());
+    assert!(peer_b_engine.get_task(task_a).await.unwrap().is_none());
+    assert!(peer_b_engine.get_task(task_revoked).await.unwrap().is_none());
+    assert_delta(&peer_b_engine.dag_snapshot(true).await.unwrap(), &delta, COMMIT);
+
+    // Disconnecting returns to offline-no-host view (1 remaining for Peer A; revoked peer still excluded).
+    client.disconnect_peer(peer_b.id());
+    assert_eq!(client.peer_status().pending_outbox_count, 1);
+
+    // Revoking Peer A immediately removes Peer A's queued row from pending counts.
+    client_engine
+        .upsert_trusted_peer(&TrustedPeerRecord {
+            node_id: peer_a.id().to_string(),
+            label: "Peer A".into(),
+            role: PeerRole::Host,
+            ticket_or_addrs: String::new(),
+            paired_at: now,
+            last_seen_at: now,
+            revoked_at: None,
+        })
+        .await
+        .unwrap();
+    client_engine
+        .revoke_trusted_peer(&peer_a.id().to_string())
+        .await
+        .unwrap();
+    assert_eq!(client.peer_status().pending_outbox_count, 0);
+    assert_eq!(client_engine.pending_outbox_count().await.unwrap(), 0);
+
+    client.shutdown().await.unwrap();
+    peer_a.shutdown().await.unwrap();
+    peer_b.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn ping_revoked_during_handshake_disconnects_and_closes_host_connections() {
+    let temp = TempDir::new();
+    let host_db = temp.join("race-host.db");
+    let host_engine = Arc::new(RelayEngine::open(REPO, &host_db, None).await.unwrap());
+    let (events, mut changes) = mpsc::unbounded_channel();
+    let host = RelayNode::start_with_events(
+        &temp.join("race-host-blobs"),
+        host_engine,
+        RelayNodeConfig {
+            profile: NetworkProfile::LocalOnly,
+            sandbox: None,
+        },
+        events,
+    )
+    .await
+    .unwrap();
+    let (client, client_engine) = start_local(&temp, "race-client-blobs", None).await;
+    client_engine
+        .set_runtime_mode(RuntimeMode::Client)
+        .await
+        .unwrap();
+
+    host.open_pairing_window(Duration::from_secs(30));
+
+    // Open a concurrent blob connection so we verify ALL host handles for the peer are closed.
+    let blob_conn = client
+        .endpoint()
+        .connect(host.addr(), iroh_blobs::ALPN)
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            if !host.shared.active_connections.lock().unwrap().is_empty() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("blob connection accepted on host");
+
+    // Hold a SQLite write transaction so Ping passes the pre-dispatch read gate and record_inbound,
+    // then blocks right at post-handshake upsert_trusted_peer (WAL readers do not block on writers).
+    let lock_store = crate::storage::RelayStore::connect(&host_db).await.unwrap();
+    let mut tx = lock_store.begin_write().await.unwrap();
+
+    let client_id = client.id();
+    let host_addr = host.addr();
+    let client_endpoint = client.endpoint().clone();
+    let ping_task = tokio::spawn(async move {
+        let rpc_conn = client_endpoint
+            .connect(host_addr, RELAY_RPC_ALPN)
+            .await
+            .unwrap();
+        let (mut send, mut recv) = rpc_conn.open_bi().await.unwrap();
+        let payload = encode_frame(&WireRequest::Ping {
+            sender_device: "race-laptop".into(),
+            sent_at: Utc::now(),
+        })
+        .unwrap();
+        write_frame(&mut send, &payload).await.unwrap();
+        let response: WireResponse = read_frame(&mut recv).await.unwrap();
+        (rpc_conn, response)
+    });
+
+    // Wait until host has passed the initial gate + record_inbound and is blocked on upsert_trusted_peer.
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            if host.peer_status().remote_node_id.as_deref() == Some(client_id.to_string().as_str())
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("host recorded inbound Ping peer before upsert");
+
+    // Revoke the client inside the held write tx and commit so post-handshake upsert sees revoked_at.
+    let now = Utc::now().to_rfc3339();
+    sqlx::query(
+        "INSERT INTO trusted_peers (node_id, label, role, ticket_or_addrs, paired_at, last_seen_at, revoked_at)
+         VALUES (?1, 'Revoked Race Peer', 'client', '', ?2, ?2, ?2)",
+    )
+    .bind(client_id.to_string())
+    .bind(&now)
+    .execute(&mut *tx)
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+
+    let (rpc_conn, response) = tokio::time::timeout(Duration::from_secs(3), ping_task)
+        .await
+        .expect("ping task completed")
+        .unwrap();
+    assert!(
+        matches!(&response, WireResponse::Error { code, .. } if code == "PEER_REVOKED"),
+        "expected PEER_REVOKED from post-handshake race branch, got {response:?}"
+    );
+
+    // Even though the client keeps rpc_conn and blob_conn open, the host must close both handles.
+    tokio::time::timeout(Duration::from_secs(3), rpc_conn.closed())
+        .await
+        .expect("host closed Ping RPC connection");
+    tokio::time::timeout(Duration::from_secs(3), blob_conn.closed())
+        .await
+        .expect("host closed active blob connection");
+
+    assert!(!host.peer_status().connected);
+    assert_eq!(host.peer_status().remote_node_id, None);
+    assert!(changes.try_recv().is_err());
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            if host.shared.active_connections.lock().unwrap().is_empty() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("host cleared all active connections for revoked peer");
+
+    drop(lock_store);
+    host.shutdown().await.unwrap();
+    client.shutdown().await.unwrap();
 }
