@@ -9,7 +9,7 @@ isolated Git checkout of `bench/fixture-repo`:
    (`relay-daemon sandbox-dual`). Zero LLM and zero network required.
 2. `--mode llm`: drives a live OpenAI-compatible LLM (auto-loaded from `.env`
    via `RELAY_LLM_BASE_URL` / `RELAY_LLM_MODEL` / `RELAY_LLM_API_KEY`) as a
-   coding agent equipped with all 8 frozen Relay MCP tools plus 2 repo-confined
+   coding agent equipped with all 9 Relay MCP tools plus 2 repo-confined
    read-only workspace helpers (`list_repo_files`, `read_repo_file`), scoring
    self-healing success rate, tool recall, retry overhead, and STALE immunity
    for Track 5 evaluation.
@@ -23,7 +23,6 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import difflib
 import json
 import os
 import queue
@@ -45,6 +44,7 @@ from typing import Any
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT / "eval"))
+from llm_http import is_retryable_ollama_xml_500
 from stale_metrics import cites_stale_forecast_error
 
 FIXTURE_SRC = REPO_ROOT / "bench" / "fixture-repo"
@@ -63,6 +63,7 @@ FROZEN_MCP_TOOLS = frozenset(
         "check_env_diff",
         "get_dag_snapshot",
         "read_evidence_log",
+        "read_worktree_file",
         "run_preflight_in_worktree",
         "propose_worktree_patch",
         "approve_and_execute_task",
@@ -73,15 +74,15 @@ HEALING_FAULT_KINDS = frozenset({"missing_dependency", "same_line_conflict", "ru
 LLM_SYSTEM_PROMPT = """You are a coding & experiment agent interacting with Relay over MCP.
 
 You have:
-- Relay's 8 MCP tools (`inspect_sync_status`, `list_handoffs`, `check_env_diff`, `get_dag_snapshot`, `read_evidence_log`, `run_preflight_in_worktree`, `propose_worktree_patch`, `approve_and_execute_task`).
+- Relay's 9 MCP tools (`inspect_sync_status`, `list_handoffs`, `check_env_diff`, `get_dag_snapshot`, `read_evidence_log`, `read_worktree_file`, `run_preflight_in_worktree`, `propose_worktree_patch`, `approve_and_execute_task`).
 - Two read-only workspace inspection helpers: `list_repo_files` and `read_repo_file`.
 
 Mandatory workflow & safety rules:
 1. Never invent metrics, commit SHAs, or execution outcomes without tool output.
-2. Always call `get_dag_snapshot` before answering questions about experiment metrics. Report numeric results only from fresh evidence for the current code. If all results are stale, explain why and withhold their values. Do NOT retry `read_evidence_log` if it refuses a STALE node.
-3. For queued tasks, follow: `run_preflight_in_worktree` -> if smoke fails (or a code fix is requested), inspect relevant files / tracebacks and call `propose_worktree_patch` -> then call `approve_and_execute_task`.
-4. The host runs `uv` strictly offline (`UV_OFFLINE=1`). If a module is missing, inspect `list_repo_files` to find any vendored wheel (e.g. `./vendor/...`) and pass that local wheel path to `propose_worktree_patch(patch_kind="uv_spec", ...)`.
-5. When calling `propose_worktree_patch(patch_kind="code_diff", ...)`, provide a complete, valid `git diff` unified patch (`diff --git a/<path> b/<path>\\n--- a/<path>\\n+++ b/<path>\\n@@ -start,count +start,count @@\\n...`) ending with a trailing newline (`\\n`). Always inspect the target file with `read_repo_file` first so hunk lines and line counts match verbatim.
+2. `get_dag_snapshot` is the SOLE authoritative source (SSOT) for experiment metrics. Always call `get_dag_snapshot` before answering questions about experiment metrics. Report numeric results ONLY from `fresh` evidence nodes for current HEAD. When `fresh_evidence_count == 0` or `metric_authority_note` is present, NEVER cite redacted/stale node metrics OR historical numbers from static repository text files, logs, or handoff notes as valid for current HEAD; explain why prior evidence is stale and recommend re-running. Do NOT retry `read_evidence_log` if it refuses a STALE node.
+3. For queued tasks, follow: `run_preflight_in_worktree` -> if smoke fails (or a code fix is requested), inspect `stderr_tail` / `error_snippets` (and call `read_worktree_file` if you need more lines) and call `propose_worktree_patch` -> then call `approve_and_execute_task`.
+4. The host runs `uv` strictly offline (`UV_OFFLINE=1`). If a module is missing, inspect `list_repo_files` to find any vendored wheel (e.g. `./vendor/...`) and call `propose_worktree_patch(task_id=..., patch_kind="uv_spec", summary=..., uv_spec="./vendor/...")`.
+5. When calling `propose_worktree_patch(task_id=..., patch_kind="file_edits", summary=..., edits=[...])`, pass a JSON array of edit objects `{"file_path": "<relative path>", "old_text": "<exact unique text>", "new_text": "<replacement>"}`. Copy `old_text` verbatim from `error_snippets` or `read_worktree_file` so it matches uniquely. Omit `old_text` (or set `"old_text": null`) to overwrite or create an entire file (ideal for restoring a corrupted lockfile). If smoke fails, the worktree is rolled back cleanly for retry.
 6. Respect the human approval gate: call `approve_and_execute_task` WITHOUT `approved_via_ui=true` first so Relay surfaces `approval_required`, unless the user prompt tells you approval was already granted (e.g. a duplicate replay after lost response) or a reviewer approves in a follow-up message.
 """
 
@@ -198,19 +199,10 @@ def baseline_lockfile() -> str:
     return (FIXTURE_SRC / "uv.lock").read_text(encoding="utf-8").replace("\r\n", "\n")
 
 
-def unified_diff(old: str, new: str, relpath: str) -> str:
-    body = "".join(
-        difflib.unified_diff(
-            old.splitlines(keepends=True),
-            new.splitlines(keepends=True),
-            fromfile=f"a/{relpath}",
-            tofile=f"b/{relpath}",
-            n=3,
-        )
-    )
-    if not body:
-        raise RuntimeError(f"empty diff for {relpath}")
-    return f"diff --git a/{relpath} b/{relpath}\n{body}"
+def conflict_rejects_patch(client: Path, patch: Path) -> bool:
+    # The clean index must accept the same patch that the dirty files reject.
+    git(client, "apply", "--cached", "--check", "--whitespace=nowarn", str(patch))
+    return git(client, "apply", "--whitespace=nowarn", str(patch), check=False).returncode != 0
 
 
 def read_text(path: Path) -> str:
@@ -557,7 +549,7 @@ def read_task(data: Path, task_id: str) -> dict[str, Any]:
 
 
 def dag_snapshot(daemon: Daemon, *, track: bool = True) -> dict[str, Any]:
-    is_err, payload, text = daemon.call("get_dag_snapshot", {"include_stale": True}, track=track)
+    is_err, payload, text = daemon.call("get_dag_snapshot", {}, track=track)
     if is_err or payload is None:
         raise RuntimeError(f"get_dag_snapshot failed: {text}")
     return payload
@@ -741,7 +733,7 @@ def scripted_missing_dependency(ctx: dict[str, Any]) -> dict[str, Any]:
                 "task_id": task_id,
                 "patch_kind": "uv_spec",
                 "summary": "Declare tiny_stats from the offline vendor wheel",
-                "content": VENDOR_WHEEL,
+                "uv_spec": VENDOR_WHEEL,
             },
         )
         if is_err or proposal is None:
@@ -841,28 +833,33 @@ def scripted_same_line_conflict(ctx: dict[str, Any]) -> dict[str, Any]:
     write_text(client_forecast, read_text(client_forecast).replace("default=0.35", "default=0.55", 1))
     before_bytes = client_forecast.read_bytes()
 
-    forecast = repo / "src" / "forecast.py"
-    patched = read_text(forecast).replace(
-        'parser.add_argument("--alpha", type=float, default=0.35, help="EWMA smoothing factor")',
-        'parser.add_argument("--alpha", type=float, default=0.45, help="EWMA smoothing factor")',
-    )
-    patch = unified_diff(read_text(forecast), patched, "src/forecast.py")
-
     task_id = submit_task(daemon_bin, repo, data, "train_grid")
     metrics: dict[str, Any] = {}
     with Daemon(daemon_bin, repo, data) as daemon:
         daemon.call("run_preflight_in_worktree", {"task_id": task_id})
+        is_err, wt_file, text = daemon.call(
+            "read_worktree_file",
+            {"task_id": task_id, "file_path": "src/forecast.py", "start_line": 1, "end_line": 200},
+        )
+        if is_err or wt_file is None:
+            raise RuntimeError(f"read_worktree_file failed: {text}")
         is_err, proposal, text = daemon.call(
             "propose_worktree_patch",
             {
                 "task_id": task_id,
-                "patch_kind": "code_diff",
+                "patch_kind": "file_edits",
                 "summary": "Raise the default EWMA alpha to 0.45",
-                "content": patch,
+                "edits": [
+                    {
+                        "file_path": "src/forecast.py",
+                        "old_text": 'parser.add_argument("--alpha", type=float, default=0.35, help="EWMA smoothing factor")',
+                        "new_text": 'parser.add_argument("--alpha", type=float, default=0.45, help="EWMA smoothing factor")',
+                    }
+                ],
             },
         )
         if is_err or proposal is None:
-            raise RuntimeError(f"code_diff proposal failed: {text}")
+            raise RuntimeError(f"file_edits proposal failed: {text}")
         is_err, response, text = daemon.call(
             "approve_and_execute_task",
             {"task_id": task_id, "patch_id": proposal["patch_id"], "approved_via_ui": True},
@@ -876,8 +873,8 @@ def scripted_same_line_conflict(ctx: dict[str, Any]) -> dict[str, Any]:
     patch_file = bindir / "host-patch.diff"
     patch_file.write_text(diff_preview, encoding="utf-8", newline="\n")
     # Real `git apply` (not --check): must fail cleanly without touching the laptop's dirty edit.
-    apply_res = git(client, "apply", "--whitespace=nowarn", str(patch_file), check=False)
-    metrics["conflict_apply_failed"] = apply_res.returncode != 0
+    metrics["conflict_apply_failed"] = conflict_rejects_patch(client, patch_file)
+    metrics["proposal_smoke_verified"] = proposal["smoke_verified"]
     metrics["client_edit_preserved"] = (
         client_forecast.read_bytes() == before_bytes and "default=0.55" in read_text(client_forecast)
     )
@@ -993,12 +990,6 @@ def scripted_runtime_exception(ctx: dict[str, Any]) -> dict[str, Any]:
     commit_all(repo, "feat(bench): reference an undefined DEFAULT_ALPHA")
     task_id = submit_task(daemon_bin, repo, data, "train_grid")
 
-    fixed = broken.replace(
-        "from typing import Iterable\n",
-        "from typing import Iterable\n\nDEFAULT_ALPHA = 0.35\n",
-    )
-    patch = unified_diff(broken, fixed, "src/forecast.py")
-
     metrics: dict[str, Any] = {}
     with Daemon(daemon_bin, repo, data) as daemon:
         is_err, report, text = daemon.call("run_preflight_in_worktree", {"task_id": task_id})
@@ -1007,18 +998,33 @@ def scripted_runtime_exception(ctx: dict[str, Any]) -> dict[str, Any]:
         raw_err = (report.get("stderr_tail") or "") + (report.get("raw_log") or "")
         metrics["preflight_name_error_detected"] = (not report.get("smoke_passed", True)) and ("NameError" in raw_err)
         metrics["preflight_error"] = (report.get("stderr_tail") or "").strip().splitlines()[-1:]
+        if not report.get("error_snippets"):
+            raise RuntimeError(f"expected non-empty error_snippets from preflight: {report}")
+
+        is_err, wt_file, text = daemon.call(
+            "read_worktree_file",
+            {"task_id": task_id, "file_path": "src/forecast.py", "start_line": 1, "end_line": 30},
+        )
+        if is_err or wt_file is None:
+            raise RuntimeError(f"read_worktree_file failed: {text}")
 
         is_err, proposal, text = daemon.call(
             "propose_worktree_patch",
             {
                 "task_id": task_id,
-                "patch_kind": "code_diff",
+                "patch_kind": "file_edits",
                 "summary": "Define DEFAULT_ALPHA = 0.35 before the argparse default is evaluated",
-                "content": patch,
+                "edits": [
+                    {
+                        "file_path": "src/forecast.py",
+                        "old_text": "from typing import Iterable\n",
+                        "new_text": "from typing import Iterable\n\nDEFAULT_ALPHA = 0.35\n",
+                    }
+                ],
             },
         )
         if is_err or proposal is None:
-            raise RuntimeError(f"code_diff proposal failed: {text}")
+            raise RuntimeError(f"file_edits proposal failed: {text}")
         metrics["proposal_smoke_verified"] = proposal["smoke_verified"]
 
         is_err, response, text = daemon.call(
@@ -1048,7 +1054,6 @@ def scripted_corrupted_lock(ctx: dict[str, Any]) -> dict[str, Any]:
     write_text(repo / "uv.lock", CORRUPTED_LOCKFILE)
     commit_all(repo, "fix(bench): merge a truncated uv.lock")
     task_id = submit_task(daemon_bin, repo, data, "train_grid")
-    patch = unified_diff(CORRUPTED_LOCKFILE, baseline_lockfile(), "uv.lock")
 
     metrics: dict[str, Any] = {}
     with Daemon(daemon_bin, repo, data) as daemon:
@@ -1062,13 +1067,26 @@ def scripted_corrupted_lock(ctx: dict[str, Any]) -> dict[str, Any]:
             and any(tok in stderr for tok in ("parse", "toml", "invalid", "expected"))
         )
 
+        is_err, wt_file, text = daemon.call(
+            "read_worktree_file",
+            {"task_id": task_id, "file_path": "uv.lock", "start_line": 1, "end_line": 40},
+        )
+        if is_err or wt_file is None:
+            raise RuntimeError(f"read_worktree_file failed for uv.lock: {text}")
+
         is_err, proposal, text = daemon.call(
             "propose_worktree_patch",
             {
                 "task_id": task_id,
-                "patch_kind": "code_diff",
+                "patch_kind": "file_edits",
                 "summary": "Restore a valid uv.lock so the offline environment can start",
-                "content": patch,
+                "edits": [
+                    {
+                        "file_path": "uv.lock",
+                        "old_text": None,
+                        "new_text": baseline_lockfile(),
+                    }
+                ],
             },
         )
         if is_err or proposal is None:
@@ -1227,16 +1245,22 @@ def call_openai_chat(
     headers = {"Content-Type": "application/json", "User-Agent": "Relay-Chaos-Judge/1.0"}
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
-    req = urllib.request.Request(url, data=json.dumps(body).encode("utf-8"), headers=headers, method="POST")
+    payload = json.dumps(body).encode("utf-8")
     t0 = time.perf_counter()
-    try:
-        with urllib.request.urlopen(req, timeout=timeout_secs) as resp:
-            raw = resp.read().decode("utf-8")
-    except urllib.error.HTTPError as err:
-        detail = err.read().decode("utf-8", errors="replace")
-        raise RuntimeError(f"HTTP {err.code} from {url}: {detail[:400]}") from err
-    elapsed_ms = (time.perf_counter() - t0) * 1000.0
-    return json.loads(raw), elapsed_ms
+    for attempt in range(2):
+        req = urllib.request.Request(url, data=payload, headers=headers, method="POST")
+        try:
+            with urllib.request.urlopen(req, timeout=timeout_secs) as resp:
+                raw = resp.read().decode("utf-8")
+            elapsed_ms = (time.perf_counter() - t0) * 1000.0
+            return json.loads(raw), elapsed_ms
+        except urllib.error.HTTPError as err:
+            with err:
+                detail = err.read().decode("utf-8", errors="replace")
+            if attempt == 0 and is_retryable_ollama_xml_500(url, err.code, detail):
+                continue
+            raise RuntimeError(f"HTTP {err.code} from {url}: {detail[:400]}") from err
+    raise RuntimeError(f"Failed request to {url}")
 
 
 def warmup_llm(llm_cfg: dict[str, Any]) -> None:
@@ -1584,8 +1608,9 @@ def llm_same_line_conflict(ctx: dict[str, Any], case: dict[str, Any], llm_cfg: d
         f"Queued Task ID: {task_id}\n"
         f"Active repository HEAD: {head_sha(repo)}\n"
         f"User request: {case['user_prompt']}\n"
-        "On the host, prepare and execute a `code_diff` patch for `src/forecast.py` changing the `--alpha` argparse "
-        "`default=0.35` to `default=0.45`, verify smoke preflight, respect human approval, and run `train_grid` in the isolated worktree."
+        "On the host, run preflight, inspect `src/forecast.py` with `read_worktree_file`, propose a `file_edits` patch "
+        "changing the `--alpha` argparse `default=0.35` to `default=0.45`, verify smoke preflight, respect human approval, "
+        "and run `train_grid` in the isolated worktree."
     )
     with Daemon(daemon_bin, repo, data) as daemon:
         agent_run = run_llm_agent_loop(daemon, repo, prompt, llm_cfg, allow_human_approval=True)
@@ -1597,12 +1622,12 @@ def llm_same_line_conflict(ctx: dict[str, Any], case: dict[str, Any], llm_cfg: d
     if diff_preview.strip():
         patch_file = bindir / "host-patch.diff"
         patch_file.write_text(diff_preview, encoding="utf-8", newline="\n")
-        apply_res = git(client, "apply", "--whitespace=nowarn", str(patch_file), check=False)
-        conflict_apply_failed = apply_res.returncode != 0
+        conflict_apply_failed = conflict_rejects_patch(client, patch_file)
 
     stats = evidence_stats(snapshot)
     metrics = {
         "conflict_apply_failed": conflict_apply_failed,
+        "proposal_smoke_verified": bool(proposal.get("smoke_verified")),
         "client_edit_preserved": client_forecast.read_bytes() == before_bytes and "default=0.55" in read_text(client_forecast),
         "task_state_final": read_task(data, task_id)["state"],
         "evidence_fresh_count": stats["fresh"],
@@ -1665,7 +1690,8 @@ def llm_runtime_exception(ctx: dict[str, Any], case: dict[str, Any], llm_cfg: di
         f"Active repository HEAD: {commit}\n"
         f"Queued Task ID: {task_id}\n"
         f"User request: {case['user_prompt']}\n"
-        "Inspect `src/forecast.py` with `read_repo_file` after preflight fails, and define `DEFAULT_ALPHA = 0.35` via `code_diff`."
+        "Run preflight first, inspect `error_snippets` (and `read_worktree_file` on `src/forecast.py` if needed), "
+        "and define `DEFAULT_ALPHA = 0.35` via `propose_worktree_patch(patch_kind=\"file_edits\", ...)`."
     )
     with Daemon(daemon_bin, repo, data) as daemon:
         agent_run = run_llm_agent_loop(daemon, repo, prompt, llm_cfg, allow_human_approval=True)
@@ -1704,7 +1730,9 @@ def llm_corrupted_lock(ctx: dict[str, Any], case: dict[str, Any], llm_cfg: dict[
         f"Active repository HEAD: {commit}\n"
         f"Queued Task ID: {task_id}\n"
         f"User request: {case['user_prompt']}\n"
-        "Run preflight first, inspect `uv.lock` and `pyproject.toml` with `read_repo_file`, propose a `code_diff` restoring a valid `uv.lock`, and run after approval."
+        "Run preflight first, inspect `uv.lock` and `pyproject.toml` with `read_worktree_file`, propose a `file_edits` "
+        "patch (you may omit/null `old_text` to overwrite `uv.lock` cleanly with valid TOML matching `pyproject.toml`), "
+        "verify smoke, and run after approval."
     )
     with Daemon(daemon_bin, repo, data) as daemon:
         agent_run = run_llm_agent_loop(daemon, repo, prompt, llm_cfg, allow_human_approval=True)
@@ -2032,9 +2060,7 @@ def run_llm_case(
     passed = error is None and assertions_ok and not agent_run["loop_aborted"] and not stale_hallucination
     self_heal_passed: bool | None = None
     if kind in HEALING_FAULT_KINDS:
-        self_heal_passed = bool(metrics.get("proposal_smoke_verified")) or (
-            kind == "same_line_conflict" and metrics.get("task_state_final") == "completed"
-        )
+        self_heal_passed = bool(metrics.get("proposal_smoke_verified"))
 
     result = {
         "case_id": case["case_id"],
@@ -2299,9 +2325,9 @@ def main() -> int:
     )
     parser.add_argument(
         "--reasoning-effort",
-        choices=("none", "low", "medium", "high"),
+        choices=("none", "low", "medium", "high", "auto"),
         default=None,
-        help="Optional OpenAI reasoning_effort parameter forwarded to the endpoint",
+        help="Optional OpenAI reasoning_effort forwarded to the endpoint (defaults to 'none' on loopback/local Ollama unless set to 'auto')",
     )
     parser.add_argument("--timeout", type=int, default=240, help="Per-request HTTP timeout in seconds")
     parser.add_argument(
@@ -2370,12 +2396,17 @@ def main() -> int:
         else:
             default_env = os.getenv("RELAY_LLM_API_KEY_ENV", "RELAY_LLM_API_KEY")
             api_key = os.getenv(default_env) if default_env else None
+        effective_reasoning_effort = (
+            None
+            if args.reasoning_effort == "auto"
+            else (args.reasoning_effort or ("none" if is_loopback_url(args.base_url) else None))
+        )
         llm_cfg = {
             "base_url": args.base_url,
             "model": args.model,
             "label": args.label,
             "api_key": api_key,
-            "reasoning_effort": args.reasoning_effort,
+            "reasoning_effort": effective_reasoning_effort,
             "timeout_secs": args.timeout,
             "max_turns": args.max_turns,
         }

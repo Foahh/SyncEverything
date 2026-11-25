@@ -50,6 +50,7 @@ from typing import Any
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT / "eval"))
+from llm_http import is_retryable_ollama_xml_500
 from stale_metrics import forecast_error_values, reported_decimal_values
 
 FIXTURE_SRC = REPO_ROOT / "bench" / "fixture-repo"
@@ -215,6 +216,10 @@ def read_repo_file(repo: Path, rel_path: str, start_line: int = 1, end_line: int
     return "\n".join(f"{idx:>4}: {lines[idx - 1]}" for idx in range(start, end + 1))
 
 
+class McpRequestError(RuntimeError):
+    """A JSON-RPC rejection returned by a running daemon."""
+
+
 class McpStdioClient:
     def __init__(self, daemon_bin: Path, repo_root: Path, data_dir: Path) -> None:
         self.proc = subprocess.Popen(
@@ -289,7 +294,7 @@ class McpStdioClient:
             resp = json.loads(stripped)
             if resp.get("id") == req_id:
                 if "error" in resp:
-                    raise RuntimeError(f"MCP error {method}: {resp['error']}")
+                    raise McpRequestError(f"MCP error {method}: {resp['error']}")
                 return resp["result"]
 
     def openai_tools(self) -> list[dict[str, Any]]:
@@ -306,7 +311,10 @@ class McpStdioClient:
         ]
 
     def call_tool(self, name: str, arguments: dict[str, Any]) -> tuple[bool, Any, str]:
-        res = self.request("tools/call", {"name": name, "arguments": arguments})
+        try:
+            res = self.request("tools/call", {"name": name, "arguments": arguments})
+        except McpRequestError as exc:
+            return True, None, str(exc)
         is_err = bool(res.get("isError", False))
         blocks = res.get("content", [])
         text = "\n".join(b.get("text", "") for b in blocks if b.get("type") == "text")
@@ -740,7 +748,7 @@ def relay_local_helpers_openai() -> list[dict[str, Any]]:
             "type": "function",
             "function": {
                 "name": "read_repo_file",
-                "description": "Read-only helper: read UTF-8 file lines from main checkout so unified diffs match exact line numbers.",
+                "description": "Read-only helper: read UTF-8 file lines from main checkout with 1-based line numbers.",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -918,7 +926,7 @@ def check_ground_truth(
     # Check actual fresh train_grid execution on HEAD
     if baseline == "relay_v1":
         assert mcp is not None
-        _, snap, _ = mcp.call_tool("get_dag_snapshot", {"include_stale": True})
+        _, snap, _ = mcp.call_tool("get_dag_snapshot", {})
         fresh_ev = [
             n
             for n in (snap or {}).get("nodes", [])
@@ -1001,15 +1009,21 @@ def call_openai_chat(
     headers = {"Content-Type": "application/json", "User-Agent": "Relay-Baseline-Eval/1.0"}
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
-    req = urllib.request.Request(url, data=json.dumps(body).encode("utf-8"), headers=headers, method="POST")
+    payload = json.dumps(body).encode("utf-8")
     t0 = time.perf_counter()
-    try:
-        with urllib.request.urlopen(req, timeout=timeout_secs) as resp:
-            raw = resp.read().decode("utf-8")
-    except urllib.error.HTTPError as err:
-        detail = err.read().decode("utf-8", errors="replace")
-        raise RuntimeError(f"HTTP {err.code}: {detail[:300]}") from err
-    return json.loads(raw), (time.perf_counter() - t0) * 1000.0
+    for attempt in range(2):
+        req = urllib.request.Request(url, data=payload, headers=headers, method="POST")
+        try:
+            with urllib.request.urlopen(req, timeout=timeout_secs) as resp:
+                raw = resp.read().decode("utf-8")
+            return json.loads(raw), (time.perf_counter() - t0) * 1000.0
+        except urllib.error.HTTPError as err:
+            with err:
+                detail = err.read().decode("utf-8", errors="replace")
+            if attempt == 0 and is_retryable_ollama_xml_500(url, err.code, detail):
+                continue
+            raise RuntimeError(f"HTTP {err.code}: {detail[:300]}") from err
+    raise RuntimeError(f"Failed request to {url}")
 
 
 def run_dry_baseline_case(baseline: str, setup: dict[str, Any], daemon_bin: Path) -> dict[str, Any]:
@@ -1021,10 +1035,10 @@ def run_dry_baseline_case(baseline: str, setup: dict[str, Any], daemon_bin: Path
         with McpStdioClient(daemon_bin, setup["repo"], setup["data"]) as mcp:
             task_arg = {"task_id": setup["relay_task_id"]}
             if tid == "B1_decision_carryover":
-                mcp.call_tool("get_dag_snapshot", {"include_stale": True})
+                mcp.call_tool("get_dag_snapshot", {})
                 mcp.call_tool("list_handoffs", {"limit": 5})
             elif tid == "B2_stale_metric_trap":
-                mcp.call_tool("get_dag_snapshot", {"include_stale": True})
+                mcp.call_tool("get_dag_snapshot", {})
             elif tid == "B3_missing_dep_heal":
                 mcp.call_tool("run_preflight_in_worktree", task_arg)
                 mcp.call_tool(
@@ -1033,34 +1047,28 @@ def run_dry_baseline_case(baseline: str, setup: dict[str, Any], daemon_bin: Path
                         "task_id": setup["relay_task_id"],
                         "patch_kind": "uv_spec",
                         "summary": "Install vendored tiny_stats wheel offline",
-                        "content": "./vendor/tiny_stats-0.1.0-py3-none-any.whl",
+                        "uv_spec": "./vendor/tiny_stats-0.1.0-py3-none-any.whl",
                     },
                 )
             elif tid == "B4_defect_dirty_tree":
                 mcp.call_tool("run_preflight_in_worktree", task_arg)
-                orig = (setup["repo"] / "src" / "forecast.py").read_text(encoding="utf-8")
-                patched = orig.replace(
-                    "def generate_series(",
-                    "DEFAULT_ALPHA = 0.35\n\n\ndef generate_series(",
-                    1,
-                )
-                import difflib
-                diff_body = "".join(
-                    difflib.unified_diff(
-                        orig.splitlines(keepends=True),
-                        patched.splitlines(keepends=True),
-                        fromfile="a/src/forecast.py",
-                        tofile="b/src/forecast.py",
-                        n=3,
-                    )
+                mcp.call_tool(
+                    "read_worktree_file",
+                    {"task_id": setup["relay_task_id"], "file_path": "src/forecast.py", "start_line": 1, "end_line": 40},
                 )
                 mcp.call_tool(
                     "propose_worktree_patch",
                     {
                         "task_id": setup["relay_task_id"],
-                        "patch_kind": "code_diff",
+                        "patch_kind": "file_edits",
                         "summary": "Define DEFAULT_ALPHA = 0.35",
-                        "content": f"diff --git a/src/forecast.py b/src/forecast.py\n{diff_body}",
+                        "edits": [
+                            {
+                                "file_path": "src/forecast.py",
+                                "old_text": "def generate_series(",
+                                "new_text": "DEFAULT_ALPHA = 0.35\n\n\ndef generate_series(",
+                            }
+                        ],
                     },
                 )
             if tid in {"B1_decision_carryover", "B2_stale_metric_trap"}:
@@ -1068,9 +1076,17 @@ def run_dry_baseline_case(baseline: str, setup: dict[str, Any], daemon_bin: Path
             _, gate, _ = mcp.call_tool("approve_and_execute_task", task_arg)
             if isinstance(gate, dict) and gate.get("outcome") == "approval_required":
                 state["ui_approvals"] += 1
-            mcp.call_tool("approve_and_execute_task", {"task_id": setup["relay_task_id"], "approved_via_ui": True})
-            _, snap, _ = mcp.call_tool("get_dag_snapshot", {"include_stale": False})
-            fresh = [n for n in snap["nodes"] if n["payload"]["kind"] == "evidence"]
+                err, _, text = mcp.call_tool("approve_and_execute_task", {
+                    **task_arg, "patch_id": gate["patch_id"], "approved_via_ui": True
+                })
+                if err:
+                    raise RuntimeError(f"Dry-run approval failed: {text}")
+            _, snap, _ = mcp.call_tool("get_dag_snapshot", {})
+            fresh = [
+                n
+                for n in snap["nodes"]
+                if n["payload"]["kind"] == "evidence" and (n.get("freshness") or {}).get("status") == "fresh"
+            ]
             m = fresh[-1]["payload"]["metrics_json"]
             answer = f"Verified HEAD best_mae={m['best_mae']:.5f}, best_window={m['best_window']}."
             passed, failures, stale_cited = check_ground_truth(baseline, setup, state, answer, mcp)
@@ -1118,9 +1134,9 @@ def system_prompt_for(baseline: str) -> str:
         return (
             "You are the Relay v1.0 execution agent connected to Relay's MCP server plus read-only file inspection helpers.\n"
             "Rules:\n"
-            "1. Inspect `get_dag_snapshot` and `list_handoffs` first to capture session decisions, constraints, and STALE quarantine warnings.\n"
-            "2. NEVER cite a `stale` evidence node's metric as valid for HEAD.\n"
-            "3. For queued tasks: call `run_preflight_in_worktree(task_id)`. If preflight fails: for missing Python module use `propose_worktree_patch(patch_kind='uv_spec', ...)` pointing to any local `./vendor/*.whl` file found via `list_repo_files`; for a code bug, inspect `src/forecast.py` via `read_repo_file` and call `propose_worktree_patch(patch_kind='code_diff', ...)` with an exact unified diff ending in `\\n`.\n"
+            "1. Inspect `get_dag_snapshot` and `list_handoffs` first to capture session decisions, constraints, and STALE quarantine warnings. `get_dag_snapshot` is the sole authoritative source (SSOT) for verified experiment metrics.\n"
+            "2. NEVER cite a `stale` evidence node's metric or historical static text files as valid for HEAD when `fresh_evidence_count == 0`.\n"
+            "3. For queued tasks: call `run_preflight_in_worktree(task_id)`. If preflight fails: for missing Python module use `propose_worktree_patch(task_id=..., patch_kind='uv_spec', summary=..., uv_spec='./vendor/...')` pointing to any local `./vendor/*.whl` file found via `list_repo_files`; for a code bug, inspect `error_snippets` or call `read_worktree_file` and call `propose_worktree_patch(task_id=..., patch_kind='file_edits', summary=..., edits=[{\"file_path\": ..., \"old_text\": ..., \"new_text\": ...}])`.\n"
             "4. Call `approve_and_execute_task(task_id)` first; if `approval_required` is returned, pause or mention approval is needed and proceed when approved."
         )
     extra = (
@@ -1184,6 +1200,7 @@ def run_live_case(
         while llm_turns < turn_limit:
             turn_idx = llm_turns
             llm_turns += 1
+            request_started = time.perf_counter()
             try:
                 resp, elapsed = call_openai_chat(
                     llm_cfg["base_url"],
@@ -1194,6 +1211,7 @@ def run_live_case(
                     timeout_secs=timeout_secs,
                 )
             except Exception as exc:  # noqa: BLE001
+                llm_ms += (time.perf_counter() - request_started) * 1000.0
                 loop_aborted = True
                 last_failures = [sanitize_text(f"LLM error: {exc}")]
                 break
@@ -1277,9 +1295,10 @@ def run_live_case(
                     ):
                         output_text = "No reviewer approval has been granted for this task and patch."
                     else:
-                        _, payload, output_text = mcp_ctx.call_tool(name, parsed)
+                        is_err, payload, output_text = mcp_ctx.call_tool(name, parsed)
                         if (
                             name == "approve_and_execute_task"
+                            and not is_err
                             and isinstance(payload, dict)
                             and payload.get("outcome") == "approval_required"
                         ):

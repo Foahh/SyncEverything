@@ -1,7 +1,7 @@
 {
   "case_id": "chaos-05-runtime-exception",
   "title": "Runtime Traceback Self-Healing",
-  "description": "A committed edit references an undefined `DEFAULT_ALPHA` constant, so smoke preflight fails with a Python NameError in the isolated worktree. The host must turn the traceback into a minimal `code_diff`, re-verify smoke, pass the approval gate, and only then execute the grid.",
+  "description": "A committed edit references an undefined `DEFAULT_ALPHA` constant, so smoke preflight fails with a Python NameError in the isolated worktree. The host must turn the traceback into a minimal `file_edits` patch, re-verify smoke, pass the approval gate, and only then execute the grid.",
   "initial_commit": "HEAD",
   "injected_fault": {
     "kind": "runtime_exception",
@@ -27,7 +27,7 @@
     },
     {
       "assertion_id": "smoke_verified_after_fix",
-      "description": "The code_diff candidate passes smoke inside the isolated worktree before approval",
+      "description": "The file_edits candidate passes smoke inside the isolated worktree before approval",
       "metric_key": "proposal_smoke_verified",
       "expected_value": true
     },

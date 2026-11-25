@@ -3,11 +3,13 @@ mod execution;
 
 pub use env::compute_env_fingerprint;
 pub use execution::{
-    PreflightReport, PresetRunOutput, detect_missing_python_module, extract_metrics_json,
+    ErrorSourceSnippet, PatchInput, PreflightReport, PresetRunOutput, detect_missing_python_module,
+    extract_error_snippets, extract_metrics_json,
 };
 
 use crate::contracts::{
     CommandPreset, Freshness, GraphNode, NodeKind, RelayManifest, StalePropagationReport, TaskId,
+    WorktreeFileView,
 };
 use crate::engine::RelayEngine;
 use crate::error::{RelayError, RelayResult};
@@ -399,68 +401,23 @@ impl WorktreeSandbox {
     }
 
     /// Read a UTF-8 file strictly inside the repository root with line numbers.
-    /// Blocks path traversal (`..`), symlinks escaping the repo, `.git` internals, and `.env*` secrets.
+    /// Blocks path traversal (`..`), symlinks escaping the repo, `.git`/`.venv`/`.relay` internals, and `.env*` secrets.
     pub async fn read_repo_file(&self, relative_path: &str, max_bytes: usize) -> RelayResult<String> {
-        let trimmed = relative_path.trim();
-        if trimmed.is_empty() {
-            return Err(RelayError::Internal("file path must not be empty".into()));
-        }
-        let rel = Path::new(trimmed);
-        if rel.is_absolute() {
-            return Err(RelayError::Internal(
-                "read_repo_file requires a repository-relative path".into(),
-            ));
-        }
-        validate_repo_read_path(rel, trimmed)?;
-        let canonical_root = std::fs::canonicalize(&self.repo_root)?;
-        let candidate = self.repo_root.join(rel);
-        let canonical_file = std::fs::canonicalize(&candidate).map_err(|err| {
-            RelayError::Internal(format!("could not open '{trimmed}': {err}"))
-        })?;
-        let resolved = canonical_file.strip_prefix(&canonical_root).map_err(|_| {
-            RelayError::Internal(format!(
-                "path '{trimmed}' resolves outside the active repository"
-            ))
-        })?;
-        validate_repo_read_path(resolved, trimmed)?;
-        let metadata = tokio::fs::metadata(&canonical_file).await?;
-        if !metadata.is_file() {
-            return Err(RelayError::Internal(format!(
-                "'{trimmed}' is not a regular file"
-            )));
-        }
+        let view = read_confined_file(&self.repo_root, relative_path, None, Some(u32::MAX), max_bytes).await?;
+        Ok(view.content)
+    }
 
-        let cap = max_bytes.max(256);
-        let limit = cap.saturating_add(1).max(4096);
-        let file = tokio::fs::File::open(&canonical_file).await?;
-        let mut bytes = Vec::new();
-        file.take(limit as u64).read_to_end(&mut bytes).await?;
-        if bytes.iter().take(4096).any(|b| *b == 0) {
-            return Err(RelayError::Internal(format!(
-                "'{trimmed}' appears to be a binary file"
-            )));
-        }
-        let mut truncated = (bytes.len() as u64) < metadata.len();
-        let text = match std::str::from_utf8(&bytes) {
-            Ok(text) => text,
-            Err(error) if truncated && error.error_len().is_none() => {
-                std::str::from_utf8(&bytes[..error.valid_up_to()]).expect("validated UTF-8 prefix")
-            }
-            Err(_) => return Err(RelayError::Internal(format!("'{trimmed}' is not valid UTF-8 text"))),
-        };
-        let mut formatted = String::new();
-        for (idx, line) in text.lines().enumerate() {
-            let entry = format!("{:>4}: {}\n", idx + 1, line);
-            if formatted.len() + entry.len() > cap {
-                truncated = true;
-                break;
-            }
-            formatted.push_str(&entry);
-        }
-        if truncated {
-            formatted.push_str("... [truncated]\n");
-        }
-        Ok(formatted)
+    /// Read a UTF-8 file strictly inside a task's isolated Git worktree with 1-based line numbers.
+    /// Blocks path traversal (`..`), symlink escapes, `.git`/`.venv`/`.relay`, `.env*`, and binary files.
+    pub async fn read_worktree_file(
+        &self,
+        worktree_path: &Path,
+        relative_path: &str,
+        start_line: Option<u32>,
+        end_line: Option<u32>,
+        max_bytes: usize,
+    ) -> RelayResult<WorktreeFileView> {
+        read_confined_file(worktree_path, relative_path, start_line, end_line, max_bytes).await
     }
 
     /// Return `git status --short` and uncommitted `git diff HEAD` (strictly read-only).
@@ -664,14 +621,163 @@ impl WorktreeHandle {
     }
 }
 
-fn validate_repo_read_path(path: &Path, trimmed: &str) -> RelayResult<()> {
-    let mut has_normal = false;
+const DEFAULT_WORKTREE_READ_WINDOW: u32 = 200;
+
+async fn read_confined_file(
+    root: &Path,
+    relative_path: &str,
+    start_line: Option<u32>,
+    end_line: Option<u32>,
+    max_bytes: usize,
+) -> RelayResult<WorktreeFileView> {
+    let trimmed = relative_path.trim();
+    let normalized = validate_confined_relative_path(trimmed)?;
+    let canonical_root = std::fs::canonicalize(root)?;
+    let candidate = canonical_root.join(&normalized);
+    let canonical_file = std::fs::canonicalize(&candidate)
+        .map_err(|err| RelayError::Internal(format!("could not open '{trimmed}': {err}")))?;
+    let resolved = canonical_file.strip_prefix(&canonical_root).map_err(|_| {
+        RelayError::Internal(format!(
+            "path '{trimmed}' resolves outside the active repository"
+        ))
+    })?;
+    validate_confined_path_components(resolved, trimmed)?;
+    let start = start_line.unwrap_or(1);
+    let end = end_line.unwrap_or_else(|| start.saturating_add(DEFAULT_WORKTREE_READ_WINDOW - 1));
+    if start == 0 || end < start {
+        return Err(RelayError::Internal(
+            "line range must be 1-based and inclusive".into(),
+        ));
+    }
+    let display_path = normalized.to_string_lossy().replace('\\', "/");
+    tokio::task::spawn_blocking(move || {
+        read_source_window(&canonical_file, display_path, start, end, max_bytes)
+    })
+    .await
+    .map_err(|err| RelayError::Internal(format!("source reader failed: {err}")))?
+}
+
+fn read_source_window(
+    path: &Path,
+    file_path: String,
+    start: u32,
+    end: u32,
+    cap: usize,
+) -> RelayResult<WorktreeFileView> {
+    use std::io::{BufRead, BufReader, Read};
+
+    if !std::fs::metadata(path)?.is_file() {
+        return Err(RelayError::Internal(format!(
+            "'{file_path}' is not a regular file"
+        )));
+    }
+    let mut reader = BufReader::new(std::fs::File::open(path)?);
+    let cap = cap.max(256);
+    let mut content = String::new();
+    let mut bytes = Vec::new();
+    let mut line = String::new();
+    let mut total_lines = 0u32;
+    let mut last_emitted = 0u32;
+    let mut truncated = false;
+    while !reader.fill_buf()?.is_empty() {
+        line.clear();
+        bytes.clear();
+        let mut long_line = false;
+        loop {
+            // Validate every byte of the source, keeping only a bounded prefix
+            // of this line and up to three incomplete bytes between chunks.
+            let count = reader.by_ref().take(8192).read_until(b'\n', &mut bytes)?;
+            let at_end = count == 0 || bytes.ends_with(b"\n");
+            if bytes.contains(&0) {
+                return Err(RelayError::Internal(format!(
+                    "'{file_path}' appears to be a binary file"
+                )));
+            }
+            let text = match std::str::from_utf8(&bytes) {
+                Ok(text) => text,
+                Err(err) if !at_end && err.error_len().is_none() => {
+                    std::str::from_utf8(&bytes[..err.valid_up_to()]).expect("valid UTF-8 prefix")
+                }
+                Err(_) => {
+                    return Err(RelayError::Internal(format!(
+                        "'{file_path}' is not valid UTF-8 text"
+                    )));
+                }
+            };
+            let keep = text.floor_char_boundary(cap.saturating_add(2).saturating_sub(line.len()));
+            if !long_line {
+                line.push_str(&text[..keep]);
+            }
+            long_line |= keep < text.len();
+            if at_end {
+                if line.ends_with('\n') {
+                    line.pop();
+                    if line.ends_with('\r') {
+                        line.pop();
+                    }
+                }
+                break;
+            }
+            let valid = text.len();
+            bytes.drain(..valid);
+        }
+        total_lines = total_lines.saturating_add(1);
+        if truncated || !(start..=end).contains(&total_lines) {
+            continue;
+        }
+        let prefix = format!("{total_lines:>4}: ");
+        let remaining = cap.saturating_sub(content.len() + prefix.len() + 1);
+        if remaining < line.len() || long_line || content.len() + prefix.len() + 1 > cap {
+            truncated = true;
+            // Return a usable prefix when the first requested line alone exceeds the budget.
+            if last_emitted == 0 {
+                content.push_str(&prefix);
+                content.push_str(&line[..line.floor_char_boundary(remaining.min(line.len()))]);
+                content.push('\n');
+                last_emitted = total_lines;
+            }
+        } else {
+            content.push_str(&prefix);
+            content.push_str(&line);
+            content.push('\n');
+            last_emitted = total_lines;
+        }
+    }
+    if truncated {
+        content.push_str("... [truncated]\n");
+    }
+    Ok(WorktreeFileView {
+        file_path,
+        start_line: if last_emitted == 0 { 0 } else { start },
+        end_line: last_emitted,
+        total_lines,
+        truncated,
+        content,
+    })
+}
+
+pub(crate) fn validate_confined_relative_path(raw: &str) -> RelayResult<PathBuf> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err(RelayError::Internal("file path must not be empty".into()));
+    }
+    let normalized_sep = trimmed.replace('\\', "/");
+    let rel = Path::new(&normalized_sep);
+    if rel.is_absolute() {
+        return Err(RelayError::Internal(format!(
+            "path '{trimmed}' must be relative to the repository/worktree root"
+        )));
+    }
+    validate_confined_path_components(rel, trimmed)
+}
+
+pub(crate) fn validate_confined_path_components(path: &Path, raw: &str) -> RelayResult<PathBuf> {
+    let mut normalized = PathBuf::new();
     for component in path.components() {
         match component {
             Component::Normal(part) => {
-                has_normal = true;
                 let name = part.to_string_lossy().to_ascii_lowercase();
-                if matches!(name.as_str(), ".git" | ".relay" | ".relay-desktop")
+                if matches!(name.as_str(), ".git" | ".venv" | ".relay" | ".relay-desktop")
                     || name.starts_with(".env")
                     || name.ends_with(".db")
                     || name.ends_with(".db-wal")
@@ -680,22 +786,23 @@ fn validate_repo_read_path(path: &Path, trimmed: &str) -> RelayResult<()> {
                     || name.ends_with(".key")
                 {
                     return Err(RelayError::Internal(format!(
-                        "access to protected path '{trimmed}' is blocked"
+                        "access to protected path '{raw}' is blocked"
                     )));
                 }
+                normalized.push(part);
             }
             Component::CurDir => {}
             Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
                 return Err(RelayError::Internal(format!(
-                    "path traversal outside repository is blocked: '{trimmed}'"
+                    "path traversal outside repository is blocked: '{raw}'"
                 )));
             }
         }
     }
-    if !has_normal {
+    if normalized.as_os_str().is_empty() {
         return Err(RelayError::Internal("invalid repository file path".into()));
     }
-    Ok(())
+    Ok(normalized)
 }
 
 fn is_within_checkout(path: &Path, root: &Path) -> RelayResult<bool> {

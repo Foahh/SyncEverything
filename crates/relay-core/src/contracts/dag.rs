@@ -100,6 +100,9 @@ pub struct DagSnapshot {
     pub nodes: Vec<GraphNode>,
     pub edges: Vec<GraphEdge>,
     pub stale_count: u32,
+    pub fresh_evidence_count: u32,
+    pub stale_evidence_count: u32,
+    pub metric_authority_note: Option<String>,
     pub captured_at: DateTime<Utc>,
 }
 

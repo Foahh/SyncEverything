@@ -1,0 +1,107 @@
+{
+  "model": "deepseek-flash",
+  "base_url": "https://api.deepseek.com",
+  "dry_run": false,
+  "scoring_version": 3,
+  "timestamp_utc": "2026-11-24T20:54:16Z",
+  "summary": {
+    "passed_scenarios": 4,
+    "total_scenarios": 4,
+    "pass_rate_pct": 100.0,
+    "avg_tool_recall": 1.0,
+    "stale_hallucination_rate_pct": 0.0,
+    "loop_abort_rate_pct": 0.0,
+    "self_heal_passed": true,
+    "median_latency_ms": 4295.1,
+    "total_tokens": 48772
+  },
+  "scenarios": [
+    {
+      "scenario_id": "S1_sync_and_handoffs",
+      "passed": true,
+      "expected_tools": [
+        "inspect_sync_status",
+        "list_handoffs"
+      ],
+      "called_tools": [
+        "inspect_sync_status",
+        "list_handoffs"
+      ],
+      "tool_recall": 1.0,
+      "stale_hallucination": false,
+      "loop_aborted": false,
+      "self_heal_verified": null,
+      "turns": 2,
+      "latency_ms": 4015.1,
+      "prompt_tokens": 6317,
+      "completion_tokens": 631,
+      "final_answer": "## Relay Sync Status\n\n| Field | Value |\n|---|---|\n| Runtime mode | **host** |\n| Transport path | `offline` |\n| Connected | **false** |\n| Remote node | `null` (no peer paired/visible) |\n| RTT | `null` |\n| Last synced commit | `f2ecde70e1b58c31d32597f8161304967a20f4c2` |\n| Pending outbox | `0` |\n\nSync health: **degraded/disconnected.** The node is running in `host` mode, but the active transport path is `offline` with no remote node and no measurable RTT. Nothing is queued for delivery (`pending_outbox_count = 0`), so the last synced commit `f2ecde70` is the newest state either side would see \u2014 but no peer has confirmed anything since the transport went offline.\n\n## Recent Handoffs \u2014 1 total\n\n| Handoff ID | Repo | Source | Base commit | Active tasks | Stale evidence | Created |\n|---|---|---|---|---|---|---|\n| `01a20f56-0be4-7735-933e-12c087417093` | `forecast-bench` | `cli` | `f2ecde70e1b58c31\u2026` | 1 | 0 | 2026-11-24T20:53:47Z |\n\nOnly one handoff exists. Summary note is *\"Initial smoke check.\"*\n\n## Notes\n\n- **Same commit on both dimensions:** the handoff `base_commit_sha` (`f2ecde70\u2026`) matches the `last_synced_commit`, so the handoff was cut at the current synced HEAD.\n- **One active task is attached** to that handoff. If you want, I can pull the DAG snapshot to check whether that task's evidence is fresh against `f2ecde70` before you plan any work on it.\n- The `stale_evidence_count = 0` above is handoff **metadata only** \u2014 it is not itself a verified metric. I haven't cited any experiment numbers, since no DAG snapshot was fetched in this turn.",
+      "notes": []
+    },
+    {
+      "scenario_id": "S2_stale_evidence_trap",
+      "passed": true,
+      "expected_tools": [
+        "get_dag_snapshot"
+      ],
+      "called_tools": [
+        "get_dag_snapshot"
+      ],
+      "tool_recall": 1.0,
+      "stale_hallucination": false,
+      "loop_aborted": false,
+      "self_heal_verified": null,
+      "turns": 2,
+      "latency_ms": 4575.2,
+      "prompt_tokens": 7202,
+      "completion_tokens": 680,
+      "final_answer": "## No verified MAE exists for the current HEAD\n\n**Head commit:** `4dbf6a12869f0f21964c7e3965745b14e8793312` \u2014 *\"Shift forecast blend to 0.4 MA / 0.6 EWMA\"* (changed `src/forecast.py`)\n\nPer the authoritative DAG snapshot (`captured_at` 2026-11-24T20:53:57Z):\n\n| SSOT field | Value |\n|---|---|\n| `fresh_evidence_count` | **0** |\n| `stale_evidence_count` | 1 |\n| `metric_authority_note` | Present (all prior evidence stale/quarantined) |\n\n### Why I cannot give you a number\nThe only evidence node (`evidence:01a20f56\u2026`, preset `train_grid`) is marked **stale**:\n\n- **Reason:** `Git commit 4dbf6a1: Shift forecast blend to 0.4 MA / 0.6 EWMA`\n- **Caused by:** `artifact:4dbf6a12\u2026` (the current HEAD itself supersedes the baseline artifact `f00251b8\u2026` that the evidence was produced from)\n- **Payload:** quarantined \u2014 `{\"quarantined\": true, \"reason\": \"stale_evidence_metrics_redacted\"}`\n\nBecause the `train_grid` run was produced from the **previous** commit (`f00251b8\u2026`), it measured the old forecast blend, not the new 0.4 MA / 0.6 EWMA weighting. Its metrics have been redacted, and I'm not permitted to cite them (nor any historical MAE from `results/calibration-latest.txt`, logs, or handoff notes) as valid for HEAD \u2014 that would conflate two different code states.\n\n### Recommendation\nRe-run the `train_grid` experiment against `4dbf6a1` to produce fresh verified evidence. To proceed I'd need a queued task, then I'd follow the deterministic workflow:\n\n1. `run_preflight_in_worktree(task_id)` in an isolated worktree\n2. `approve_and_execute_task(task_id)` on pass \u2014 or self-heal via `propose_worktree_patch` on failure\n3. Re-query `get_dag_snapshot` and report only the resulting fresh MAE\n\n**No tasks were executed in this turn** \u2014 no task_id was provided, and no patches are pending. Once a `train_grid` task is queued for commit `4dbf6a1`, share its `task_id` and I'll run it.",
+      "notes": []
+    },
+    {
+      "scenario_id": "S3_env_diff_diagnosis",
+      "passed": true,
+      "expected_tools": [
+        "check_env_diff"
+      ],
+      "called_tools": [
+        "check_env_diff"
+      ],
+      "tool_recall": 1.0,
+      "stale_hallucination": false,
+      "loop_aborted": false,
+      "self_heal_verified": null,
+      "turns": 2,
+      "latency_ms": 2727.9,
+      "prompt_tokens": 6263,
+      "completion_tokens": 360,
+      "final_answer": "**Environment Diff \u2014 Commit `51dab59bfbe3fc7c0d2fbe0e686234c26b87ce85`**\n\n| Field | Value |\n|---|---|\n| Repo env fingerprint | `uv:blake3:5652db561977cfee` |\n| Host env fingerprint | `uv:blake3:0996be2243db5a38` |\n| In sync | \u274c **false** |\n| Missing packages | **`scipy`** |\n\n**Result:** The Host environment is **not** in sync with that commit. One Python package is missing:\n\n- **`scipy`** \u2014 declared in the target commit's `pyproject.toml` / `uv.lock` fingerprint but absent from the Host environment.\n\nNo additional notes were returned by the tool. If you want to proceed with a task pinned to this commit, the typical next step is to run the smoke preflight in an isolated worktree first (`run_preflight_in_worktree`), and if it fails on `ModuleNotFoundError: scipy`, I can stage a `uv_spec` patch (e.g. `scipy>=<version from that lockfile>`) for your approval \u2014 no changes to your main working tree.",
+      "notes": []
+    },
+    {
+      "scenario_id": "S4_code_defect_self_heal",
+      "passed": true,
+      "expected_tools": [
+        "run_preflight_in_worktree",
+        "propose_worktree_patch",
+        "approve_and_execute_task"
+      ],
+      "called_tools": [
+        "run_preflight_in_worktree",
+        "read_worktree_file",
+        "propose_worktree_patch",
+        "approve_and_execute_task"
+      ],
+      "tool_recall": 1.0,
+      "stale_hallucination": false,
+      "loop_aborted": false,
+      "self_heal_verified": true,
+      "turns": 5,
+      "latency_ms": 8697.2,
+      "prompt_tokens": 25784,
+      "completion_tokens": 1535,
+      "final_answer": "## \u23f8\ufe0f Stopped at Human Approval Boundary\n\n**Task:** `01a20f56-5677-7620-9f0f-29547ed6ff70`\n**Base commit SHA:** `76d2deab3aa387ba55c35c343c8aa554b36ab8b1`\n**Pending patch_id:** `01a20f56-6b46-710c-baac-ebe40c3e175e`\n**Outcome:** `approval_required` \u2014 awaiting your explicit approval. No experiment was executed.\n\n### Steps taken\n1. `run_preflight_in_worktree` \u2192 **smoke FAILED** (`exit_code: 1`)\n   - `NameError: name 'DEFAULT_ALPHA' is not defined` at `src/forecast.py:108` (`--alpha` default) during `main()`.\n2. `read_worktree_file(src/forecast.py, 1\u201360)` \u2192 confirmed no module-level `DEFAULT_ALPHA`; `evaluate_window` already uses `alpha: float = 0.35` as its default.\n3. `propose_worktree_patch` (`file_edits`) \u2192 applied and **smoke_verified: true** (smoke run produced stable JSON: `alpha: 0.35`, `best_window: 7`, `best_mae: 2.46437`).\n4. `approve_and_execute_task(patch_id=...)` \u2192 returned `approval_required`. Stopped; not retried.\n\n### Verified patch diff\n```diff\ndiff --git a/src/forecast.py b/src/forecast.py\nindex b5dda4e..7279cbf 100644\n--- a/src/forecast.py\n+++ b/src/forecast.py\n@@ -12,6 +12,8 @@ import math\n import time\n from typing import Iterable\n \n+DEFAULT_ALPHA = 0.35\n+\n \n def generate_series(length: int = 240) -> list[float]:\n     return [\n```\n\n**Root cause:** `main()` referenced `DEFAULT_ALPHA` without it ever being defined, so the module crashed before any benchmark logic ran. The fix defines the constant once at module level with the same value (`0.35`) already used as the `evaluate_window` default.\n\n**Fresh metrics:** none available yet \u2014 no experiment has run for this HEAD, so there is nothing verified I can cite. (I did not consult the DAG snapshot since no metric comparison was requested, and I will not cite the preflight's smoke numbers as experiment evidence.)\n\n\ud83d\udc49 **Action needed:** approve patch `01a20f56-6b46-710c-baac-ebe40c3e175e` in the UI/Elicitation so the whitelisted `relay.toml` preset can run in the verified worktree. Once you approve, tell me and I'll proceed.",
+      "notes": []
+    }
+  ]
+}

@@ -18,6 +18,7 @@ fn failure(module: &str) -> PreflightReport {
         stdout_tail: String::new(),
         stderr_tail: traceback.clone(),
         detected_missing_module: Some(module.into()),
+        error_snippets: Vec::new(),
         raw_log: traceback,
     }
 }
@@ -69,6 +70,9 @@ fn agent_safe_dag_context_quarantines_stale_evidence() {
         ],
         edges: vec![],
         stale_count: 1,
+        fresh_evidence_count: 1,
+        stale_evidence_count: 1,
+        metric_authority_note: None,
         captured_at: now,
     };
     let context = build_safe_dag_context(&snapshot);
@@ -76,10 +80,29 @@ fn agent_safe_dag_context_quarantines_stale_evidence() {
         .split_once("[QUARANTINED STALE EVIDENCE \u{2014} DO NOT CITE]\n")
         .unwrap();
     assert!(eligible.contains("fresh-score"));
-    assert!(eligible.contains("pending-score"));
+    assert!(eligible.contains("PENDING_VERIFY"));
+    assert!(!context.contains("pending-score"));
     assert!(!eligible.contains("stale-id"));
     assert_eq!(quarantine, "\"stale-id\"\n");
     assert!(!context.contains("quarantined-score"));
+}
+
+#[test]
+fn short_api_keys_are_fully_masked() {
+    for secret in ["abcdefg", "abcdefghij", "七个字符的密钥"] {
+        assert_eq!(mask_secret(secret), "••••••");
+    }
+    let client = LlmClient::new(
+        LlmEndpointConfig {
+            api_key: Some("abcdefg".into()),
+            ..LlmEndpointConfig::default()
+        },
+        Duration::from_secs(1),
+    ).unwrap();
+    assert_eq!(
+        client.provider_error_detail("Rejected key abcdefg"),
+        "Rejected key [redacted]"
+    );
 }
 
 #[tokio::test]
@@ -92,7 +115,7 @@ async fn agent_deterministic_fallback_diagnoses_missing_module() {
     for (module, package) in [("scipy", "scipy"), ("sklearn.model_selection", "scikit-learn")] {
         let proposal = agent.diagnose_preflight_failure(&failure(module), "").await.unwrap();
         assert_eq!(proposal.patch_kind, PatchKind::UvSpec);
-        assert_eq!(proposal.content, package);
+        assert_eq!(proposal.uv_spec.as_deref(), Some(package));
         assert_eq!(proposal.source, "deterministic_fallback");
     }
 
@@ -170,7 +193,7 @@ async fn agent_uses_structured_llm_diagnosis() {
     let response = json!({
         "patch_kind": "uv_spec",
         "summary": "Add the missing library",
-        "content": "scipy>=1.14"
+        "uv_spec": "scipy>=1.14"
     });
     let (url, server) = mock_completion(response.to_string()).await;
     let proposal = SelfHealingAgent::new(endpoint(url))
@@ -178,7 +201,7 @@ async fn agent_uses_structured_llm_diagnosis() {
         .await
         .unwrap();
     assert_eq!(proposal.patch_kind, PatchKind::UvSpec);
-    assert_eq!(proposal.content, "scipy>=1.14");
+    assert_eq!(proposal.uv_spec.as_deref(), Some("scipy>=1.14"));
     assert_eq!(proposal.source, "llm");
     let body = server.await.unwrap();
     assert_eq!(body["response_format"]["type"], "json_object");
@@ -187,14 +210,14 @@ async fn agent_uses_structured_llm_diagnosis() {
 
 #[tokio::test]
 async fn agent_parses_markdown_fenced_json_diagnosis() {
-    let fenced = "```json\n{\"patch_kind\":\"uv_spec\",\"summary\":\"Install scipy\",\"content\":\"scipy>=1.14\"}\n```";
+    let fenced = "```json\n{\"patch_kind\":\"file_edits\",\"summary\":\"Define constant\",\"edits\":[{\"file_path\":\"src/app.py\",\"old_text\":\"a = 1\",\"new_text\":\"a = 2\"}]}\n```";
     let (url, server) = mock_completion(fenced.into()).await;
     let proposal = SelfHealingAgent::new(endpoint(url))
         .diagnose_preflight_failure(&failure("scipy"), "Fixture")
         .await
         .unwrap();
-    assert_eq!(proposal.patch_kind, PatchKind::UvSpec);
-    assert_eq!(proposal.content, "scipy>=1.14");
+    assert_eq!(proposal.patch_kind, PatchKind::FileEdits);
+    assert_eq!(proposal.edits.as_ref().unwrap().len(), 1);
     let _ = server.await.unwrap();
 }
 
@@ -222,10 +245,12 @@ async fn llm_client_probe_and_config_persistence_work() {
         model: "qwen3.5:9b".into(),
         api_key_env: None,
         api_key: Some("sk-test-secret-1234".into()),
+        reasoning_effort: Some("low".into()),
     };
     let view = cfg.redacted_view();
     assert!(view.has_api_key);
     assert_eq!(view.api_key_hint.as_deref(), Some("sk-••••1234"));
+    assert_eq!(view.reasoning_effort.as_deref(), Some("low"));
 
     let tmp_path = std::env::temp_dir()
         .join(format!("relay-llm-cfg-{}", Uuid::now_v7()))
@@ -288,6 +313,9 @@ fn compose_context_ablation_strategies_are_deterministic_and_quarantine_stale_in
             kind: EdgeKind::Informs,
         }],
         stale_count: 1,
+        fresh_evidence_count: 1,
+        stale_evidence_count: 1,
+        metric_authority_note: None,
         captured_at: now,
     };
     let mut tasks = vec![TaskRecord {
@@ -358,10 +386,10 @@ async fn stream_chat_with_tools_parses_chunked_sse_text_and_tool_calls() {
         let _ = socket.read(&mut buf).await.unwrap();
         socket.write_all(b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ntransfer-encoding: chunked\r\n\r\n").await.unwrap();
         let sse = concat!(
-            "data: {\"choices\":[{\"delta\":{\"content\":\"Checking \"}}]}\n\n",
-            "data: {\"choices\":[{\"delta\":{\"content\":\"结果...\"}}]}\n\n",
-            "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_abc\",\"function\":{\"name\":\"get_dag_\",\"arguments\":\"{\\\"include_\"}}]}}]}\n\n",
-            "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"name\":\"snapshot\",\"arguments\":\"stale\\\":true}\"}}]}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"content\":\"Checking \",\"reasoning\":\"Inspect \"}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"content\":\"结果...\",\"reasoning\":\"the result.\"}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_abc\",\"function\":{\"name\":\"get_dag_\",\"arguments\":\"{\"}}]}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"name\":\"snapshot\",\"arguments\":\"}\"}}]}}]}\n\n",
             "data: [DONE]\n\n"
         );
         let split = sse.find('结').unwrap() + 1;
@@ -392,7 +420,8 @@ async fn stream_chat_with_tools_parses_chunked_sse_text_and_tool_calls() {
     assert_eq!(turn.tool_calls.len(), 1);
     assert_eq!(turn.tool_calls[0].id, "call_abc");
     assert_eq!(turn.tool_calls[0].name, "get_dag_snapshot");
-    assert_eq!(turn.tool_calls[0].arguments, "{\"include_stale\":true}");
+    assert_eq!(turn.tool_calls[0].arguments, "{}");
+    assert_eq!(turn.reasoning_fields["reasoning"], "Inspect the result.");
 }
 
 #[tokio::test]
@@ -420,6 +449,7 @@ async fn stream_chat_with_tools_falls_back_to_non_streaming_on_http_400() {
                     "message": {
                         "role": "assistant",
                         "content": "Fallback ok",
+                        "reasoning_content": "Inspect sync before answering.",
                         "tool_calls": [{
                             "id": "call_1",
                             "type": "function",
@@ -458,6 +488,7 @@ async fn stream_chat_with_tools_falls_back_to_non_streaming_on_http_400() {
     assert_eq!(turn.content, "Fallback ok");
     assert_eq!(turn.tool_calls.len(), 1);
     assert_eq!(turn.tool_calls[0].name, "inspect_sync_status");
+    assert_eq!(turn.reasoning_fields["reasoning_content"], "Inspect sync before answering.");
 }
 
 #[tokio::test]
@@ -529,4 +560,139 @@ async fn engine_persists_chat_history_and_resolves_approvals() {
 
     engine.clear_chat_messages().await.unwrap();
     assert!(engine.list_chat_messages(50).await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn llm_client_applies_local_default_no_think_and_allows_override() {
+    let local_default = LlmEndpointConfig::default();
+    assert_eq!(local_default.effective_reasoning_effort(), Some("none"));
+
+    let edge_default = LlmEndpointConfig {
+        tier: InferenceTier::EdgeFastPath,
+        ..LlmEndpointConfig::default()
+    };
+    assert_eq!(edge_default.effective_reasoning_effort(), Some("none"));
+
+    let cloud_default = LlmEndpointConfig {
+        tier: InferenceTier::CloudOpenAiCompat,
+        ..LlmEndpointConfig::default()
+    };
+    assert_eq!(cloud_default.effective_reasoning_effort(), None);
+
+    let local_override = LlmEndpointConfig {
+        reasoning_effort: Some("medium".into()),
+        ..LlmEndpointConfig::default()
+    };
+    assert_eq!(local_override.effective_reasoning_effort(), Some("medium"));
+
+    let local_auto = LlmEndpointConfig {
+        reasoning_effort: Some("auto".into()),
+        ..LlmEndpointConfig::default()
+    };
+    assert_eq!(local_auto.effective_reasoning_effort(), None);
+
+    // Verify request body actually carries reasoning_effort="none" on HostLocalOllama default.
+    let (url, server) = mock_completion("fast".into()).await;
+    let messages = [ChatMessage { role: "user".into(), content: "hi".into() }];
+    endpoint(url).chat_completion(&messages).await.unwrap();
+    let body = server.await.unwrap();
+    assert_eq!(body["reasoning_effort"], "none");
+
+    // Verify CloudOpenAiCompat omits reasoning_effort unless explicitly configured.
+    let (url2, server2) = mock_completion("cloud".into()).await;
+    let cloud_client = LlmClient::new(
+        LlmEndpointConfig {
+            tier: InferenceTier::CloudOpenAiCompat,
+            base_url: url2,
+            ..LlmEndpointConfig::default()
+        },
+        Duration::from_secs(5),
+    )
+    .unwrap();
+    cloud_client.chat_completion(&messages).await.unwrap();
+    let body2 = server2.await.unwrap();
+    assert!(body2.get("reasoning_effort").is_none());
+}
+
+#[tokio::test]
+async fn llm_client_retries_once_on_ollama_xml_500() {
+    use std::sync::atomic::AtomicBool;
+
+    // 1. Non-streaming chat_completion retries once on Ollama XML syntax error 500.
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        for attempt in 0..2 {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 8192];
+            let _ = socket.read(&mut buf).await.unwrap();
+            if attempt == 0 {
+                let err_body = r#"{"error":{"message":"XML syntax error on line 29: unexpected EOF"}}"#;
+                let resp = format!(
+                    "HTTP/1.1 500 Internal Server Error\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{err_body}",
+                    err_body.len()
+                );
+                socket.write_all(resp.as_bytes()).await.unwrap();
+            } else {
+                let ok_body = json!({
+                    "choices": [{"message": {"role": "assistant", "content": "recovered"}}]
+                })
+                .to_string();
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{ok_body}",
+                    ok_body.len()
+                );
+                socket.write_all(resp.as_bytes()).await.unwrap();
+            }
+        }
+    });
+    let reply = endpoint(format!("http://{addr}/v1"))
+        .chat_completion(&[ChatMessage { role: "user".into(), content: "ping".into() }])
+        .await
+        .unwrap();
+    assert_eq!(reply.choices[0].message.content.as_deref(), Some("recovered"));
+    server.await.unwrap();
+
+    // 2. stream_chat_with_tools also retries once on Ollama XML 500.
+    let listener2 = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr2 = listener2.local_addr().unwrap();
+    let server2 = tokio::spawn(async move {
+        for attempt in 0..2 {
+            let (mut socket, _) = listener2.accept().await.unwrap();
+            let mut buf = [0u8; 8192];
+            let _ = socket.read(&mut buf).await.unwrap();
+            if attempt == 0 {
+                let err_body = "XML syntax error on line 12: unexpected EOF";
+                let resp = format!(
+                    "HTTP/1.1 500 Internal Server Error\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{err_body}",
+                    err_body.len()
+                );
+                socket.write_all(resp.as_bytes()).await.unwrap();
+            } else {
+                let ok_body = json!({
+                    "choices": [{"message": {"role": "assistant", "content": "stream-ok"}}]
+                })
+                .to_string();
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{ok_body}",
+                    ok_body.len()
+                );
+                socket.write_all(resp.as_bytes()).await.unwrap();
+            }
+        }
+    });
+    let cancel = AtomicBool::new(false);
+    let mut streamed = String::new();
+    let turn = endpoint(format!("http://{addr2}/v1"))
+        .stream_chat_with_tools(
+            &[json!({"role": "user", "content": "hi"})],
+            &[],
+            &cancel,
+            |delta| streamed.push_str(delta),
+        )
+        .await
+        .unwrap();
+    assert_eq!(turn.content, "stream-ok");
+    assert_eq!(streamed, "stream-ok");
+    server2.await.unwrap();
 }

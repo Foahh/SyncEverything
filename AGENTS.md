@@ -7,6 +7,7 @@
 
 ## Engineering constraints
 
+- Do not keep backward-compatibility shims, legacy fallbacks, or deprecated aliases—this is a greenfield project. When upstream compatibility, contracts, or data formats change, migrate callers and state manually.
 - Preserve the frozen interfaces in `crates/relay-core/src/contracts/` unless the task explicitly changes them.
 - Host task execution must use a named preset and validate parameters against `allowed_params` in the target repository's `relay.toml`. Never execute arbitrary shell strings.
 - Invoke system `git` and `uv` through `tokio::process::Command`. Use `reqwest` for inference via OpenAI-compatible `/chat/completions`. Do not add `git2` or local Rust inference crates.

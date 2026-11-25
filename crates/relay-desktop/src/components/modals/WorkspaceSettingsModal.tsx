@@ -83,6 +83,15 @@ const TIER_DEFAULTS: Record<InferenceTier, { baseUrl: string; model: string }> =
 
 const TIER_ORDER: InferenceTier[] = ["host_local_ollama", "cloud_open_ai_compat", "edge_fast_path"];
 
+const REASONING_EFFORT_OPTIONS = [
+  { value: "", labelKey: "modals.workspace.reasoningEffortOption.default" },
+  { value: "auto", labelKey: "modals.workspace.reasoningEffortOption.auto" },
+  { value: "none", labelKey: "modals.workspace.reasoningEffortOption.none" },
+  { value: "low", labelKey: "modals.workspace.reasoningEffortOption.low" },
+  { value: "medium", labelKey: "modals.workspace.reasoningEffortOption.medium" },
+  { value: "high", labelKey: "modals.workspace.reasoningEffortOption.high" },
+] as const;
+
 const MCP_CLIENTS: Array<{ id: McpClientId; label: string; configPath: string }> = [
   { id: "claude", label: "Claude Code", configPath: ".mcp.json / ~/.claude.json" },
   { id: "cursor", label: "Cursor", configPath: ".cursor/mcp.json" },
@@ -364,6 +373,7 @@ function LlmSettingsTab({ initial }: { initial: LlmSettingsView_Serialize }) {
   const [apiKeyInput, setApiKeyInput] = useState("");
   const [clearStoredKey, setClearStoredKey] = useState(false);
   const [apiKeyEnv, setApiKeyEnv] = useState(initial.api_key_env ?? "");
+  const [reasoningEffort, setReasoningEffort] = useState(initial.reasoning_effort ?? "");
   const [showKey, setShowKey] = useState(false);
   const [isTesting, setIsTesting] = useState(false);
   const [feedback, setFeedback] = useState<FeedbackState | null>(null);
@@ -379,6 +389,7 @@ function LlmSettingsTab({ initial }: { initial: LlmSettingsView_Serialize }) {
       model: model.trim(),
       api_key_env: apiKeyEnv.trim() || null,
       api_key,
+      reasoning_effort: reasoningEffort.trim() || null,
     };
   };
 
@@ -409,7 +420,7 @@ function LlmSettingsTab({ initial }: { initial: LlmSettingsView_Serialize }) {
         setFeedback({ ok: true, text: t("modals.workspace.savedSuccess") });
       },
       onError: (err) => {
-        setFeedback({ ok: false, text: formatErrorMessage(err, t, "Unable to save AI settings.") });
+        setFeedback({ ok: false, text: formatErrorMessage(err, t) });
       },
     });
   };
@@ -421,11 +432,19 @@ function LlmSettingsTab({ initial }: { initial: LlmSettingsView_Serialize }) {
       const probe = await relayApi.testLlmConnection(buildUpdate());
       setFeedback({ ok: probe.ok, text: probe.message });
     } catch (err) {
-      setFeedback({ ok: false, text: formatErrorMessage(err, t, "Connection probe failed.") });
+      setFeedback({ ok: false, text: formatErrorMessage(err, t) });
     } finally {
       setIsTesting(false);
     }
   };
+
+  const visibleReasoningOptions = REASONING_EFFORT_OPTIONS.filter(
+    (option) =>
+      option.value !== "auto" || tier !== "cloud_open_ai_compat" || reasoningEffort === "auto",
+  );
+  const hasCustomReasoning =
+    Boolean(initial.reasoning_effort) &&
+    !REASONING_EFFORT_OPTIONS.some((option) => option.value === initial.reasoning_effort);
 
   return (
     <form onSubmit={handleSave} className="flex flex-col gap-4">
@@ -547,6 +566,55 @@ function LlmSettingsTab({ initial }: { initial: LlmSettingsView_Serialize }) {
             >
               {showKey ? <EyeOff /> : <Eye />}
             </Button>
+          </div>
+        </Field>
+
+        <Field>
+          <FieldTitle>{t("modals.workspace.reasoningEffortLabel")}</FieldTitle>
+          <FieldDescription>{t("modals.workspace.reasoningEffortHint")}</FieldDescription>
+          <div
+            className="flex flex-wrap gap-1.5"
+            role="group"
+            aria-label={t("modals.workspace.reasoningEffortLabel")}
+          >
+            {visibleReasoningOptions.map((option) => {
+              const active = reasoningEffort === option.value;
+              return (
+                <button
+                  key={option.value || "default"}
+                  type="button"
+                  aria-pressed={active}
+                  onClick={() => setReasoningEffort(option.value)}
+                  className={cn(
+                    "cursor-pointer rounded-md border px-2.5 py-1.5 text-center text-[11.5px] font-medium transition-all",
+                    active
+                      ? "border-primary bg-primary/8 text-foreground ring-1 ring-primary/25"
+                      : "border-border bg-muted/40 text-muted-foreground hover:border-foreground/20 hover:text-foreground",
+                  )}
+                >
+                  <span className="relay-text-trim whitespace-nowrap leading-none">
+                    {t(option.labelKey)}
+                  </span>
+                </button>
+              );
+            })}
+            {hasCustomReasoning && initial.reasoning_effort && (
+              <button
+                type="button"
+                aria-pressed={reasoningEffort === initial.reasoning_effort}
+                onClick={() => setReasoningEffort(initial.reasoning_effort ?? "")}
+                className={cn(
+                  "cursor-pointer rounded-md border px-2.5 py-1.5 text-center text-[11.5px] font-medium transition-all",
+                  reasoningEffort === initial.reasoning_effort
+                    ? "border-primary bg-primary/8 text-foreground ring-1 ring-primary/25"
+                    : "border-border bg-muted/40 text-muted-foreground hover:border-foreground/20 hover:text-foreground",
+                )}
+              >
+                <span className="relay-text-trim whitespace-nowrap leading-none">
+                  {initial.reasoning_effort}
+                </span>
+              </button>
+            )}
           </div>
         </Field>
 
@@ -708,7 +776,7 @@ export function WorkspaceSettingsModal({
 
   return (
     <Dialog open={isOpen} onOpenChange={onOpenChange}>
-      <DialogContent className="sm:max-w-lg">
+      <DialogContent className="max-h-[calc(100dvh-2rem)] overflow-y-auto sm:max-w-lg">
         <DialogHeader>
           <div className="flex items-center gap-2.5">
             <div className="flex size-8 shrink-0 items-center justify-center rounded-md bg-primary/10 text-primary">
@@ -750,10 +818,7 @@ export function WorkspaceSettingsModal({
 
           <TabsContent value="llm">
             {llmSettings && (
-              <LlmSettingsTab
-                key={`${llmSettings.base_url}|${llmSettings.model}|${llmSettings.has_api_key}`}
-                initial={llmSettings}
-              />
+              <LlmSettingsTab key={workspace?.repo_root ?? "global"} initial={llmSettings} />
             )}
           </TabsContent>
 

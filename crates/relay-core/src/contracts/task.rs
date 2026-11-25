@@ -1,4 +1,5 @@
 use chrono::{DateTime, Utc};
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use specta::Type;
 use std::collections::BTreeMap;
@@ -64,7 +65,18 @@ pub enum TaskState {
 #[serde(rename_all = "snake_case")]
 pub enum PatchKind {
     UvSpec,
-    CodeDiff,
+    FileEdits,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Type, JsonSchema)]
+pub struct FileEdit {
+    #[schemars(description = "Worktree-relative path of the file to edit or create (e.g. 'src/app.py')")]
+    pub file_path: String,
+    #[schemars(description = "Exact text snippet to replace (must match uniquely); omit or set null to overwrite or create the entire file")]
+    #[serde(default)]
+    pub old_text: Option<String>,
+    #[schemars(description = "Replacement text (or full file contents when old_text is omitted/null)")]
+    pub new_text: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Type)]

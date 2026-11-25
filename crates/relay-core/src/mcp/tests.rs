@@ -1,11 +1,49 @@
 use super::*;
-use crate::contracts::{EdgeKind, RuntimeMode, TaskSpec};
+use crate::contracts::{EdgeKind, FileEdit, RuntimeMode, TaskSpec};
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use tokio::process::Command;
 
 const REPO_ID: &str = "test-forecast";
+
+#[tokio::test]
+async fn mcp_quarantines_pending_evidence_and_ignores_extra_snapshot_fields() {
+    assert!(serde_json::from_str::<GetDagSnapshotArgs>(r#"{"include_stale":false}"#).is_ok());
+    let engine = Arc::new(RelayEngine::in_memory(REPO_ID, None).await.unwrap());
+    let now = Utc::now();
+    engine
+        .upsert_node_and_edges(
+            GraphNode {
+                id: "pending".into(),
+                label: "Pending result".into(),
+                payload: NodeKind::Evidence {
+                    task_id: Uuid::now_v7().to_string(),
+                    preset: "check".into(),
+                    metrics_json: serde_json::json!({"score":"unverified metric"}).into(),
+                    log_blob_hash: "unused".into(),
+                },
+                freshness: Freshness::PendingVerify,
+                device_origin: "test".into(),
+                created_at: now,
+                updated_at: now,
+            },
+            vec![],
+        )
+        .await.unwrap();
+    let server = RelayMcpServer::new(engine, None, None);
+    let snapshot = server.handle_get_dag_snapshot(GetDagSnapshotArgs {}).await.unwrap();
+    let output = serde_json::to_string(&snapshot).unwrap();
+    assert!(output.contains("unverified_evidence_metrics_redacted"));
+    assert!(!output.contains("unverified metric"));
+    assert_eq!(snapshot.fresh_evidence_count, 0);
+    let log = server.handle_read_evidence_log(ReadEvidenceLogArgs {
+        node_id: "pending".into(),
+        max_lines: None,
+    }).await;
+    assert!(matches!(log, Err(RelayError::UnverifiedEvidenceBlocked(_))));
+}
+
 const MANIFEST: &str = r#"
 [project]
 repo_id = "test-forecast"
@@ -50,19 +88,13 @@ else:
     print("training done")
 "#;
 
-const FIX: &str = r#"diff --git a/src/app.py b/src/app.py
---- a/src/app.py
-+++ b/src/app.py
-@@ -1,6 +1,8 @@
- import argparse
- import json
- 
-+SMOKE_MESSAGE = "smoke passed"
-+
- parser = argparse.ArgumentParser()
- parser.add_argument("--smoke", action="store_true")
- parser.add_argument("--alpha", type=float)
-"#;
+fn fix_edits() -> Vec<FileEdit> {
+    vec![FileEdit {
+        file_path: "src/app.py".into(),
+        old_text: Some("import argparse\nimport json\n".into()),
+        new_text: "import argparse\nimport json\n\nSMOKE_MESSAGE = \"smoke passed\"\n".into(),
+    }]
+}
 
 struct Fixture {
     temp: PathBuf,
@@ -211,21 +243,56 @@ async fn mcp_end_to_end_preflight_patch_approval_and_stale_block() {
         .unwrap();
     assert!(!report.smoke_passed);
     assert!(report.stderr_tail.contains("NameError"), "{}", report.raw_log);
+    assert!(!report.error_snippets.is_empty());
     let task = fixture.task(task_id).await;
     assert_eq!(task.state, TaskState::PreflightRunning);
     assert!(task.preflight_summary.unwrap().contains("failed"));
-    let marker = report.worktree_path.join(".preflight-marker");
-    fs::write(&marker, "reuse this worktree").unwrap();
 
-    let patch = server
-        .handle_propose_patch(ProposeWorktreePatchArgs {
+    let worktree_file = server
+        .handle_read_worktree_file(ReadWorktreeFileArgs {
             task_id: task_id.to_string(),
-            patch_kind: "code_diff".into(),
-            summary: "Define the smoke message".into(),
-            content: FIX.into(),
+            file_path: "src/app.py".into(),
+            start_line: Some(1),
+            end_line: Some(15),
         })
         .await
         .unwrap();
+    assert_eq!(worktree_file.file_path, "src/app.py");
+    assert!(worktree_file.content.contains("print(SMOKE_MESSAGE)"));
+
+    // Failed smoke verification rolls back worktree cleanly and allows an immediate retry.
+    let failed_patch = server
+        .handle_propose_patch(ProposeWorktreePatchArgs {
+            task_id: task_id.to_string(),
+            patch_kind: "file_edits".into(),
+            summary: "Incomplete edit that still fails smoke".into(),
+            uv_spec: None,
+            edits: Some(vec![FileEdit {
+                file_path: "src/app.py".into(),
+                old_text: Some("import json\n".into()),
+                new_text: "import json\nWRONG_CONST = 'nope'\n".into(),
+            }]),
+        })
+        .await;
+    assert!(failed_patch.is_err());
+    assert!(report.worktree_path.is_dir());
+
+    let marker = report.worktree_path.join(".preflight-marker");
+    fs::write(&marker, "reuse this worktree").unwrap();
+
+    let candidate = ProposeWorktreePatchArgs {
+        task_id: task_id.to_string(), patch_kind: "file_edits".into(),
+        summary: "Define the smoke message".into(), uv_spec: None, edits: Some(fix_edits()),
+    };
+    let other_server = fixture.server();
+    let (first, second) = tokio::join!(
+        server.handle_propose_patch(candidate.clone()),
+        other_server.handle_propose_patch(candidate),
+    );
+    let patch = match (first, second) {
+        (Ok(patch), Err(_)) | (Err(_), Ok(patch)) => patch,
+        results => panic!("exactly one server may register the patch: {results:?}"),
+    };
     assert!(patch.smoke_verified);
     assert_eq!(patch.worktree_branch, report.worktree_branch);
     assert!(marker.is_file());
@@ -273,7 +340,6 @@ async fn mcp_end_to_end_preflight_patch_approval_and_stale_block() {
     assert_eq!(fixture.task(task_id).await, completed);
     let node_id = completed.evidence_node_id.unwrap();
     assert!(!report.worktree_path.exists());
-    assert!(server.context.active_worktrees.lock().await.is_empty());
     assert!(git(&fixture.repo, &["branch", "--list", &report.worktree_branch]).await.is_empty());
     assert!(!fixture.sandbox.is_working_tree_dirty().await.unwrap());
     assert_eq!(fixture.sandbox.head_commit_sha().await.unwrap(), fixture.sha);
@@ -288,6 +354,9 @@ async fn mcp_end_to_end_preflight_patch_approval_and_stale_block() {
         })
         .unwrap();
     assert_eq!(snapshot.stale_count, 0);
+    assert_eq!(snapshot.fresh_evidence_count, 1);
+    assert_eq!(snapshot.stale_evidence_count, 0);
+    assert!(snapshot.metric_authority_note.is_none());
     assert!(snapshot.edges.iter().any(|edge| {
         edge.kind == EdgeKind::ProducedFrom && edge.from == artifact.id && edge.to == node_id
     }));
@@ -332,9 +401,13 @@ async fn mcp_end_to_end_preflight_patch_approval_and_stale_block() {
     assert!(!error.contains("0.25"));
 
     let stale_snapshot = server
-        .handle_get_dag_snapshot(GetDagSnapshotArgs { include_stale: Some(true) })
-        .await.unwrap();
+        .handle_get_dag_snapshot(GetDagSnapshotArgs::default())
+        .await
+        .unwrap();
     assert_eq!(stale_snapshot.stale_count, 1);
+    assert_eq!(stale_snapshot.fresh_evidence_count, 0);
+    assert_eq!(stale_snapshot.stale_evidence_count, 1);
+    assert!(stale_snapshot.metric_authority_note.is_some());
     let stale_node = stale_snapshot.nodes.iter().find(|node| node.id == node_id).unwrap();
     assert!(matches!(stale_node.freshness, Freshness::Stale { .. }));
     let NodeKind::Evidence { metrics_json: redacted_metrics, .. } = &stale_node.payload else {
@@ -359,12 +432,6 @@ async fn mcp_end_to_end_preflight_patch_approval_and_stale_block() {
         panic!("expected evidence payload");
     };
     assert_eq!(*raw_metrics, serde_json::json!({"alpha": 0.25, "smoke": "smoke passed"}).into());
-
-    let filtered = server
-        .handle_get_dag_snapshot(GetDagSnapshotArgs { include_stale: Some(false) })
-        .await.unwrap();
-    assert_eq!(filtered.stale_count, 1);
-    assert!(filtered.nodes.iter().all(|node| node.id != node_id));
 }
 
 #[tokio::test]
@@ -393,6 +460,5 @@ async fn mcp_rejection_and_failed_preset_clean_up_worktrees() {
     assert!(failed.error_message.unwrap().contains("invalid-number"));
     assert!(failed.evidence_node_id.is_none());
     assert!(!fixture.sandbox.task_worktree(failed_id).unwrap().0.exists());
-    assert!(server.context.active_worktrees.lock().await.is_empty());
     assert!(!fixture.sandbox.is_working_tree_dirty().await.unwrap());
 }

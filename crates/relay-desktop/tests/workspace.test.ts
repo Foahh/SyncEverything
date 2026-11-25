@@ -13,7 +13,7 @@ import {
 } from "../src/lib/relayApi";
 
 import i18n from "../src/i18n";
-import { extractCleanRunPreset, formatErrorMessage } from "../src/lib/formatError";
+import { formatErrorMessage } from "../src/lib/formatError";
 import { buildMcpSnippet } from "../src/lib/mcpConfig";
 
 const testSpec: TaskSpec_Deserialize = {
@@ -186,11 +186,74 @@ test("formatErrorMessage maps known backend errors, strips Error prefix, and fal
   expect(formatErrorMessage(null, tEn)).toBe(tEn("errors.generic"));
 });
 
-test("extractCleanRunPreset parses bare presets, legacy summaries, and empty strings", () => {
-  expect(extractCleanRunPreset("train")).toBe("train");
-  expect(extractCleanRunPreset("  train_grid  ")).toBe("train_grid");
-  expect(extractCleanRunPreset("Preflight passed. Approve to run train.")).toBe("train");
-  expect(extractCleanRunPreset("Preflight passed. Approve to run check")).toBe("check");
-  expect(extractCleanRunPreset("   ")).toBeNull();
-  expect(extractCleanRunPreset("")).toBeNull();
+test("preview Copilot reports live evidence authority after graph changes", async () => {
+  resetBrowserPreviewState();
+  const now = new Date().toISOString();
+  const evidence: GraphNode = {
+    id: "result",
+    label: "result",
+    device_origin: "test",
+    created_at: now,
+    updated_at: now,
+    freshness: { status: "stale", marked_at: now, caused_by: "new-commit", reason: "code changed" },
+    payload: {
+      kind: "evidence",
+      task_id: "task",
+      preset: "check",
+      metrics_json: { score: 42 },
+      log_blob_hash: "log",
+    },
+  };
+  await relayApi.upsertDagNode(evidence, []);
+  const dag = await relayApi.getDagSnapshot(false);
+  expect(dag.nodes).toEqual([]);
+  expect(dag.stale_evidence_count).toBe(1);
+
+  const { promise, resolve } = Promise.withResolvers<string>();
+  const unsubscribe = await relayApi.subscribeAgentChatEvents((event) => {
+    if (event.kind === "tool_finished" && event.trace?.output_preview)
+      resolve(event.trace.output_preview);
+  });
+  try {
+    await relayApi.sendChatMessage("Check outdated results");
+    expect(JSON.parse(await promise)).toMatchObject({
+      stale_count: 1,
+      fresh_evidence_count: 0,
+      stale_evidence_count: 1,
+      metric_authority_note: dag.metric_authority_note,
+    });
+  } finally {
+    unsubscribe();
+    await relayApi.clearChatMessages();
+    resetBrowserPreviewState();
+  }
+});
+
+test("model settings preserve provider-auto separately from tier defaults and mask short preview keys", async () => {
+  resetBrowserPreviewState();
+  const initial = await relayApi.getLlmSettings();
+  const settings = {
+    tier: initial.tier,
+    base_url: initial.base_url,
+    model: initial.model,
+    api_key_env: null,
+  };
+  const configured = await relayApi.saveLlmSettings({
+    ...settings,
+    reasoning_effort: "auto",
+    api_key: "tiny",
+  });
+  expect(configured.reasoning_effort).toBe("auto");
+  expect(configured.api_key_hint).toBe("••••••");
+  expect(configured.has_api_key).toBe(true);
+  const tierDefault = await relayApi.saveLlmSettings({ ...settings, reasoning_effort: null });
+  expect(tierDefault.reasoning_effort).toBeNull();
+  expect(tierDefault.api_key_hint).toBe(configured.api_key_hint);
+  const cleared = await relayApi.saveLlmSettings({
+    ...settings,
+    api_key: "",
+    api_key_env: "MODEL_KEY",
+  });
+  expect(cleared.has_api_key).toBe(false);
+  resetBrowserPreviewState();
 });

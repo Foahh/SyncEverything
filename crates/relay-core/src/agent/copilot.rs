@@ -2,7 +2,7 @@ use super::LlmClient;
 use crate::error::{RelayError, RelayResult};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 use specta::Type;
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -68,16 +68,20 @@ pub struct LlmToolCall {
 pub struct StreamedChatTurn {
     pub content: String,
     pub tool_calls: Vec<LlmToolCall>,
+    /// Provider fields needed to continue a tool turn. Kept out of display and persisted chat.
+    pub reasoning_fields: Map<String, Value>,
 }
+
+const REASONING_FIELDS: [&str; 2] = ["reasoning", "reasoning_content"];
 
 pub const COPILOT_SYSTEM_PROMPT: &str = concat!(
     "You are the built-in SyncEverything Agent inside the SyncEverything cross-device workbench. ",
     "Respond in the same language the user writes in (Chinese or English). ",
     "Hard rules:\n",
-    "1. Always call `get_dag_snapshot` before stating experiment metrics. NEVER cite or treat `stale` (Outdated) evidence metrics as valid for the current commit; explain why they are outdated and offer to re-run.\n",
+    "1. Treat `get_dag_snapshot` as the sole authoritative source (SSOT) for experiment metrics. Always call `get_dag_snapshot` before stating metrics. When `fresh_evidence_count == 0` or `metric_authority_note` is present, NEVER cite `stale` evidence metrics OR historical numbers from static repository text files, logs, or handoff notes as valid for current HEAD; explain why prior results are outdated and offer to re-run.\n",
     "2. Never run arbitrary shell commands. Only submit tasks matching presets declared in `<repo>/relay.toml` via `submit_task`.\n",
-    "3. Use `read_repo_file` and `git_diff` to inspect repository code before proposing a `code_diff` patch.\n",
-    "4. For a task_id on Host: follow `run_preflight_in_worktree` -> (if failed) `propose_worktree_patch` -> `approve_and_execute_task`.\n",
+    "3. For a task_id on Host: follow `run_preflight_in_worktree` -> inspect `stderr_tail` / `error_snippets` (and use `read_worktree_file` if more context is needed) -> `propose_worktree_patch` (`patch_kind: \"uv_spec\"` with `uv_spec` for missing dependencies, or `patch_kind: \"file_edits\"` with exact `edits: [{file_path, old_text, new_text}]`; omit/null `old_text` to overwrite or create an entire file) -> `approve_and_execute_task`.\n",
+    "4. Use `read_repo_file` and `git_diff` for read-only inspection of the main repository when needed, and `read_worktree_file` when inspecting a task's isolated worktree.\n",
     "5. If `approve_and_execute_task` returns `approval_required`, STOP immediately and ask the user to confirm using the inline approval card — never loop.\n",
     "6. Keep responses concise, structured, and grounded strictly in tool outputs."
 );
@@ -112,12 +116,11 @@ pub fn copilot_tool_definitions() -> Vec<Value> {
         ),
         tool_def(
             "get_dag_snapshot",
-            "Fetch the Decision-Evidence DAG snapshot with head_commit_sha, nodes, edges, stale_count, and explicit freshness flags. NEVER cite metrics from stale nodes.",
+            "Fetch the complete Decision-Evidence DAG snapshot (sole authoritative source for experiment metrics / SSOT) with head_commit_sha, nodes, edges, fresh_evidence_count, stale_evidence_count, metric_authority_note, and explicit freshness flags. Always returns redacted STALE nodes; NEVER cite metrics from stale nodes or static repository text files when fresh_evidence_count == 0.",
             json!({
                 "type": "object",
-                "properties": {
-                    "include_stale": { "type": "boolean", "default": true }
-                }
+                "properties": {},
+                "additionalProperties": false
             }),
         ),
         tool_def(
@@ -134,7 +137,7 @@ pub fn copilot_tool_definitions() -> Vec<Value> {
         ),
         tool_def(
             "run_preflight_in_worktree",
-            "Run the repository smoke preflight inside an isolated Git worktree for task_id without modifying the main working tree.",
+            "Run the repository smoke preflight inside an isolated Git worktree for task_id without modifying the main working tree. Returns stderr_tail, detected_missing_module, and error_snippets on failure.",
             json!({
                 "type": "object",
                 "properties": {
@@ -144,17 +147,44 @@ pub fn copilot_tool_definitions() -> Vec<Value> {
             }),
         ),
         tool_def(
+            "read_worktree_file",
+            "Read a UTF-8 file with line numbers inside the isolated Git worktree for task_id (read-only; blocks .git, .venv, .relay, .env*, and binary files).",
+            json!({
+                "type": "object",
+                "properties": {
+                    "task_id": { "type": "string" },
+                    "file_path": { "type": "string", "description": "Worktree-relative path, e.g. 'src/main.py' or 'uv.lock'" },
+                    "start_line": { "type": "integer", "minimum": 1 },
+                    "end_line": { "type": "integer", "minimum": 1 }
+                },
+                "required": ["task_id", "file_path"]
+            }),
+        ),
+        tool_def(
             "propose_worktree_patch",
             "After a failed preflight, apply a candidate fix inside the task's isolated Git worktree, re-run smoke check, and persist a PatchProposal.",
             json!({
                 "type": "object",
                 "properties": {
                     "task_id": { "type": "string" },
-                    "patch_kind": { "type": "string", "enum": ["uv_spec", "code_diff"] },
+                    "patch_kind": { "type": "string", "enum": ["uv_spec", "file_edits"] },
                     "summary": { "type": "string" },
-                    "content": { "type": "string", "description": "PEP-508 package spec for uv_spec or unified git diff for code_diff" }
+                    "uv_spec": { "type": "string", "description": "Required when patch_kind='uv_spec': PEP-508 package spec or local wheel path" },
+                    "edits": {
+                        "type": "array",
+                        "description": "Required when patch_kind='file_edits': ordered exact search-and-replace or full-file edits",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "file_path": { "type": "string" },
+                                "old_text": { "type": ["string", "null"], "description": "Exact unique snippet to replace, or null/omitted to overwrite or create the entire file" },
+                                "new_text": { "type": "string" }
+                            },
+                            "required": ["file_path", "new_text"]
+                        }
+                    }
                 },
-                "required": ["task_id", "patch_kind", "summary", "content"]
+                "required": ["task_id", "patch_kind", "summary"]
             }),
         ),
         tool_def(
@@ -264,29 +294,48 @@ impl LlmClient {
             "stream": true,
             "temperature": 0.1,
         });
+        if let Some(effort) = &self.reasoning_effort {
+            body["reasoning_effort"] = json!(effort);
+        }
         if !tools.is_empty() {
             body["tools"] = Value::Array(tools.to_vec());
             body["tool_choice"] = json!("auto");
         }
 
-        let mut request = self.client.post(self.endpoint.clone()).json(&body);
-        if let Some(key) = &self.api_key {
-            request = request.bearer_auth(key);
-        }
-
-        let mut response = request.send().await.map_err(super::llm_error)?;
-        if !response.status().is_success() {
-            let status = response.status();
-            let err_body = response.text().await.unwrap_or_default();
-            // Some OpenAI-compatible gateways reject `stream: true` when `tools` are supplied; retry once non-streaming.
-            if status.as_u16() == 400 && !tools.is_empty() {
-                return self
-                    .non_streaming_chat_with_tools(messages, tools, cancel, &mut on_delta)
-                    .await;
+        let mut response = {
+            let mut attempt = 0;
+            loop {
+                if cancel.load(Ordering::Relaxed) {
+                    return Err(RelayError::Llm("cancelled".into()));
+                }
+                let mut request = self.client.post(self.endpoint.clone()).json(&body);
+                if let Some(key) = &self.api_key {
+                    request = request.bearer_auth(key);
+                }
+                let resp = request.send().await.map_err(super::llm_error)?;
+                if resp.status().is_success() {
+                    break resp;
+                }
+                let status = resp.status();
+                let err_body = resp.text().await.unwrap_or_default();
+                if attempt == 0 && self.should_retry_ollama(status, &err_body) {
+                    tracing::warn!(
+                        model = %self.model,
+                        "Retrying streaming chat once after Ollama HTTP 500 XML parse error"
+                    );
+                    attempt += 1;
+                    continue;
+                }
+                // Some OpenAI-compatible gateways reject `stream: true` when `tools` are supplied; retry once non-streaming.
+                if status.as_u16() == 400 && !tools.is_empty() {
+                    return self
+                        .non_streaming_chat_with_tools(messages, tools, cancel, &mut on_delta)
+                        .await;
+                }
+                let detail = self.provider_error_detail(&err_body);
+                return Err(RelayError::Llm(format!("HTTP {status}: {detail}")));
             }
-            let detail: String = err_body.chars().take(280).collect();
-            return Err(RelayError::Llm(format!("HTTP {status}: {detail}")));
-        }
+        };
 
         let is_sse = response
             .headers()
@@ -300,23 +349,43 @@ impl LlmClient {
         }
 
         let mut content = String::new();
+        let mut reasoning_fields = Map::new();
         let mut partials: BTreeMap<usize, PartialToolCall> = BTreeMap::new();
         let mut buffer = Vec::new();
+        let mut finished = false;
 
-        while let Some(bytes) = response.chunk().await.map_err(super::llm_error)? {
+        'stream: while let Some(bytes) = response.chunk().await.map_err(super::llm_error)? {
             if cancel.load(Ordering::Relaxed) {
                 return Err(RelayError::Llm("cancelled".into()));
             }
             for part in bytes.split_inclusive(|&byte| byte == b'\n') {
                 buffer.extend_from_slice(part);
                 if part.ends_with(b"\n") {
-                    process_sse_line(&String::from_utf8_lossy(&buffer), &mut content, &mut partials, &mut on_delta);
+                    finished = process_sse_line(
+                        &String::from_utf8_lossy(&buffer),
+                        &mut content,
+                        &mut reasoning_fields,
+                        &mut partials,
+                        &mut on_delta,
+                    )?;
                     buffer.clear();
+                    if finished {
+                        break 'stream;
+                    }
                 }
             }
         }
-        if !buffer.is_empty() {
-            process_sse_line(&String::from_utf8_lossy(&buffer), &mut content, &mut partials, &mut on_delta);
+        if !finished && !buffer.is_empty() {
+            finished = process_sse_line(
+                &String::from_utf8_lossy(&buffer),
+                &mut content,
+                &mut reasoning_fields,
+                &mut partials,
+                &mut on_delta,
+            )?;
+        }
+        if !finished && content.is_empty() && partials.is_empty() {
+            return Err(RelayError::Llm("completion stream ended prematurely".into()));
         }
 
         let tool_calls = partials
@@ -341,6 +410,7 @@ impl LlmClient {
         Ok(StreamedChatTurn {
             content,
             tool_calls,
+            reasoning_fields,
         })
     }
 
@@ -363,52 +433,91 @@ impl LlmClient {
             "stream": false,
             "temperature": 0.1,
         });
+        if let Some(effort) = &self.reasoning_effort {
+            body["reasoning_effort"] = json!(effort);
+        }
         if !tools.is_empty() {
             body["tools"] = Value::Array(tools.to_vec());
             body["tool_choice"] = json!("auto");
         }
-        let mut request = self.client.post(self.endpoint.clone()).json(&body);
-        if let Some(key) = &self.api_key {
-            request = request.bearer_auth(key);
-        }
-        let response = request.send().await.map_err(super::llm_error)?;
-        if !response.status().is_success() {
+        for attempt in 0..2 {
+            if cancel.load(Ordering::Relaxed) {
+                return Err(RelayError::Llm("cancelled".into()));
+            }
+            let mut request = self.client.post(self.endpoint.clone()).json(&body);
+            if let Some(key) = &self.api_key {
+                request = request.bearer_auth(key);
+            }
+            let response = request.send().await.map_err(super::llm_error)?;
+            if response.status().is_success() {
+                let payload: Value = response.json().await.map_err(super::llm_error)?;
+                return parse_non_streaming_turn(&payload, on_delta);
+            }
             let status = response.status();
             let err_body = response.text().await.unwrap_or_default();
-            let detail: String = err_body.chars().take(280).collect();
+            if attempt == 0 && self.should_retry_ollama(status, &err_body) {
+                tracing::warn!(
+                    model = %self.model,
+                    "Retrying non-streaming chat once after Ollama HTTP 500 XML parse error"
+                );
+                continue;
+            }
+            let detail = self.provider_error_detail(&err_body);
             return Err(RelayError::Llm(format!("HTTP {status}: {detail}")));
         }
-        let payload: Value = response.json().await.map_err(super::llm_error)?;
-        parse_non_streaming_turn(&payload, on_delta)
+        unreachable!("non_streaming_chat_with_tools retry loop always returns on attempt 1")
     }
 }
 
 fn process_sse_line<F>(
     line: &str,
     content: &mut String,
+    reasoning_fields: &mut Map<String, Value>,
     partials: &mut BTreeMap<usize, PartialToolCall>,
     on_delta: &mut F,
-) where
+) -> RelayResult<bool>
+where
     F: FnMut(&str),
 {
     let Some(data) = line.strip_prefix("data:") else {
-        return;
+        return Ok(false);
     };
     let data = data.trim();
-    if data.is_empty() || data == "[DONE]" {
-        return;
+    if data == "[DONE]" {
+        return Ok(true);
+    }
+    if data.is_empty() {
+        return Ok(false);
     }
     let Ok(chunk) = serde_json::from_str::<Value>(data) else {
-        return;
+        tracing::debug!("Skipping non-JSON SSE completion frame");
+        return Ok(false);
     };
-    let Some(delta) = chunk
+    if chunk.get("error").is_some_and(|error| !error.is_null()) {
+        return Err(RelayError::Llm("provider reported an error during streaming".into()));
+    }
+    let Some(choice) = chunk
         .get("choices")
         .and_then(Value::as_array)
         .and_then(|arr| arr.first())
-        .and_then(|choice| choice.get("delta"))
     else {
-        return;
+        return Ok(false);
     };
+    check_completion_finish(choice)?;
+    let finished = choice.get("finish_reason").and_then(Value::as_str).is_some();
+    let Some(delta) = choice.get("delta") else {
+        return Ok(finished);
+    };
+
+    for field in REASONING_FIELDS {
+        if let Some(fragment) = delta.get(field).and_then(Value::as_str)
+            && let Value::String(text) = reasoning_fields
+                .entry(field)
+                .or_insert_with(|| Value::String(String::new()))
+        {
+            text.push_str(fragment);
+        }
+    }
 
     if let Some(text) = delta.get("content").and_then(Value::as_str)
         && !text.is_empty()
@@ -440,18 +549,40 @@ fn process_sse_line<F>(
             }
         }
     }
+    Ok(finished)
+}
+
+fn check_completion_finish(choice: &Value) -> RelayResult<()> {
+    if let Some(reason @ ("length" | "content_filter")) =
+        choice.get("finish_reason").and_then(Value::as_str)
+    {
+        return Err(RelayError::Llm(format!(
+            "completion stopped before finishing: {reason}"
+        )));
+    }
+    Ok(())
 }
 
 fn parse_non_streaming_turn<F>(payload: &Value, on_delta: &mut F) -> RelayResult<StreamedChatTurn>
 where
     F: FnMut(&str),
 {
-    let message = payload
+    let choice = payload
         .get("choices")
         .and_then(Value::as_array)
         .and_then(|arr| arr.first())
-        .and_then(|choice| choice.get("message"))
+        .ok_or_else(|| RelayError::Llm("completion response missing choices[0]".into()))?;
+    check_completion_finish(choice)?;
+    let message = choice
+        .get("message")
         .ok_or_else(|| RelayError::Llm("completion response missing choices[0].message".into()))?;
+    let reasoning_fields = REASONING_FIELDS
+        .into_iter()
+        .filter_map(|field| {
+            let value = message.get(field)?.as_str()?;
+            Some((field.to_owned(), Value::String(value.to_owned())))
+        })
+        .collect();
 
     let content = message
         .get("content")
@@ -495,5 +626,43 @@ where
     Ok(StreamedChatTurn {
         content,
         tool_calls,
+        reasoning_fields,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rejects_incomplete_tool_responses() {
+        let payload = json!({
+            "choices": [{"finish_reason": "length", "message": {"content": "partial"}}]
+        });
+        assert!(parse_non_streaming_turn(&payload, &mut |_| unreachable!()).is_err());
+
+        let error = process_sse_line(
+            r#"data: {"error":{"message":"model generation stopped"}}"#,
+            &mut String::new(),
+            &mut Map::new(),
+            &mut BTreeMap::new(),
+            &mut |_| unreachable!(),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("provider reported an error during streaming"));
+
+        // Non-JSON keepalive frames should be skipped without aborting the stream.
+        let mut content = String::new();
+        assert!(
+            !process_sse_line(
+                "data: keepalive",
+                &mut content,
+                &mut Map::new(),
+                &mut BTreeMap::new(),
+                &mut |_| unreachable!(),
+            )
+            .unwrap()
+        );
+        assert!(content.is_empty());
+    }
 }

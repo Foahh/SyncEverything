@@ -5,8 +5,10 @@ import json
 import sys
 import tempfile
 import unittest
+import urllib.error
+import urllib.request
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import run_baseline_comparison as baseline
 import run_context_ablation as ablation
@@ -65,7 +67,9 @@ class AblationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp, \
              patch.object(ablation, "build_all_snapshots", return_value=snapshots) as build, \
              patch.object(ablation, "find_daemon_binary", return_value=Path("daemon")), \
-             patch.object(ablation, "resolve_model_specs", side_effect=[models, models[:1]]), \
+             patch.object(ablation, "resolve_model_specs", side_effect=[
+                 models, [{**models[0], "reasoning_effort": "none"}], models[:1]
+             ]), \
              patch.object(ablation, "call_openai_chat", side_effect=chat), \
              contextlib.redirect_stdout(io.StringIO()):
             args = ["ablation", "--out", tmp]
@@ -75,6 +79,8 @@ class AblationTests(unittest.TestCase):
             before = [json.loads(line) for line in runs.read_text().splitlines()]
             self.assertIsNone(before[0]["stale_hallucination"])
             with patch.object(sys, "argv", [*args, "--retry-errors", "--models", "first"]):
+                with self.assertRaisesRegex(ValueError, "configuration changed"):
+                    ablation.main()
                 self.assertEqual(ablation.main(), 0)
             after = [json.loads(line) for line in runs.read_text().splitlines()]
             self.assertEqual(len(after), 36)
@@ -87,3 +93,23 @@ class AblationTests(unittest.TestCase):
             self.assertTrue(all(scaling[r["snapshot_id"], r["strategy"]] == r["context_bundle_hash"] for r in after))
             matrix = json.loads(Path(tmp, "context_ablation_summary.json").read_text())["matrix"]
             self.assertEqual(len(matrix), 6)
+
+    def test_default_local_ablation_models_use_no_think_and_xml_500_retries_once(self):
+        specs = ablation.resolve_model_specs(["qwen3.5:4b", "qwen3.5:9b"])
+        self.assertEqual([s["reasoning_effort"] for s in specs], ["none", "none"])
+
+        xml_err = urllib.error.HTTPError(
+            "http://127.0.0.1:11434/v1/chat/completions",
+            500,
+            "Internal Server Error",
+            {},
+            io.BytesIO(b"XML syntax error on line 14: unexpected EOF"),
+        )
+        ok_resp = MagicMock()
+        ok_resp.__enter__.return_value = ok_resp
+        ok_resp.read.return_value = b'{"choices":[{"message":{"content":"recovered"}}]}'
+
+        with patch.object(urllib.request, "urlopen", side_effect=[xml_err, ok_resp]) as urlopen:
+            data, _ = baseline.call_openai_chat("http://127.0.0.1:11434/v1", "qwen3.5:9b", None, [], [], 30)
+        self.assertEqual(data["choices"][0]["message"]["content"], "recovered")
+        self.assertEqual(urlopen.call_count, 2)

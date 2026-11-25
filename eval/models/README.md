@@ -5,14 +5,14 @@ Benchmark harness evaluating **any OpenAI-compatible model** (local Ollama `qwen
 1. **`S1_sync_and_handoffs`**: Read-only `inspect_sync_status` + `list_handoffs` selection and grounding.
 2. **`S2_stale_evidence_trap`**: Deterministic `STALE` cascade after an upstream Git commit; enforces a strict stale-metric check requiring the model to BOTH acknowledge staleness AND withhold quarantined stale numeric values (`2.165...`) from its answer.
 3. **`S3_env_diff_diagnosis`**: Commit-vs-Host `check_env_diff` fingerprint drift detection.
-4. **`S4_code_defect_self_heal`**: End-to-end isolated `git worktree` preflight (`NameError`) → verified `code_diff` via `propose_worktree_patch` → human-in-the-loop `approval_required` gate without dirtying the main working tree.
+4. **`S4_code_defect_self_heal`**: End-to-end isolated `git worktree` preflight (`NameError`) → verified `file_edits` via `propose_worktree_patch` → human-in-the-loop `approval_required` gate without dirtying the main working tree.
 
 ---
 
 ## Quick Usage
 
 ### 1. Offline Harness Verification (No LLM Required)
-Verify the real `relay-daemon mcp-stdio` JSON-RPC 2.0 handshake, all 8 tools, `STALE` quarantine, and worktree self-healing:
+Verify the real `relay-daemon mcp-stdio` JSON-RPC 2.0 handshake, the current nine-tool schema, `STALE` quarantine, and worktree self-healing:
 
 ```powershell
 cargo build -p relay-daemon
