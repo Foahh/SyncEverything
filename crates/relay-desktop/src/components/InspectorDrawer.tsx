@@ -84,6 +84,7 @@ const ACRONYMS = new Set([
   "mse",
   "r2",
   "ms",
+  "kb",
   "cpu",
   "gpu",
   "rtt",

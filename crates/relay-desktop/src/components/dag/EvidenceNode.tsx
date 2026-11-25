@@ -12,6 +12,7 @@ const ACRONYMS = new Set([
   "mse",
   "r2",
   "ms",
+  "kb",
   "cpu",
   "gpu",
   "rtt",
@@ -19,6 +20,20 @@ const ACRONYMS = new Set([
   "cuda",
   "mps",
 ]);
+
+const HEADLINE_METRIC_PRIORITY = [
+  "val_acc",
+  "param_count",
+  "best_mae",
+  "mae",
+  "rmse",
+  "val_loss",
+  "smoke_loss",
+  "model_kb",
+  "infer_ms",
+  "device",
+  "elapsed_ms",
+] as const;
 
 function formatMetricLabel(key: string): string {
   return key
@@ -35,12 +50,26 @@ function extractHeadlineMetrics(metrics: JsonValue): Array<[string, string]> {
   if (!metrics || typeof metrics !== "object" || Array.isArray(metrics)) {
     return [];
   }
-  return Object.entries(metrics)
-    .slice(0, 2)
-    .map(([key, val]) => [
-      formatMetricLabel(key),
-      typeof val === "number" ? String(val) : JSON.stringify(val),
-    ]);
+  const selected: Array<[string, JsonValue]> = [];
+  const used = new Set<string>();
+  for (const key of HEADLINE_METRIC_PRIORITY) {
+    if (key in metrics && metrics[key] !== undefined) {
+      selected.push([key, metrics[key]]);
+      used.add(key);
+      if (selected.length === 2) break;
+    }
+  }
+  if (selected.length < 2) {
+    for (const [key, val] of Object.entries(metrics)) {
+      if (used.has(key) || val === undefined) continue;
+      selected.push([key, val]);
+      if (selected.length === 2) break;
+    }
+  }
+  return selected.map(([key, val]) => [
+    formatMetricLabel(key),
+    typeof val === "number" ? String(val) : JSON.stringify(val),
+  ]);
 }
 
 function freshnessBadgeStyle(status: GraphNode["freshness"]["status"]): {
