@@ -176,7 +176,8 @@
   text-box: trim-both cap alphabetic;
 }
 
-.relay-text-trim:lang(zh) {
+.relay-text-trim:lang(zh),
+.relay-text-trim.truncate {
   text-box: normal;
 }
 

@@ -1,6 +1,7 @@
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { Popover, PopoverContent, PopoverTitle, PopoverTrigger } from "@/components/ui/popover";
 import { cn } from "@/lib/utils";
 import {
@@ -12,10 +13,9 @@ import {
   FolderGit2,
   FolderOpen,
   GitBranch,
-  SlidersHorizontal,
   X,
 } from "lucide-react";
-import { useMemo, useState } from "react";
+import { useMemo, useState, type FormEvent } from "react";
 import { useTranslation } from "react-i18next";
 import type { RecentWorkspaceEntry_Serialize, WorkspaceInfo_Serialize } from "../bindings";
 import { formatErrorMessage } from "../lib/formatError";
@@ -36,7 +36,6 @@ interface WorkspaceSwitcherProps {
   onSwitchWorkspace: (repoPath: string) => Promise<void>;
   onRemoveRecentWorkspace: (repoPath: string) => Promise<void>;
   onInitManifest: () => Promise<void>;
-  onOpenRepoSettings: () => void;
 }
 
 export function WorkspaceSwitcher({
@@ -48,11 +47,13 @@ export function WorkspaceSwitcher({
   onSwitchWorkspace,
   onRemoveRecentWorkspace,
   onInitManifest,
-  onOpenRepoSettings,
 }: WorkspaceSwitcherProps) {
   const { t } = useTranslation();
+  const isDesktop = isTauriRuntime();
   const [open, setOpen] = useState(false);
   const [isPickingFolder, setIsPickingFolder] = useState(false);
+  const [manualPath, setManualPath] = useState("");
+  const [showManualInput, setShowManualInput] = useState(!isDesktop);
   const [actionError, setActionError] = useState<string | null>(null);
 
   const entries = useMemo(
@@ -70,6 +71,7 @@ export function WorkspaceSwitcher({
     setOpen(nextOpen);
     if (nextOpen) {
       setActionError(null);
+      setShowManualInput(!isDesktop);
     }
   };
 
@@ -77,10 +79,18 @@ export function WorkspaceSwitcher({
     setActionError(null);
     try {
       await onSwitchWorkspace(repoPath);
+      setManualPath("");
       setOpen(false);
     } catch (error) {
       setActionError(formatErrorMessage(error, t, t("workspaceSwitcher.switchFailed")));
     }
+  };
+
+  const handleManualSubmit = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const trimmed = manualPath.trim();
+    if (!trimmed || isSwitching) return;
+    await handleSelectWorkspace(trimmed);
   };
 
   const handleRemoveEntry = async (repoPath: string) => {
@@ -94,11 +104,6 @@ export function WorkspaceSwitcher({
 
   const handleOpenFolder = async () => {
     setActionError(null);
-    if (!isTauriRuntime()) {
-      setOpen(false);
-      onOpenRepoSettings();
-      return;
-    }
     setIsPickingFolder(true);
     try {
       const selected = await relayApi.pickRepositoryFolder();
@@ -127,41 +132,45 @@ export function WorkspaceSwitcher({
     <Popover open={open} onOpenChange={handleOpenChange}>
       <PopoverTrigger
         render={
-          <Button
-            variant="ghost"
-            size="default"
+          <button
+            type="button"
             title={workspace?.repo_root ?? t("workspaceSwitcher.triggerLabel")}
             aria-label={t("workspaceSwitcher.triggerLabel")}
-            className="min-w-0 max-w-[340px] gap-1.5 px-2"
+            className="flex min-h-10 w-full min-w-0 cursor-pointer items-center justify-between gap-2 rounded-lg border border-sidebar-border bg-background/80 px-2.5 py-1.5 text-left shadow-2xs transition-colors outline-none hover:bg-background focus-visible:ring-2 focus-visible:ring-ring/40"
           />
         }
       >
-        <GitBranch data-icon="inline-start" className="text-muted-foreground" />
-        <span
-          lang={activeName ? "en" : undefined}
-          className="truncate text-xs leading-snug font-medium text-foreground"
-        >
-          {activeName ?? t("topbar.noRepo")}
-        </span>
-        {activePm && (
-          <Badge
-            variant="secondary"
-            className="font-mono-tech h-4 shrink-0 px-1.5 text-[10px] leading-none"
-          >
-            <span lang="en" className="relay-text-trim leading-none">
-              {activePm}
+        <div className="flex min-w-0 flex-1 items-center gap-2">
+          <GitBranch
+            className={cn(
+              "size-3.5 shrink-0",
+              hasActiveRepo ? "text-primary" : "text-muted-foreground",
+            )}
+            aria-hidden="true"
+          />
+          <div className="flex min-w-0 flex-1 flex-col gap-0.5">
+            <span
+              lang={activeName ? "en" : undefined}
+              className={cn(
+                "truncate text-[13px] leading-snug font-medium",
+                hasActiveRepo ? "text-foreground" : "text-muted-foreground",
+              )}
+            >
+              {activeName ?? t("topbar.noRepo")}
             </span>
-          </Badge>
-        )}
-        {headCommitSha && (
-          <span
-            lang="en"
-            className="font-mono-tech relay-text-trim hidden rounded-sm bg-muted px-1.5 py-1 text-[11px] leading-none text-muted-foreground sm:inline-flex sm:items-center"
-          >
-            {headCommitSha.slice(0, 7)}
-          </span>
-        )}
-        <ChevronsUpDown data-icon="inline-end" className="text-muted-foreground" />
+            {hasActiveRepo && (activePm || headCommitSha) && (
+              <span
+                lang="en"
+                className="font-mono-tech truncate text-[11px] leading-snug text-muted-foreground"
+              >
+                {[activePm, headCommitSha ? headCommitSha.slice(0, 7) : null]
+                  .filter(Boolean)
+                  .join(" · ")}
+              </span>
+            )}
+          </div>
+        </div>
+        <ChevronsUpDown className="size-3.5 shrink-0 text-muted-foreground" aria-hidden="true" />
       </PopoverTrigger>
 
       <PopoverContent
@@ -169,10 +178,12 @@ export function WorkspaceSwitcher({
         side="bottom"
         sideOffset={6}
         collisionPadding={12}
-        className="w-[356px] max-w-[calc(100vw-2rem)] overflow-hidden"
+        className="w-[340px] max-w-[calc(100vw-2rem)] overflow-hidden p-0"
       >
         <div className="flex items-center justify-between gap-2 border-b border-border px-3 py-2">
-          <PopoverTitle>{t("workspaceSwitcher.panelTitle")}</PopoverTitle>
+          <PopoverTitle className="text-xs font-medium">
+            {t("workspaceSwitcher.panelTitle")}
+          </PopoverTitle>
           <span className="font-mono-tech text-[11px] text-muted-foreground">
             {t("workspaceSwitcher.recentCount", {
               count: entries.length,
@@ -196,25 +207,23 @@ export function WorkspaceSwitcher({
           </div>
         )}
 
-        <div className="flex max-h-72 flex-col gap-1 overflow-y-auto p-1.5">
+        <div className="flex max-h-64 flex-col gap-1 overflow-y-auto p-1.5">
           {entries.length === 0 ? (
-            <div className="flex flex-col items-center justify-center rounded-lg border border-dashed border-border px-3 py-5 text-center">
-              <div className="text-xs text-muted-foreground">
-                {t("workspaceSwitcher.emptyTitle")}
-              </div>
+            <div className="rounded-md px-3 py-4 text-center text-xs text-muted-foreground">
+              {t("workspaceSwitcher.emptyTitle")}
             </div>
           ) : (
             entries.map((entry) => {
               const isActive = isActiveWorkspacePath(entry.path, workspace?.repo_root);
               const isMissing = !entry.exists;
               const displayName = entry.name || entry.repo_id;
-              const truncatedPath = truncateWorkspacePath(entry.path, 42);
+              const truncatedPath = truncateWorkspacePath(entry.path, 40);
 
               return (
                 <div
                   key={entry.path}
                   className={cn(
-                    "group flex items-center gap-1 rounded-lg border px-1.5 py-1 transition-colors",
+                    "group flex items-center gap-1 rounded-md border px-1.5 py-1 transition-colors",
                     isActive
                       ? "border-primary/30 bg-primary/6"
                       : isMissing
@@ -227,7 +236,7 @@ export function WorkspaceSwitcher({
                     disabled={isMissing || isSwitching}
                     onClick={() => void handleSelectWorkspace(entry.path)}
                     title={isMissing ? t("workspaceSwitcher.missingHint") : entry.path}
-                    className="flex min-w-0 flex-1 cursor-pointer items-start gap-2 rounded-md px-1 py-1 text-left outline-none focus-visible:ring-2 focus-visible:ring-ring/40 disabled:cursor-not-allowed disabled:opacity-65"
+                    className="flex min-w-0 flex-1 cursor-pointer items-start gap-2 rounded-sm px-1 py-1 text-left outline-none focus-visible:ring-2 focus-visible:ring-ring/40 disabled:cursor-not-allowed disabled:opacity-65"
                   >
                     <span
                       aria-hidden="true"
@@ -288,11 +297,6 @@ export function WorkspaceSwitcher({
                       >
                         {truncatedPath}
                       </span>
-                      {isMissing && (
-                        <span className="text-[10.5px] leading-snug text-muted-foreground">
-                          {t("workspaceSwitcher.missingHint")}
-                        </span>
-                      )}
                     </div>
                   </button>
 
@@ -313,17 +317,17 @@ export function WorkspaceSwitcher({
           )}
         </div>
 
-        <div className="flex flex-col gap-1.5 border-t border-border bg-muted/30 p-2">
+        <div className="flex flex-col gap-2 border-t border-border bg-muted/30 p-2">
           {needsManifest && (
             <Button
               type="button"
               variant="default"
-              size="default"
+              size="sm"
               disabled={isInitializingManifest}
               onClick={() => void handleInitManifest()}
               className="w-full justify-center"
             >
-              <FilePlus2 data-icon="inline-start" />
+              <FilePlus2 data-icon="inline-start" aria-hidden="true" />
               <span className="relay-text-trim leading-none">
                 {isInitializingManifest
                   ? t("workspaceSwitcher.initializingManifest")
@@ -332,35 +336,61 @@ export function WorkspaceSwitcher({
             </Button>
           )}
 
-          <div className="flex items-center gap-1.5">
-            <Button
-              type="button"
-              variant="outline"
-              size="default"
-              disabled={isPickingFolder || isSwitching}
-              onClick={() => void handleOpenFolder()}
-              className="flex-1 justify-start"
-            >
-              <FolderOpen data-icon="inline-start" />
-              <span className="relay-text-trim leading-none">
-                {isSwitching ? t("workspaceSwitcher.switching") : t("workspaceSwitcher.openFolder")}
-              </span>
-            </Button>
+          {isDesktop && (
+            <div className="flex items-center gap-1.5">
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                disabled={isPickingFolder || isSwitching}
+                onClick={() => void handleOpenFolder()}
+                className="flex-1 justify-start"
+              >
+                <FolderOpen data-icon="inline-start" aria-hidden="true" />
+                <span className="relay-text-trim leading-none">
+                  {isSwitching
+                    ? t("workspaceSwitcher.switching")
+                    : t("workspaceSwitcher.openFolder")}
+                </span>
+              </Button>
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                onClick={() => setShowManualInput((prev) => !prev)}
+                className="text-muted-foreground"
+              >
+                <span className="relay-text-trim leading-none">
+                  {t("workspaceSwitcher.enterPathToggle")}
+                </span>
+              </Button>
+            </div>
+          )}
 
-            <Button
-              type="button"
-              variant="ghost"
-              size="icon"
-              aria-label={t("workspaceSwitcher.repoSettings")}
-              title={t("workspaceSwitcher.repoSettings")}
-              onClick={() => {
-                setOpen(false);
-                onOpenRepoSettings();
-              }}
-            >
-              <SlidersHorizontal />
-            </Button>
-          </div>
+          {showManualInput && (
+            <form onSubmit={(event) => void handleManualSubmit(event)} className="flex gap-1.5">
+              <Input
+                value={manualPath}
+                onChange={(event) => setManualPath(event.target.value)}
+                placeholder={t("modals.workspace.repoPathPlaceholder")}
+                aria-label={t("modals.workspace.repoPathLabel")}
+                autoCorrect="off"
+                autoCapitalize="none"
+                spellCheck={false}
+                className="font-mono-tech h-7 flex-1 text-[11px]"
+              />
+              <Button
+                type="submit"
+                size="sm"
+                disabled={!manualPath.trim() || isSwitching}
+                className="h-7 shrink-0 px-2.5"
+              >
+                <span className="relay-text-trim leading-none">
+                  {t("workspaceSwitcher.openBtn")}
+                </span>
+              </Button>
+            </form>
+          )}
         </div>
       </PopoverContent>
     </Popover>

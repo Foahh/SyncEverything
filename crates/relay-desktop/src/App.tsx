@@ -1,21 +1,20 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import type { GraphNode, TaskRecord_Serialize } from "./bindings";
+import { AppSidebar, type AppNavView } from "./components/AppSidebar";
 import { DagCanvas } from "./components/DagCanvas";
+import { DevicesView } from "./components/DevicesView";
 import type { InspectorMode } from "./components/InspectorDrawer";
 import { RightWorkbenchRail, type RightRailTab } from "./components/RightWorkbenchRail";
+import { SettingsView, type SettingsSection } from "./components/SettingsView";
 import { TaskWorkbench, type TaskFilter } from "./components/TaskWorkbench";
-import { TopTelemetryBar, type WorkspaceView } from "./components/TopTelemetryBar";
+import { WorkspaceHeader } from "./components/WorkspaceHeader";
+import { WorkspaceWelcome } from "./components/WorkspaceWelcome";
 import {
   DispatchTaskModal,
   type DispatchTaskFormValues,
 } from "./components/modals/DispatchTaskModal";
-import { PairDeviceModal } from "./components/modals/PairDeviceModal";
 import { RecordDecisionModal } from "./components/modals/RecordDecisionModal";
-import {
-  WorkspaceSettingsModal,
-  type SettingsTab,
-} from "./components/modals/WorkspaceSettingsModal";
 import { useCopilotChat } from "./hooks/useCopilotChat";
 import { useRelayTheme } from "./hooks/useRelayTheme";
 import { useTaskLogStream } from "./hooks/useTaskLogStream";
@@ -28,12 +27,9 @@ import {
   useRecentWorkspaces,
   useRelayEventSync,
   useRemoveRecentWorkspace,
-  useResetPreviewDemo,
   useResolvePatchApproval,
   useRuntimeStatus,
-  useSimulateArtifactUpdate,
   useSubmitTask,
-  useSwitchRuntimeMode,
   useSwitchWorkspace,
   useTaskLog,
   useTasks,
@@ -58,11 +54,13 @@ export default function App() {
   const { t } = useTranslation();
   const { theme, toggleTheme } = useRelayTheme();
 
+  const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [activeView, setActiveView] = useState<AppNavView>("tasks");
+  const [settingsSection, setSettingsSection] = useState<SettingsSection>("llm");
   const [includeStale, setIncludeStale] = useState(true);
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
-  const [rightRailOpen, setRightRailOpen] = useState(true);
-  const [activeView, setActiveView] = useState<WorkspaceView>("tasks");
+  const [rightRailOpen, setRightRailOpen] = useState(false);
   const [filter, setFilter] = useState<TaskFilter>("all");
   const [dispatchHead, setDispatchHead] = useState<string | null>(null);
   const [seed, setSeed] = useState<TaskRecord_Serialize | null>(null);
@@ -71,10 +69,6 @@ export default function App() {
   const [activeApprovalTaskId, setActiveApprovalTaskId] = useState<string | null>(null);
   const [decisionModalOpen, setDecisionModalOpen] = useState(false);
   const [taskModalOpen, setTaskModalOpen] = useState(false);
-  const [pairModalOpen, setPairModalOpen] = useState(false);
-  const [settingsModalOpen, setSettingsModalOpen] = useState(false);
-  const [settingsTab, setSettingsTab] = useState<SettingsTab>("repo");
-  const [settingsNotice, setSettingsNotice] = useState<string | null>(null);
 
   const { data: status } = useRuntimeStatus();
   const { data: workspace } = useWorkspaceInfo();
@@ -86,16 +80,30 @@ export default function App() {
   const copilot = useCopilotChat();
   const { logsByTask, clearTaskLogs } = useTaskLogStream();
 
-  const switchMode = useSwitchRuntimeMode();
   const switchWorkspace = useSwitchWorkspace();
   const removeRecentWorkspace = useRemoveRecentWorkspace();
   const submitTask = useSubmitTask();
   const cancelTask = useCancelTask();
   const resolveApproval = useResolvePatchApproval();
-  const simulateEdit = useSimulateArtifactUpdate();
   const upsertNode = useUpsertDagNode();
-  const resetDemo = useResetPreviewDemo();
   const initManifest = useInitWorkspaceManifest();
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "l") {
+        event.preventDefault();
+        setRightRailOpen((open) => {
+          if (!open) {
+            setRightRailTab("agent");
+            return true;
+          }
+          return false;
+        });
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, []);
 
   const selectedNode: GraphNode | null = useMemo(() => {
     if (!selectedNodeId || !dag) return null;
@@ -168,6 +176,9 @@ export default function App() {
     [tasks, filter],
   );
 
+  const hasRepo = Boolean(workspace?.repo_root);
+  const repoName = hasRepo ? workspace?.name || workspace?.repo_id || null : null;
+
   const handleSelectNode = (nodeId: string | null) => {
     setSelectedNodeId(nodeId);
     if (nodeId) {
@@ -196,24 +207,13 @@ export default function App() {
     cancelTask.mutate(taskId);
   };
 
-  const handleToggleCopilot = () => {
-    if (rightRailOpen && rightRailTab === "agent") {
-      setRightRailOpen(false);
-    } else {
-      setRightRailTab("agent");
-      setRightRailOpen(true);
-    }
-  };
-
-  const handleTriggerUpstreamEdit = () => {
-    if (!latestArtifact) return;
-    const randomHex = Math.floor(Math.random() * 0xffffff)
-      .toString(16)
-      .padStart(6, "0");
-    simulateEdit.mutate({
-      oldArtifactId: latestArtifact.id,
-      newCommitSha: `c4${randomHex}91a0ef`,
-      reason: "Simulated upstream code change",
+  const handleToggleRightRail = () => {
+    setRightRailOpen((open) => {
+      if (!open) {
+        setRightRailTab("agent");
+        return true;
+      }
+      return false;
     });
   };
 
@@ -261,38 +261,28 @@ export default function App() {
     setRightRailOpen(true);
   };
 
-  const handleOpenSettings = (tab: SettingsTab) => {
-    setSettingsNotice(null);
-    setSettingsTab(tab);
-    setSettingsModalOpen(true);
-  };
-
-  const openPairing = () => {
-    if (workspace?.repo_root) {
-      setPairModalOpen(true);
-    } else {
-      setSettingsNotice(t("modals.workspace.pairRequiresRepoHint"));
-      setSettingsTab("repo");
-      setSettingsModalOpen(true);
-    }
+  const openSettingsSection = (section: SettingsSection) => {
+    setSettingsSection(section);
+    setActiveView("settings");
   };
 
   function openRun(previous: TaskRecord_Serialize | null = null) {
-    if (
-      !workspace?.is_git_repo ||
-      !workspace.has_manifest ||
-      !dag?.head_commit_sha ||
-      !workspace.presets.length
-    ) {
-      handleOpenSettings("repo");
+    if (!workspace?.repo_root) {
+      setActiveView("tasks");
+      return;
+    }
+    if (!workspace.is_git_repo || !workspace.has_manifest || !workspace.presets.length) {
+      setSeed(null);
+      setDispatchHead(dag?.head_commit_sha ?? null);
+      setTaskModalOpen(true);
       return;
     }
     if (status?.mode === "client" && !status.remote_node_id && !status.connected) {
-      openPairing();
+      setActiveView("devices");
       return;
     }
     setSeed(previous);
-    setDispatchHead(dag.head_commit_sha);
+    setDispatchHead(dag?.head_commit_sha ?? null);
     setTaskModalOpen(true);
   }
 
@@ -341,7 +331,11 @@ export default function App() {
 
   const handleSwitchWorkspace = async (repoPath: string) => {
     await switchWorkspace.mutateAsync(repoPath);
-    setActiveView("tasks");
+    if (activeView === "devices" || activeView === "settings") {
+      // stay on current utility view if user switched repo from sidebar while there
+    } else {
+      setActiveView("tasks");
+    }
     setFilter("all");
     setTaskModalOpen(false);
     setSeed(null);
@@ -368,138 +362,177 @@ export default function App() {
         : t("desk.enqueue")
       : t("desk.local");
 
-  const emptyActionLabel = !workspace?.repo_root
-    ? t("desk.open")
-    : !workspace.has_manifest || !dag?.head_commit_sha || !workspace.presets.length
-      ? t("desk.configure")
+  const emptyActionLabel =
+    !workspace?.has_manifest || !workspace?.presets.length
+      ? t("canvas.generateManifestBtn")
       : status?.mode === "client" && !status.connected && !status.remote_node_id
         ? t("topbar.pairDevice")
         : runActionText;
 
+  const handleTasksEmptyPrimaryAction = () => {
+    if (workspace?.is_git_repo && !workspace.has_manifest) {
+      void handleInitWorkspaceManifest();
+      return;
+    }
+    openRun();
+  };
+
+  const hasRightRailActivity =
+    pendingFixTask != null || filterCounts.active > 0 || copilot.isStreaming;
+
   return (
-    <div className="flex h-screen w-screen flex-col overflow-hidden bg-background text-foreground">
-      <TopTelemetryBar
+    <div className="flex h-screen w-screen overflow-hidden bg-background text-foreground">
+      <AppSidebar
+        isOpen={sidebarOpen}
+        onCollapse={() => setSidebarOpen(false)}
         activeView={activeView}
         onViewChange={setActiveView}
         attentionCount={filterCounts.attention}
+        totalTaskCount={filterCounts.all}
+        staleCount={dag?.stale_count ?? 0}
         status={status}
         workspace={workspace}
         recentWorkspaces={recentWorkspaces}
         headCommitSha={dag?.head_commit_sha ?? null}
-        staleCount={dag?.stale_count ?? 0}
         theme={theme}
-        isCopilotOpen={rightRailOpen && rightRailTab === "agent"}
+        onToggleTheme={toggleTheme}
         isSwitchingWorkspace={switchWorkspace.isPending}
         isInitializingManifest={initManifest.isPending}
-        isSwitchingMode={switchMode.isPending}
-        switchModeError={switchMode.error == null ? null : formatErrorMessage(switchMode.error, t)}
-        onDismissSwitchModeError={() => switchMode.reset()}
-        onSwitchMode={(mode) => switchMode.mutate(mode)}
-        onTriggerUpstreamEdit={handleTriggerUpstreamEdit}
-        onResetDemo={() => {
-          setSelectedNodeId(null);
-          setSelectedTaskId(null);
-          clearTaskLogs();
-          setInspectorMode("node");
-          setRightRailTab("agent");
-          resetDemo.mutate();
-        }}
-        isSimulatingEdit={simulateEdit.isPending}
-        onToggleTheme={toggleTheme}
-        onToggleCopilot={handleToggleCopilot}
-        onOpenPairModal={openPairing}
-        onOpenRunTask={() => openRun()}
-        onOpenRepoSettings={() => handleOpenSettings("repo")}
-        onOpenLlmSettings={() => handleOpenSettings("llm")}
         onSwitchWorkspace={handleSwitchWorkspace}
         onRemoveRecentWorkspace={handleRemoveRecentWorkspace}
         onInitManifest={handleInitWorkspaceManifest}
       />
 
-      <main className="flex min-h-0 flex-1 overflow-hidden">
-        {activeView === "tasks" ? (
-          <TaskWorkbench
-            status={status}
-            dag={dag}
-            tasks={visibleTasks}
-            filter={filter}
-            counts={filterCounts}
-            isLoading={taskQuery.isPending}
-            errorText={taskQuery.isError ? formatErrorMessage(taskQuery.error, t) : null}
-            onRetryLoad={() => void taskQuery.refetch()}
-            onFilterChange={setFilter}
-            emptyActionLabel={emptyActionLabel}
-            onPrimaryAction={() => openRun()}
-            onRerun={openRun}
-            selectedTaskId={inspectorMode === "task" ? selectedTaskId : null}
-            cancellingTaskId={cancelTask.isPending ? (cancelTask.variables ?? null) : null}
-            onOpenApproval={handleOpenApproval}
-            onInspectTask={handleInspectTask}
-            onCancelTask={handleCancelTask}
-            onSelectEvidenceNode={handleSelectNode}
-          />
-        ) : (
-          <DagCanvas
-            snapshot={dag}
-            selectedNodeId={selectedNodeId}
-            includeStale={includeStale}
-            hasRepo={Boolean(workspace?.repo_root)}
-            isGitRepo={Boolean(workspace?.is_git_repo)}
-            hasManifest={Boolean(workspace?.has_manifest)}
-            isGeneratingManifest={initManifest.isPending}
-            onToggleIncludeStale={() => setIncludeStale((prev) => !prev)}
-            onSelectNode={handleSelectNode}
-            onOpenRecordDecision={() => setDecisionModalOpen(true)}
-            onOpenDispatchTask={() => openRun()}
-            onOpenRepoSettings={() => handleOpenSettings("repo")}
-            manifestError={initManifest.error ? formatErrorMessage(initManifest.error, t) : null}
-            onDismissManifestError={() => initManifest.reset()}
-            onGenerateManifest={() =>
-              initManifest.mutate({ repoPath: workspace?.repo_root ?? null })
-            }
-          />
-        )}
-
-        <RightWorkbenchRail
-          isOpen={rightRailOpen}
-          activeTab={rightRailTab}
-          onTabChange={setRightRailTab}
-          onClose={() => {
-            setRightRailOpen(false);
-            setSelectedNodeId(null);
-            setSelectedTaskId(null);
-          }}
-          inspectorMode={inspectorMode}
-          selectedNode={selectedNode}
-          selectedTask={selectedTask}
-          taskLogBuffer={selectedTask ? logsByTask[selectedTask.spec.task_id] : undefined}
-          persistedTaskLog={persistedTaskLog}
-          pendingFixTask={pendingFixTask}
-          onResolveApproval={handleResolveApproval}
-          isResolvingApproval={resolveApproval.isPending}
-          approvalError={
-            resolveApproval.error == null ? null : formatErrorMessage(resolveApproval.error, t)
-          }
-          onDismissApprovalError={() => resolveApproval.reset()}
-          onCancelTask={handleCancelTask}
-          cancellingTaskId={cancelTask.isPending ? (cancelTask.variables ?? null) : null}
-          cancelError={cancelTask.error == null ? null : formatErrorMessage(cancelTask.error, t)}
-          onDismissCancelError={() => cancelTask.reset()}
-          onOpenApproval={handleOpenApproval}
-          onSelectEvidenceNode={handleSelectNode}
-          messages={copilot.messages}
-          isStreaming={copilot.isStreaming}
-          streamingMessageId={copilot.streamingMessageId}
-          sendError={copilot.sendError}
-          onDismissSendError={copilot.clearSendError}
-          llmSettings={llmSettings}
-          onSendMessage={copilot.sendMessage}
-          onCancelTurn={copilot.cancelTurn}
-          onClearChat={copilot.clearChat}
-          isClearingChat={copilot.isClearing}
-          onOpenLlmSettings={() => handleOpenSettings("llm")}
+      <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
+        <WorkspaceHeader
+          activeView={activeView}
+          hasRepo={hasRepo}
+          repoName={repoName}
+          headCommitSha={dag?.head_commit_sha ?? null}
+          staleCount={dag?.stale_count ?? 0}
+          sidebarOpen={sidebarOpen}
+          onExpandSidebar={() => setSidebarOpen(true)}
+          rightRailOpen={rightRailOpen}
+          hasRightRailActivity={hasRightRailActivity}
+          onToggleRightRail={handleToggleRightRail}
+          onOpenRunTask={() => openRun()}
+          onOpenRecordDecision={() => setDecisionModalOpen(true)}
         />
-      </main>
+
+        <main className="flex min-h-0 min-w-0 flex-1 overflow-hidden">
+          {activeView === "devices" ? (
+            <DevicesView
+              workspace={workspace}
+              status={status}
+              onGoToWorkspace={() => setActiveView("tasks")}
+            />
+          ) : activeView === "settings" ? (
+            <SettingsView
+              activeSection={settingsSection}
+              onSectionChange={setSettingsSection}
+              theme={theme}
+              onToggleTheme={toggleTheme}
+              onGoToWorkspace={() => setActiveView("tasks")}
+            />
+          ) : !hasRepo ? (
+            <WorkspaceWelcome
+              recentWorkspaces={recentWorkspaces}
+              isSwitching={switchWorkspace.isPending}
+              onSwitchWorkspace={handleSwitchWorkspace}
+              onRemoveRecentWorkspace={handleRemoveRecentWorkspace}
+            />
+          ) : activeView === "tasks" ? (
+            <TaskWorkbench
+              workspace={workspace}
+              status={status}
+              dag={dag}
+              tasks={visibleTasks}
+              filter={filter}
+              counts={filterCounts}
+              isLoading={taskQuery.isPending}
+              errorText={taskQuery.isError ? formatErrorMessage(taskQuery.error, t) : null}
+              onRetryLoad={() => void taskQuery.refetch()}
+              onFilterChange={setFilter}
+              emptyActionLabel={emptyActionLabel}
+              onPrimaryAction={handleTasksEmptyPrimaryAction}
+              onRerun={openRun}
+              onInitManifest={handleInitWorkspaceManifest}
+              isInitializingManifest={initManifest.isPending}
+              selectedTaskId={inspectorMode === "task" ? selectedTaskId : null}
+              cancellingTaskId={cancelTask.isPending ? (cancelTask.variables ?? null) : null}
+              onOpenApproval={handleOpenApproval}
+              onInspectTask={handleInspectTask}
+              onCancelTask={handleCancelTask}
+              onSelectEvidenceNode={handleSelectNode}
+            />
+          ) : (
+            <DagCanvas
+              snapshot={dag}
+              selectedNodeId={selectedNodeId}
+              includeStale={includeStale}
+              hasRepo={hasRepo}
+              isGitRepo={Boolean(workspace?.is_git_repo)}
+              hasManifest={Boolean(workspace?.has_manifest)}
+              isGeneratingManifest={initManifest.isPending}
+              onToggleIncludeStale={() => setIncludeStale((prev) => !prev)}
+              onSelectNode={handleSelectNode}
+              onOpenRecordDecision={() => setDecisionModalOpen(true)}
+              onOpenDispatchTask={() => openRun()}
+              onOpenRepoSettings={() => openSettingsSection("workspace")}
+              manifestError={initManifest.error ? formatErrorMessage(initManifest.error, t) : null}
+              onDismissManifestError={() => initManifest.reset()}
+              onGenerateManifest={() =>
+                initManifest.mutate({ repoPath: workspace?.repo_root ?? null })
+              }
+            />
+          )}
+        </main>
+      </div>
+
+      <RightWorkbenchRail
+        isOpen={rightRailOpen}
+        activeTab={rightRailTab}
+        onTabChange={setRightRailTab}
+        onClose={() => {
+          setRightRailOpen(false);
+          setSelectedNodeId(null);
+          setSelectedTaskId(null);
+        }}
+        workspace={workspace}
+        status={status}
+        headCommitSha={dag?.head_commit_sha ?? null}
+        staleCount={dag?.stale_count ?? 0}
+        attentionCount={filterCounts.attention}
+        inspectorMode={inspectorMode}
+        selectedNode={selectedNode}
+        selectedTask={selectedTask}
+        taskLogBuffer={selectedTask ? logsByTask[selectedTask.spec.task_id] : undefined}
+        persistedTaskLog={persistedTaskLog}
+        pendingFixTask={pendingFixTask}
+        onResolveApproval={handleResolveApproval}
+        isResolvingApproval={resolveApproval.isPending}
+        approvalError={
+          resolveApproval.error == null ? null : formatErrorMessage(resolveApproval.error, t)
+        }
+        onDismissApprovalError={() => resolveApproval.reset()}
+        onCancelTask={handleCancelTask}
+        cancellingTaskId={cancelTask.isPending ? (cancelTask.variables ?? null) : null}
+        cancelError={cancelTask.error == null ? null : formatErrorMessage(cancelTask.error, t)}
+        onDismissCancelError={() => cancelTask.reset()}
+        onOpenApproval={handleOpenApproval}
+        onSelectEvidenceNode={handleSelectNode}
+        messages={copilot.messages}
+        isStreaming={copilot.isStreaming}
+        streamingMessageId={copilot.streamingMessageId}
+        sendError={copilot.sendError}
+        onDismissSendError={copilot.clearSendError}
+        llmSettings={llmSettings}
+        onSendMessage={copilot.sendMessage}
+        onCancelTurn={copilot.cancelTurn}
+        onClearChat={copilot.clearChat}
+        isClearingChat={copilot.isClearing}
+        onOpenLlmSettings={() => openSettingsSection("llm")}
+      />
 
       <RecordDecisionModal
         isOpen={decisionModalOpen}
@@ -517,26 +550,7 @@ export default function App() {
         presets={workspace?.presets ?? []}
         onDispatch={handleDispatchTask}
         isSubmitting={submitTask.isPending}
-        onOpenRepoSettings={() => handleOpenSettings("repo")}
-      />
-
-      <PairDeviceModal
-        key={`${workspace?.repo_root}:${status?.mode}`}
-        mode={status?.mode ?? "local_dual_sandbox"}
-        status={status}
-        isOpen={pairModalOpen}
-        onOpenChange={setPairModalOpen}
-      />
-
-      <WorkspaceSettingsModal
-        isOpen={settingsModalOpen}
-        onOpenChange={(open) => {
-          setSettingsModalOpen(open);
-          if (!open) setSettingsNotice(null);
-        }}
-        activeTab={settingsTab}
-        onTabChange={setSettingsTab}
-        repoNotice={workspace?.repo_root ? null : settingsNotice}
+        onOpenRepoSettings={() => openSettingsSection("workspace")}
       />
     </div>
   );

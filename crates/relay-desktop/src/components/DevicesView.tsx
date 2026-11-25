@@ -1,18 +1,20 @@
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
-import { Field, FieldGroup, FieldLabel } from "@/components/ui/field";
+import { Field, FieldDescription, FieldGroup, FieldLabel } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
 import { Separator } from "@/components/ui/separator";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
+import { cn } from "@/lib/utils";
 import {
   AlertCircle,
   Check,
   CheckCircle2,
   Copy,
   Cpu,
+  FolderGit2,
+  Info,
   Laptop,
   Link2,
   MonitorSmartphone,
@@ -30,8 +32,9 @@ import type {
   PeerStatus_Serialize,
   RuntimeMode,
   TrustedPeerRecord_Serialize,
-} from "../../bindings";
-import { formatErrorMessage } from "../../lib/formatError";
+  WorkspaceInfo_Serialize,
+} from "../bindings";
+import { formatErrorMessage } from "../lib/formatError";
 import {
   useConnectPeerTicket,
   useGetPairingTicket,
@@ -41,22 +44,29 @@ import {
   useRevokeTrustedPeer,
   useSwitchRuntimeMode,
   useTrustedPeers,
-} from "../../lib/queries";
+} from "../lib/queries";
 
-interface PairDeviceModalProps {
-  mode: RuntimeMode;
+interface DevicesViewProps {
+  workspace: WorkspaceInfo_Serialize | undefined;
   status: PeerStatus_Serialize | undefined;
-  isOpen: boolean;
-  onOpenChange: (open: boolean) => void;
+  onGoToWorkspace: () => void;
 }
 
-const ROLE_CARDS: ReadonlyArray<{
-  role: "host" | "client";
+const RUNTIME_ROLE_CARDS: ReadonlyArray<{
+  mode: RuntimeMode;
   icon: typeof Cpu;
-  descKey: "modals.pair.roleHostDesc" | "modals.pair.roleClientDesc";
+  descKey:
+    | "devices.roleDesc.client"
+    | "devices.roleDesc.host"
+    | "devices.roleDesc.local_dual_sandbox";
 }> = [
-  { role: "host", icon: Cpu, descKey: "modals.pair.roleHostDesc" },
-  { role: "client", icon: Laptop, descKey: "modals.pair.roleClientDesc" },
+  { mode: "client", icon: Laptop, descKey: "devices.roleDesc.client" },
+  { mode: "host", icon: Cpu, descKey: "devices.roleDesc.host" },
+  {
+    mode: "local_dual_sandbox",
+    icon: MonitorSmartphone,
+    descKey: "devices.roleDesc.local_dual_sandbox",
+  },
 ];
 
 function abbreviateNodeId(nodeId: string): string {
@@ -83,45 +93,6 @@ function RoleIcon({ role }: { role: PeerRole }) {
   if (role === "host") return <Cpu className="size-3.5" aria-hidden="true" />;
   if (role === "client") return <Laptop className="size-3.5" aria-hidden="true" />;
   return <MonitorSmartphone className="size-3.5" aria-hidden="true" />;
-}
-
-function PairingRolePicker() {
-  const { t } = useTranslation();
-  const switchMode = useSwitchRuntimeMode();
-  return (
-    <div className="flex flex-col gap-3">
-      <p className="text-xs leading-relaxed text-muted-foreground">{t("modals.pair.chooseRole")}</p>
-      <div className="grid grid-cols-2 gap-2.5">
-        {ROLE_CARDS.map(({ role, icon: Icon, descKey }) => (
-          <button
-            key={role}
-            type="button"
-            disabled={switchMode.isPending}
-            onClick={() => switchMode.mutate(role)}
-            className="flex cursor-pointer flex-col gap-1.5 rounded-lg border border-border bg-muted/40 p-3 text-left transition-all hover:border-primary/40 hover:bg-primary/5 disabled:pointer-events-none disabled:opacity-50"
-          >
-            <div className="flex items-center gap-2 text-xs font-semibold text-foreground">
-              <span className="flex size-6 shrink-0 items-center justify-center rounded-md bg-primary/10 text-primary">
-                <Icon className="size-3.5" aria-hidden="true" />
-              </span>
-              <span className="relay-text-trim leading-none">{t(`sidebar.mode.${role}`)}</span>
-            </div>
-            <p className="text-xs leading-relaxed text-muted-foreground">{t(descKey)}</p>
-          </button>
-        ))}
-      </div>
-      {switchMode.error && (
-        <Alert
-          variant="destructive"
-          role="alert"
-          className="border-destructive/30 bg-[var(--relay-stale-soft)]"
-        >
-          <AlertCircle aria-hidden="true" />
-          <AlertDescription>{formatErrorMessage(switchMode.error, t)}</AlertDescription>
-        </Alert>
-      )}
-    </div>
-  );
 }
 
 interface TrustedDeviceRowProps {
@@ -174,9 +145,9 @@ function TrustedDeviceRow({
   };
 
   return (
-    <li className="flex flex-col gap-2 rounded-lg border border-border bg-card p-3 transition-colors">
+    <li className="flex flex-col gap-2.5 px-4 py-3">
       <div className="flex items-start justify-between gap-2">
-        <div className="flex min-w-0 flex-1 items-center gap-2">
+        <div className="flex min-w-0 flex-1 items-center gap-2.5">
           <span className="flex size-7 shrink-0 items-center justify-center rounded-md bg-muted text-foreground">
             <RoleIcon role={peer.role} />
           </span>
@@ -236,7 +207,7 @@ function TrustedDeviceRow({
               <span className="truncate text-xs font-semibold text-foreground">{peer.label}</span>
               <Button
                 type="button"
-                size="icon-sm"
+                size="icon-xs"
                 variant="ghost"
                 disabled={isBusy}
                 onClick={startEditing}
@@ -293,7 +264,7 @@ function TrustedDeviceRow({
           </code>
           <Button
             type="button"
-            size="icon-sm"
+            size="icon-xs"
             variant="ghost"
             onClick={() => onCopyNodeId(peer.node_id)}
             aria-label={`${isCopied ? t("modals.pair.copiedNodeId") : t("modals.pair.copyNodeId")} ${peer.label}`}
@@ -315,7 +286,7 @@ function TrustedDeviceRow({
         </time>
       </div>
 
-      <div className="flex flex-wrap items-center justify-between gap-2 border-t border-border/70 pt-2">
+      <div className="flex flex-wrap items-center justify-between gap-2 pt-0.5">
         {isRevoked ? (
           <p className="text-[11px] leading-snug text-destructive/90">
             {t("modals.pair.revokedHint")}
@@ -328,7 +299,7 @@ function TrustedDeviceRow({
             <div className="flex items-center justify-end gap-1.5">
               <Button
                 type="button"
-                size="sm"
+                size="xs"
                 variant="outline"
                 disabled={isBusy}
                 onClick={() => setConfirmingRevoke(false)}
@@ -339,7 +310,7 @@ function TrustedDeviceRow({
               </Button>
               <Button
                 type="button"
-                size="sm"
+                size="xs"
                 variant="destructive"
                 disabled={isBusy}
                 onClick={() => {
@@ -358,7 +329,7 @@ function TrustedDeviceRow({
           <div className="flex items-center gap-1.5">
             <Button
               type="button"
-              size="sm"
+              size="xs"
               variant="outline"
               disabled={isConnected || isBusy || mode === "local_dual_sandbox"}
               onClick={() => onReconnect(peer)}
@@ -377,7 +348,7 @@ function TrustedDeviceRow({
             </Button>
             <Button
               type="button"
-              size="sm"
+              size="xs"
               variant="destructive"
               disabled={isBusy}
               onClick={() => setConfirmingRevoke(true)}
@@ -394,7 +365,7 @@ function TrustedDeviceRow({
         {!confirmingRevoke && (
           <Button
             type="button"
-            size="sm"
+            size="xs"
             variant="ghost"
             disabled={isBusy}
             onClick={() => onRemove(peer)}
@@ -412,10 +383,12 @@ function TrustedDeviceRow({
 
 type PeerActionKind = "rename" | "reconnect" | "revoke" | "remove";
 
-export function PairDeviceModal({ isOpen, onOpenChange, mode, status }: PairDeviceModalProps) {
+export function DevicesView({ workspace, status, onGoToWorkspace }: DevicesViewProps) {
   const { t } = useTranslation();
+  const mode: RuntimeMode = status?.mode ?? "local_dual_sandbox";
+  const hasRepo = Boolean(workspace?.repo_root);
   const [tab, setTab] = useState<"share" | "connect">(mode === "client" ? "connect" : "share");
-  const [ticket, setTicket] = useState<string>("");
+  const [ticket, setTicket] = useState("");
   const [copied, setCopied] = useState(false);
   const [copiedNodeId, setCopiedNodeId] = useState<string | null>(null);
   const [remoteInput, setRemoteInput] = useState("");
@@ -424,6 +397,7 @@ export function PairDeviceModal({ isOpen, onOpenChange, mode, status }: PairDevi
   const [feedback, setFeedback] = useState<{ ok: boolean; text: string } | null>(null);
 
   const { data: trustedPeers = [] } = useTrustedPeers();
+  const switchMode = useSwitchRuntimeMode();
   const getTicket = useGetPairingTicket();
   const connectPeer = useConnectPeerTicket();
   const renamePeer = useRenameTrustedPeer();
@@ -516,121 +490,265 @@ export function PairDeviceModal({ isOpen, onOpenChange, mode, status }: PairDevi
     }
   };
 
+  const transport = status?.transport_path ?? "offline";
+  const isConnected = status?.connected ?? false;
+
   return (
-    <Dialog open={isOpen} onOpenChange={onOpenChange}>
-      <DialogContent className="max-h-[88vh] overflow-y-auto overscroll-contain sm:max-w-xl">
-        <DialogHeader>
-          <div className="flex items-center gap-2.5">
-            <div className="flex size-8 shrink-0 items-center justify-center rounded-md bg-primary/10 text-primary">
-              <Link2 className="size-4" aria-hidden="true" />
+    <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-y-auto overscroll-contain bg-background [scrollbar-gutter:stable]">
+      <div className="flex w-full max-w-3xl flex-col gap-8 px-8 py-6">
+        <section className="flex flex-col gap-3">
+          <div className="flex items-center justify-between gap-3">
+            <div>
+              <h2 className="text-sm font-semibold text-foreground">
+                {t("devices.thisDeviceTitle")}
+              </h2>
+              <p className="text-xs text-muted-foreground">{t("devices.thisDeviceDesc")}</p>
             </div>
-            <DialogTitle>{t("modals.pair.title")}</DialogTitle>
+            <Badge
+              variant={isConnected ? "secondary" : "outline"}
+              className={
+                isConnected
+                  ? "bg-emerald-500/12 text-emerald-700 dark:bg-emerald-500/20 dark:text-emerald-300"
+                  : undefined
+              }
+            >
+              <span
+                aria-hidden="true"
+                className={cn(
+                  "size-1.5 rounded-full",
+                  isConnected
+                    ? "bg-emerald-500"
+                    : mode === "local_dual_sandbox"
+                      ? "bg-sky-500"
+                      : "bg-amber-500",
+                )}
+              />
+              <span className="relay-text-trim leading-none">
+                {t(`topbar.transport.${transport}`)}
+                {status?.rtt_ms != null ? ` · ${status.rtt_ms}ms` : ""}
+              </span>
+            </Badge>
           </div>
-        </DialogHeader>
 
-        {mode === "local_dual_sandbox" ? (
-          <PairingRolePicker />
-        ) : (
-          <Tabs
-            value={tab}
-            onValueChange={(value) => setTab(value === "connect" ? "connect" : "share")}
-            className="gap-3"
-          >
-            <TabsList className="grid w-full grid-cols-2">
-              <TabsTrigger value="share">
-                <span className="relay-text-trim leading-none">{t("modals.pair.shareTab")}</span>
-              </TabsTrigger>
-              <TabsTrigger value="connect">
-                <span className="relay-text-trim leading-none">{t("modals.pair.connectTab")}</span>
-              </TabsTrigger>
-            </TabsList>
-
-            <TabsContent value="share" className="flex flex-col gap-3">
-              <p className="text-xs leading-relaxed text-muted-foreground">
-                {t("modals.pair.shareDesc")}
-              </p>
-
-              {ticket ? (
-                <div className="flex flex-col gap-2">
-                  <pre className="font-mono-tech max-h-36 overflow-auto rounded-md border border-border bg-muted/60 p-3 text-[11px] leading-relaxed text-foreground">
-                    {ticket}
-                  </pre>
-                  <div className="flex gap-2">
-                    <Button size="lg" className="flex-1" onClick={() => void handleCopy()}>
-                      {copied ? (
-                        <Check data-icon="inline-start" aria-hidden="true" />
-                      ) : (
-                        <Copy data-icon="inline-start" aria-hidden="true" />
+          <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-3">
+            {RUNTIME_ROLE_CARDS.map(({ mode: itemMode, icon: Icon, descKey }) => {
+              const active = itemMode === mode;
+              return (
+                <button
+                  key={itemMode}
+                  type="button"
+                  disabled={switchMode.isPending}
+                  aria-pressed={active}
+                  onClick={() => {
+                    switchMode.mutate(itemMode);
+                    setTicket("");
+                    setFeedback(null);
+                    if (itemMode === "client") setTab("connect");
+                    if (itemMode === "host") setTab("share");
+                  }}
+                  className={cn(
+                    "flex cursor-pointer flex-col gap-1.5 rounded-lg border p-3.5 text-left transition-all disabled:pointer-events-none disabled:opacity-50",
+                    active
+                      ? "border-primary bg-primary/6 ring-1 ring-primary/20"
+                      : "border-border bg-card hover:border-foreground/20",
+                  )}
+                >
+                  <div className="flex items-center gap-2 text-xs font-semibold text-foreground">
+                    <Icon
+                      className={cn(
+                        "size-4 shrink-0",
+                        active ? "text-primary" : "text-muted-foreground",
                       )}
-                      <span className="relay-text-trim leading-none">
-                        {copied ? t("modals.pair.copiedBtn") : t("modals.pair.copyBtn")}
-                      </span>
-                    </Button>
+                      aria-hidden="true"
+                    />
+                    <span className="relay-text-trim leading-none">
+                      {t(`sidebar.mode.${itemMode}`)}
+                    </span>
+                  </div>
+                  <p className="text-[11.5px] leading-relaxed text-muted-foreground">
+                    {t(descKey)}
+                  </p>
+                </button>
+              );
+            })}
+          </div>
+
+          {switchMode.error && (
+            <Alert
+              role="alert"
+              variant="destructive"
+              className="border-destructive/30 bg-[var(--relay-stale-soft)]"
+            >
+              <AlertCircle aria-hidden="true" />
+              <AlertDescription>{formatErrorMessage(switchMode.error, t)}</AlertDescription>
+            </Alert>
+          )}
+        </section>
+
+        <Separator />
+
+        <section className="flex flex-col gap-3">
+          <div>
+            <h2 className="text-sm font-semibold text-foreground">{t("modals.pair.title")}</h2>
+            <p className="text-xs text-muted-foreground">{t("devices.pairDesc")}</p>
+          </div>
+
+          {!hasRepo ? (
+            <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-dashed border-border bg-muted/25 px-4 py-4">
+              <div className="flex min-w-0 items-center gap-2.5 text-xs text-muted-foreground">
+                <Info className="size-4 shrink-0 text-primary" aria-hidden="true" />
+                <span>{t("modals.workspace.pairRequiresRepoHint")}</span>
+              </div>
+              <Button type="button" size="sm" variant="outline" onClick={onGoToWorkspace}>
+                <FolderGit2 data-icon="inline-start" aria-hidden="true" />
+                <span className="relay-text-trim leading-none">
+                  {t("modals.workspace.openRepoBtn")}
+                </span>
+              </Button>
+            </div>
+          ) : mode === "local_dual_sandbox" ? (
+            <div className="rounded-lg border border-dashed border-border bg-muted/25 px-4 py-4 text-xs text-muted-foreground">
+              {t("modals.pair.chooseRole")}
+            </div>
+          ) : (
+            <div className="rounded-lg border border-border bg-card p-4">
+              <Tabs
+                value={tab}
+                onValueChange={(value) => setTab(value === "connect" ? "connect" : "share")}
+                className="gap-4"
+              >
+                <TabsList className="grid w-full max-w-xs grid-cols-2">
+                  <TabsTrigger value="share">
+                    <span className="relay-text-trim leading-none">
+                      {t("modals.pair.shareTab")}
+                    </span>
+                  </TabsTrigger>
+                  <TabsTrigger value="connect">
+                    <span className="relay-text-trim leading-none">
+                      {t("modals.pair.connectTab")}
+                    </span>
+                  </TabsTrigger>
+                </TabsList>
+
+                <TabsContent value="share" className="flex flex-col gap-3">
+                  <p className="text-xs leading-relaxed text-muted-foreground">
+                    {t("modals.pair.shareDesc")}
+                  </p>
+
+                  {ticket ? (
+                    <div className="flex flex-col gap-2.5">
+                      <pre className="font-mono-tech max-h-36 overflow-auto rounded-md border border-border bg-muted/50 p-3 text-[11px] leading-relaxed text-foreground">
+                        {ticket}
+                      </pre>
+                      <div className="flex items-center gap-2">
+                        <Button size="default" onClick={() => void handleCopy()}>
+                          {copied ? (
+                            <Check data-icon="inline-start" aria-hidden="true" />
+                          ) : (
+                            <Copy data-icon="inline-start" aria-hidden="true" />
+                          )}
+                          <span className="relay-text-trim leading-none">
+                            {copied ? t("modals.pair.copiedBtn") : t("modals.pair.copyBtn")}
+                          </span>
+                        </Button>
+                        <Button
+                          size="default"
+                          variant="outline"
+                          disabled={getTicket.isPending}
+                          onClick={handleGenerate}
+                        >
+                          <span className="relay-text-trim leading-none">
+                            {t("modals.pair.generateBtn")}
+                          </span>
+                        </Button>
+                      </div>
+                    </div>
+                  ) : (
+                    <div>
+                      <Button
+                        size="default"
+                        disabled={getTicket.isPending}
+                        onClick={handleGenerate}
+                      >
+                        <Sparkles data-icon="inline-start" aria-hidden="true" />
+                        <span className="relay-text-trim leading-none">
+                          {t("modals.pair.generateBtn")}
+                        </span>
+                      </Button>
+                    </div>
+                  )}
+                </TabsContent>
+
+                <TabsContent value="connect" className="flex flex-col gap-3">
+                  <FieldGroup>
+                    <Field>
+                      <FieldLabel htmlFor="pair-code-input">
+                        {t("modals.pair.pasteLabel")}
+                      </FieldLabel>
+                      <FieldDescription>{t("devices.connectHint")}</FieldDescription>
+                      <Textarea
+                        id="pair-code-input"
+                        rows={3}
+                        value={remoteInput}
+                        onChange={(e) => setRemoteInput(e.target.value)}
+                        placeholder={t("modals.pair.pastePlaceholder")}
+                        autoCorrect="off"
+                        autoCapitalize="none"
+                        spellCheck={false}
+                        className="font-mono-tech text-[11.5px]"
+                      />
+                    </Field>
+                  </FieldGroup>
+
+                  <div>
                     <Button
-                      size="lg"
-                      variant="outline"
-                      disabled={getTicket.isPending}
-                      onClick={handleGenerate}
+                      size="default"
+                      disabled={!remoteInput.trim() || connectPeer.isPending}
+                      onClick={handleConnect}
                     >
+                      <Link2 data-icon="inline-start" aria-hidden="true" />
                       <span className="relay-text-trim leading-none">
-                        {t("modals.pair.generateBtn")}
+                        {t("modals.pair.connectBtn")}
                       </span>
                     </Button>
                   </div>
-                </div>
-              ) : (
-                <Button
-                  size="lg"
-                  className="w-full"
-                  disabled={getTicket.isPending}
-                  onClick={handleGenerate}
-                >
-                  <Sparkles data-icon="inline-start" aria-hidden="true" />
-                  <span className="relay-text-trim leading-none">
-                    {t("modals.pair.generateBtn")}
-                  </span>
-                </Button>
-              )}
-            </TabsContent>
+                </TabsContent>
+              </Tabs>
+            </div>
+          )}
+        </section>
 
-            <TabsContent value="connect" className="flex flex-col gap-3">
-              <FieldGroup>
-                <Field>
-                  <FieldLabel htmlFor="pair-code-input">{t("modals.pair.pasteLabel")}</FieldLabel>
-                  <Textarea
-                    id="pair-code-input"
-                    rows={3}
-                    value={remoteInput}
-                    onChange={(e) => setRemoteInput(e.target.value)}
-                    placeholder={t("modals.pair.pastePlaceholder")}
-                    autoCorrect="off"
-                    autoCapitalize="none"
-                    spellCheck={false}
-                    className="font-mono-tech text-[11.5px]"
-                  />
-                </Field>
-              </FieldGroup>
-
-              <Button
-                size="lg"
-                className="w-full"
-                disabled={!remoteInput.trim() || connectPeer.isPending}
-                onClick={handleConnect}
-              >
-                <Link2 data-icon="inline-start" aria-hidden="true" />
-                <span className="relay-text-trim leading-none">{t("modals.pair.connectBtn")}</span>
-              </Button>
-            </TabsContent>
-          </Tabs>
+        {feedback && (
+          <Alert
+            variant={feedback.ok ? "default" : "destructive"}
+            role={feedback.ok ? "status" : "alert"}
+            aria-live={feedback.ok ? "polite" : "assertive"}
+            className={
+              feedback.ok
+                ? "border-emerald-500/25 bg-[var(--relay-fresh-soft)] text-emerald-800 dark:text-emerald-200"
+                : "border-destructive/30 bg-[var(--relay-stale-soft)]"
+            }
+          >
+            {feedback.ok ? (
+              <CheckCircle2 className="text-emerald-600 dark:text-emerald-400" aria-hidden="true" />
+            ) : (
+              <AlertCircle aria-hidden="true" />
+            )}
+            <AlertDescription
+              className={feedback.ok ? "text-emerald-800 dark:text-emerald-200" : undefined}
+            >
+              {feedback.text}
+            </AlertDescription>
+          </Alert>
         )}
 
         <Separator />
 
-        <div className="flex flex-col gap-2">
+        <section className="flex flex-col gap-3">
           <div className="flex items-center gap-2">
-            <h3 className="text-xs font-semibold text-foreground">
+            <h2 className="text-sm font-semibold text-foreground">
               {t("modals.pair.trustedTitle")}
-            </h3>
+            </h2>
             {trustedPeers.length > 0 && (
               <Badge variant="secondary" className="font-mono-tech">
                 {trustedPeers.length}
@@ -639,13 +757,16 @@ export function PairDeviceModal({ isOpen, onOpenChange, mode, status }: PairDevi
           </div>
 
           {trustedPeers.length === 0 ? (
-            <div className="rounded-lg border border-dashed border-border bg-muted/20 px-3 py-4 text-center text-xs leading-relaxed text-muted-foreground">
+            <div className="rounded-lg border border-dashed border-border bg-muted/20 px-4 py-6 text-xs text-muted-foreground">
               {t("modals.pair.trustedEmpty")}
             </div>
           ) : (
-            <ul className="flex max-h-60 flex-col gap-2 overflow-y-auto pr-0.5">
+            <ul
+              role="list"
+              className="divide-y divide-border overflow-hidden rounded-lg border border-border bg-card"
+            >
               {trustedPeers.map((peer) => {
-                const isConnected =
+                const peerConnected =
                   peer.revoked_at === null &&
                   Boolean(status?.connected && status.remote_node_id === peer.node_id);
                 return (
@@ -653,7 +774,7 @@ export function PairDeviceModal({ isOpen, onOpenChange, mode, status }: PairDevi
                     key={peer.node_id}
                     peer={peer}
                     mode={mode}
-                    isConnected={isConnected}
+                    isConnected={peerConnected}
                     copiedNodeId={copiedNodeId}
                     isBusy={Boolean(busyByNode[peer.node_id])}
                     isReconnecting={busyByNode[peer.node_id] === "reconnect"}
@@ -687,32 +808,8 @@ export function PairDeviceModal({ isOpen, onOpenChange, mode, status }: PairDevi
               })}
             </ul>
           )}
-        </div>
-
-        {feedback && (
-          <Alert
-            variant={feedback.ok ? "default" : "destructive"}
-            role={feedback.ok ? "status" : "alert"}
-            aria-live={feedback.ok ? "polite" : "assertive"}
-            className={
-              feedback.ok
-                ? "border-emerald-500/25 bg-[var(--relay-fresh-soft)] text-emerald-800 dark:text-emerald-200"
-                : "border-destructive/30 bg-[var(--relay-stale-soft)]"
-            }
-          >
-            {feedback.ok ? (
-              <CheckCircle2 className="text-emerald-600 dark:text-emerald-400" aria-hidden="true" />
-            ) : (
-              <AlertCircle aria-hidden="true" />
-            )}
-            <AlertDescription
-              className={feedback.ok ? "text-emerald-800 dark:text-emerald-200" : undefined}
-            >
-              {feedback.text}
-            </AlertDescription>
-          </Alert>
-        )}
-      </DialogContent>
-    </Dialog>
+        </section>
+      </div>
+    </div>
   );
 }

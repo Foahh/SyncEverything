@@ -1,10 +1,8 @@
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Field, FieldDescription, FieldGroup, FieldLabel, FieldTitle } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
   buildMcpSnippet,
   computeJsonLineDiff,
@@ -26,14 +24,14 @@ import {
   FileCode2,
   FilePlus2,
   FolderGit2,
-  FolderOpen,
   Globe,
-  Info,
+  Moon,
   RefreshCw,
   RotateCcw,
   ShieldCheck,
   SlidersHorizontal,
   Sparkles,
+  Sun,
   Terminal,
   Trash2,
 } from "lucide-react";
@@ -48,32 +46,32 @@ import type {
   ProjectMcpConfigRequest_Deserialize,
   ProjectMcpFileStatus,
   WorkspaceInfo_Serialize,
-} from "../../bindings";
+} from "../bindings";
+import { setRelayLocale, type RelayLocale } from "../i18n";
 import {
   formatErrorMessage,
   formatLlmProbeMessage,
   isMcpPreviewChangedError,
-} from "../../lib/formatError";
+} from "../lib/formatError";
 import {
   useInitWorkspaceManifest,
   useLlmSettings,
-  useOpenWorkspaceRepo,
   usePreviewProjectMcpConfig,
   useRefreshGitHead,
   useSaveLlmSettings,
   useWorkspaceInfo,
   useWriteProjectMcpConfig,
-} from "../../lib/queries";
-import { isTauriRuntime, relayApi } from "../../lib/relayApi";
+} from "../lib/queries";
+import { relayApi } from "../lib/relayApi";
 
-export type SettingsTab = "repo" | "llm" | "mcp";
+export type SettingsSection = "llm" | "mcp" | "workspace" | "general";
 
-interface WorkspaceSettingsModalProps {
-  isOpen: boolean;
-  onOpenChange: (open: boolean) => void;
-  activeTab: SettingsTab;
-  onTabChange: (tab: SettingsTab) => void;
-  repoNotice?: string | null;
+interface SettingsViewProps {
+  activeSection: SettingsSection;
+  onSectionChange: (section: SettingsSection) => void;
+  theme: "light" | "dark";
+  onToggleTheme: () => void;
+  onGoToWorkspace: () => void;
 }
 
 interface FeedbackState {
@@ -196,257 +194,7 @@ function StatusBanner({
   );
 }
 
-function RepositorySettingsTab({
-  workspace,
-  repoNotice,
-}: {
-  workspace: WorkspaceInfo_Serialize | undefined;
-  repoNotice?: string | null;
-}) {
-  const { t } = useTranslation();
-  const [repoPath, setRepoPath] = useState(workspace?.repo_root ?? "");
-  const [isPicking, setIsPicking] = useState(false);
-  const [feedback, setFeedback] = useState<FeedbackState | null>(null);
-
-  const openRepo = useOpenWorkspaceRepo();
-  const initManifest = useInitWorkspaceManifest();
-  const refreshGit = useRefreshGitHead();
-  const isDesktop = isTauriRuntime();
-
-  const handleBrowse = async () => {
-    setFeedback(null);
-    setIsPicking(true);
-    try {
-      const selected = await relayApi.pickRepositoryFolder();
-      if (selected) {
-        setRepoPath(selected);
-      }
-    } catch (err) {
-      setFeedback({
-        ok: false,
-        text: formatErrorMessage(err, t, t("modals.workspace.errors.pickFolder")),
-      });
-    } finally {
-      setIsPicking(false);
-    }
-  };
-
-  const handleOpenRepo = (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    const trimmed = repoPath.trim();
-    if (!trimmed) return;
-    setFeedback(null);
-    openRepo.mutate(trimmed, {
-      onSuccess: (info) => {
-        setRepoPath(info.repo_root ?? trimmed);
-        setFeedback({ ok: true, text: t("modals.workspace.repoOpened") });
-      },
-      onError: (err) => {
-        setFeedback({
-          ok: false,
-          text: formatErrorMessage(err, t, t("modals.workspace.errors.openRepo")),
-        });
-      },
-    });
-  };
-
-  const handleGenerateManifest = () => {
-    setFeedback(null);
-    initManifest.mutate(undefined, {
-      onSuccess: () => {
-        setFeedback({ ok: true, text: t("modals.workspace.manifestGenerated") });
-      },
-      onError: (err) => {
-        setFeedback({
-          ok: false,
-          text: formatErrorMessage(err, t, t("modals.workspace.errors.generateManifest")),
-        });
-      },
-    });
-  };
-
-  const handleSyncGit = () => {
-    setFeedback(null);
-    refreshGit.mutate(undefined, {
-      onSuccess: (changed) => {
-        setFeedback({
-          ok: true,
-          text: changed ? t("modals.workspace.gitSynced") : t("modals.workspace.gitUpToDate"),
-        });
-      },
-      onError: (err) => {
-        setFeedback({
-          ok: false,
-          text: formatErrorMessage(err, t, t("modals.workspace.errors.syncGit")),
-        });
-      },
-    });
-  };
-
-  const hasRepo = Boolean(workspace?.repo_root);
-  const needsManifest = hasRepo && Boolean(workspace?.is_git_repo) && !workspace?.has_manifest;
-
-  return (
-    <div className="flex min-w-0 flex-col gap-4">
-      {repoNotice && !hasRepo && (
-        <Alert className="border-primary/25 bg-primary/8 text-foreground">
-          <Info className="text-primary" aria-hidden="true" />
-          <AlertDescription className="text-foreground">{repoNotice}</AlertDescription>
-        </Alert>
-      )}
-
-      {hasRepo && workspace && (
-        <div className="flex min-w-0 flex-col gap-2.5 rounded-lg border border-border bg-muted/40 p-3">
-          <div className="flex items-center justify-between gap-2">
-            <div className="flex min-w-0 items-center gap-2">
-              <FolderGit2 className="size-4 shrink-0 text-primary" aria-hidden="true" />
-              <span
-                lang="en"
-                className="truncate text-xs leading-snug font-semibold text-foreground"
-              >
-                {workspace.name || workspace.repo_id}
-              </span>
-            </div>
-            <Badge
-              variant={workspace.is_git_repo ? "secondary" : "outline"}
-              className={
-                workspace.is_git_repo
-                  ? "bg-emerald-500/12 text-emerald-700 dark:bg-emerald-500/20 dark:text-emerald-300"
-                  : undefined
-              }
-            >
-              <span className="relay-text-trim leading-none">
-                {workspace.is_git_repo
-                  ? t("modals.workspace.watchingGit")
-                  : t("modals.workspace.notGitRepo")}
-              </span>
-            </Badge>
-          </div>
-
-          <div
-            lang="en"
-            className="font-mono-tech truncate rounded-md bg-background/80 px-2 py-1 text-[11px] text-muted-foreground"
-            title={workspace.repo_root ?? undefined}
-          >
-            {workspace.repo_root}
-          </div>
-
-          {workspace.has_manifest && (
-            <div className="flex flex-col gap-1.5">
-              <span className="text-[11px] font-medium text-muted-foreground">
-                {t("modals.workspace.presetsDiscovered")}
-              </span>
-              {workspace.presets.length > 0 ? (
-                <div className="flex flex-wrap gap-1.5">
-                  {workspace.presets.map((preset) => (
-                    <Badge key={preset.name} variant="outline" className="font-mono-tech">
-                      <span lang="en" className="relay-text-trim leading-none">
-                        {preset.name}
-                      </span>
-                    </Badge>
-                  ))}
-                </div>
-              ) : (
-                <span className="text-[11px] text-muted-foreground">
-                  {t("modals.workspace.noPresets")}
-                </span>
-              )}
-            </div>
-          )}
-
-          {needsManifest && (
-            <div className="flex items-center justify-between gap-2 rounded-md border border-dashed border-primary/40 bg-background/80 px-2.5 py-2">
-              <span className="text-[11px] leading-snug text-muted-foreground">
-                {t("modals.workspace.missingManifestHint")}
-              </span>
-              <Button
-                type="button"
-                size="xs"
-                disabled={initManifest.isPending}
-                onClick={handleGenerateManifest}
-                className="shrink-0"
-              >
-                <FilePlus2 data-icon="inline-start" aria-hidden="true" />
-                <span className="relay-text-trim leading-none">
-                  {t("modals.workspace.generateManifestBtn")}
-                </span>
-              </Button>
-            </div>
-          )}
-        </div>
-      )}
-
-      <form onSubmit={handleOpenRepo} className="flex min-w-0 flex-col gap-3">
-        <FieldGroup>
-          <Field>
-            <FieldLabel htmlFor="workspace-repo-path">
-              {t("modals.workspace.repoPathLabel")}
-            </FieldLabel>
-            <div className="flex items-center gap-2">
-              <Input
-                id="workspace-repo-path"
-                name="repo_path"
-                required
-                value={repoPath}
-                onChange={(e) => setRepoPath(e.target.value)}
-                placeholder={t("modals.workspace.repoPathPlaceholder")}
-                autoCorrect="off"
-                autoCapitalize="none"
-                spellCheck={false}
-                className="font-mono-tech text-xs"
-              />
-              {isDesktop && (
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="default"
-                  disabled={isPicking}
-                  onClick={() => void handleBrowse()}
-                >
-                  <FolderOpen data-icon="inline-start" aria-hidden="true" />
-                  <span className="relay-text-trim leading-none">
-                    {t("modals.workspace.browseBtn")}
-                  </span>
-                </Button>
-              )}
-            </div>
-          </Field>
-        </FieldGroup>
-
-        <StatusBanner feedback={feedback} />
-
-        <div className="flex items-center gap-2">
-          <Button type="submit" size="lg" className="flex-1" disabled={openRepo.isPending}>
-            <FolderGit2 data-icon="inline-start" aria-hidden="true" />
-            <span className="relay-text-trim leading-none">
-              {t("modals.workspace.openRepoBtn")}
-            </span>
-          </Button>
-          {workspace?.is_git_repo && (
-            <Button
-              type="button"
-              variant="outline"
-              size="lg"
-              disabled={refreshGit.isPending}
-              onClick={handleSyncGit}
-            >
-              <RefreshCw
-                data-icon="inline-start"
-                className={refreshGit.isPending ? "animate-spin" : undefined}
-                aria-hidden="true"
-              />
-              <span className="relay-text-trim leading-none">
-                {t("modals.workspace.syncGitBtn")}
-              </span>
-            </Button>
-          )}
-        </div>
-      </form>
-    </div>
-  );
-}
-
-function LlmSettingsTab({ initial }: { initial: LlmSettingsView_Serialize }) {
+function LlmSettingsSection({ initial }: { initial: LlmSettingsView_Serialize }) {
   const { t } = useTranslation();
   const [tier, setTier] = useState<InferenceTier>(initial.tier);
   const [baseUrl, setBaseUrl] = useState(initial.base_url);
@@ -534,11 +282,17 @@ function LlmSettingsTab({ initial }: { initial: LlmSettingsView_Serialize }) {
     !REASONING_EFFORT_OPTIONS.some((option) => option.value === initial.reasoning_effort);
 
   return (
-    <form onSubmit={handleSave} className="flex min-w-0 flex-col gap-4">
+    <form onSubmit={handleSave} className="flex min-w-0 flex-col gap-5">
+      <div>
+        <h2 className="text-sm font-semibold text-foreground">{t("modals.workspace.llmTab")}</h2>
+        <p className="mt-0.5 text-xs text-muted-foreground">{t("settings.llmSubtitle")}</p>
+      </div>
+
       <FieldGroup>
         <Field>
           <FieldTitle>{t("modals.workspace.tierLabel")}</FieldTitle>
-          <div className="grid grid-cols-3 gap-2">
+          <FieldDescription>{t("settings.tierHint")}</FieldDescription>
+          <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
             {TIER_ORDER.map((option) => {
               const active = tier === option;
               return (
@@ -548,10 +302,10 @@ function LlmSettingsTab({ initial }: { initial: LlmSettingsView_Serialize }) {
                   aria-pressed={active}
                   onClick={() => handleSelectTier(option)}
                   className={cn(
-                    "cursor-pointer rounded-lg border px-2.5 py-2 text-left transition-all",
+                    "cursor-pointer rounded-lg border px-3 py-2.5 text-left transition-all",
                     active
                       ? "border-primary bg-primary/8 ring-1 ring-primary/25"
-                      : "border-border bg-muted/40 hover:border-foreground/20",
+                      : "border-border bg-card hover:border-foreground/20",
                   )}
                 >
                   <div className="flex items-center gap-1.5 text-xs font-semibold text-foreground">
@@ -572,6 +326,7 @@ function LlmSettingsTab({ initial }: { initial: LlmSettingsView_Serialize }) {
 
         <Field>
           <FieldLabel htmlFor="llm-base-url">{t("modals.workspace.baseUrlLabel")}</FieldLabel>
+          <FieldDescription>{t("settings.baseUrlHint")}</FieldDescription>
           <Input
             id="llm-base-url"
             name="base_url"
@@ -622,10 +377,12 @@ function LlmSettingsTab({ initial }: { initial: LlmSettingsView_Serialize }) {
               </button>
             )}
           </div>
-          {initial.has_api_key && !clearStoredKey && initial.api_key_hint && (
+          {initial.has_api_key && !clearStoredKey && initial.api_key_hint ? (
             <FieldDescription>
               {t("modals.workspace.apiKeyStoredHint", { hint: initial.api_key_hint })}
             </FieldDescription>
+          ) : (
+            <FieldDescription>{t("settings.apiKeyHint")}</FieldDescription>
           )}
           <div className="flex items-center gap-2">
             <Input
@@ -659,6 +416,7 @@ function LlmSettingsTab({ initial }: { initial: LlmSettingsView_Serialize }) {
 
         <Field>
           <FieldTitle>{t("modals.workspace.reasoningEffortLabel")}</FieldTitle>
+          <FieldDescription>{t("settings.reasoningEffortHint")}</FieldDescription>
           <div
             className="flex flex-wrap gap-1.5"
             role="group"
@@ -676,7 +434,7 @@ function LlmSettingsTab({ initial }: { initial: LlmSettingsView_Serialize }) {
                     "cursor-pointer rounded-md border px-2.5 py-1.5 text-center text-[11.5px] font-medium transition-all",
                     active
                       ? "border-primary bg-primary/8 text-foreground ring-1 ring-primary/25"
-                      : "border-border bg-muted/40 text-muted-foreground hover:border-foreground/20 hover:text-foreground",
+                      : "border-border bg-card text-muted-foreground hover:border-foreground/20 hover:text-foreground",
                   )}
                 >
                   <span className="relay-text-trim whitespace-nowrap leading-none">
@@ -694,7 +452,7 @@ function LlmSettingsTab({ initial }: { initial: LlmSettingsView_Serialize }) {
                   "cursor-pointer rounded-md border px-2.5 py-1.5 text-center text-[11.5px] font-medium transition-all",
                   reasoningEffort === initial.reasoning_effort
                     ? "border-primary bg-primary/8 text-foreground ring-1 ring-primary/25"
-                    : "border-border bg-muted/40 text-muted-foreground hover:border-foreground/20 hover:text-foreground",
+                    : "border-border bg-card text-muted-foreground hover:border-foreground/20 hover:text-foreground",
                 )}
               >
                 <span className="relay-text-trim whitespace-nowrap leading-none">
@@ -707,6 +465,7 @@ function LlmSettingsTab({ initial }: { initial: LlmSettingsView_Serialize }) {
 
         <Field>
           <FieldLabel htmlFor="llm-api-key-env">{t("modals.workspace.apiKeyEnvLabel")}</FieldLabel>
+          <FieldDescription>{t("settings.apiKeyEnvHint")}</FieldDescription>
           <Input
             id="llm-api-key-env"
             name="api_key_env"
@@ -724,10 +483,13 @@ function LlmSettingsTab({ initial }: { initial: LlmSettingsView_Serialize }) {
       <StatusBanner feedback={feedback} />
 
       <div className="flex items-center gap-2">
+        <Button type="submit" size="default" disabled={saveLlm.isPending}>
+          <span className="relay-text-trim leading-none">{t("modals.workspace.saveBtn")}</span>
+        </Button>
         <Button
           type="button"
           variant="outline"
-          size="lg"
+          size="default"
           disabled={isTesting}
           onClick={() => void handleTest()}
         >
@@ -736,20 +498,17 @@ function LlmSettingsTab({ initial }: { initial: LlmSettingsView_Serialize }) {
             {isTesting ? t("modals.workspace.testingBtn") : t("modals.workspace.testBtn")}
           </span>
         </Button>
-        <Button type="submit" size="lg" className="flex-1" disabled={saveLlm.isPending}>
-          <span className="relay-text-trim leading-none">{t("modals.workspace.saveBtn")}</span>
-        </Button>
       </div>
     </form>
   );
 }
 
-function McpConfigTab({
+function McpSettingsSection({
   workspace,
-  onOpenRepoTab,
+  onGoToWorkspace,
 }: {
   workspace?: WorkspaceInfo_Serialize;
-  onOpenRepoTab: () => void;
+  onGoToWorkspace: () => void;
 }) {
   const { t } = useTranslation();
   const [client, setClient] = useState<McpClientId>("claude");
@@ -895,10 +654,15 @@ function McpConfigTab({
   const needsRepoForStdio = transport === "stdio" && !snippet;
 
   return (
-    <div className="flex min-w-0 flex-col gap-3.5">
-      <div className="grid min-w-0 grid-cols-1 gap-2.5 sm:grid-cols-[minmax(0,1.4fr)_minmax(0,1fr)]">
-        <div className="flex min-w-0 flex-col gap-1">
-          <span className="text-[11px] font-medium text-muted-foreground">
+    <div className="flex min-w-0 flex-col gap-5">
+      <div>
+        <h2 className="text-sm font-semibold text-foreground">{t("modals.workspace.mcpTab")}</h2>
+        <p className="mt-0.5 text-xs text-muted-foreground">{t("settings.mcpSubtitle")}</p>
+      </div>
+
+      <div className="grid min-w-0 grid-cols-1 gap-4 sm:grid-cols-2">
+        <div className="flex min-w-0 flex-col gap-1.5">
+          <span className="text-xs font-medium text-foreground">
             {t("modals.workspace.mcpClientLabel")}
           </span>
           <div
@@ -929,10 +693,13 @@ function McpConfigTab({
               );
             })}
           </div>
+          <p className="text-[11px] text-muted-foreground">
+            {t("settings.mcpClientPathHint", { path: selectedClient.configPath })}
+          </p>
         </div>
 
-        <div className="flex min-w-0 flex-col gap-1">
-          <span className="text-[11px] font-medium text-muted-foreground">
+        <div className="flex min-w-0 flex-col gap-1.5">
+          <span className="text-xs font-medium text-foreground">
             {t("modals.workspace.mcpTransportLabel")}
           </span>
           <div
@@ -962,7 +729,7 @@ function McpConfigTab({
                     setWriteFeedback(null);
                   }}
                   className={cn(
-                    "flex min-w-0 cursor-pointer items-center justify-center gap-1 rounded-md px-2 py-1.5 text-xs font-medium transition-all",
+                    "flex min-w-0 cursor-pointer items-center justify-center gap-1.5 rounded-md px-2 py-1.5 text-xs font-medium transition-all",
                     active
                       ? "bg-background text-foreground shadow-2xs"
                       : "text-muted-foreground hover:text-foreground",
@@ -974,6 +741,11 @@ function McpConfigTab({
               );
             })}
           </div>
+          <p className="text-[11px] text-muted-foreground">
+            {transport === "stdio"
+              ? t("settings.mcpTransportStdioHint")
+              : t("settings.mcpTransportHttpHint")}
+          </p>
         </div>
       </div>
 
@@ -1020,9 +792,9 @@ function McpConfigTab({
       )}
 
       {needsRepoForStdio ? (
-        <div className="flex flex-col items-center gap-2.5 rounded-lg border border-dashed border-border bg-muted/30 px-4 py-6 text-center">
+        <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-dashed border-border bg-muted/25 px-4 py-5">
           <p className="text-xs text-muted-foreground">{t("modals.workspace.mcpOpenRepo")}</p>
-          <Button type="button" size="sm" variant="outline" onClick={onOpenRepoTab}>
+          <Button type="button" size="sm" variant="outline" onClick={onGoToWorkspace}>
             <FolderGit2 data-icon="inline-start" aria-hidden="true" />
             <span className="relay-text-trim leading-none">
               {t("modals.workspace.openRepoBtn")}
@@ -1055,7 +827,7 @@ function McpConfigTab({
             </div>
             <pre
               lang="en"
-              className="font-mono-tech max-h-44 w-full overflow-x-auto overflow-y-auto p-3 text-[11px] leading-relaxed text-foreground"
+              className="font-mono-tech max-h-56 w-full overflow-x-auto overflow-y-auto p-3 text-[11.5px] leading-relaxed text-foreground"
             >
               {snippet}
             </pre>
@@ -1066,38 +838,41 @@ function McpConfigTab({
           )}
 
           {projectClient && workspace?.repo_root && (
-            <Button
-              type="button"
-              size="lg"
-              className="w-full"
-              disabled={!canPreviewProject || previewMutation.isPending || writeMutation.isPending}
-              onClick={handlePreviewProject}
-            >
-              <FileCode2 data-icon="inline-start" aria-hidden="true" />
-              <span className="relay-text-trim leading-none">
-                {previewMutation.isPending
-                  ? t("modals.workspace.mcpPreviewLoading")
-                  : activePreview
-                    ? t("modals.workspace.mcpRefreshPreviewBtn")
-                    : t("modals.workspace.mcpPreviewBtn")}
-              </span>
-            </Button>
+            <div>
+              <Button
+                type="button"
+                size="default"
+                disabled={
+                  !canPreviewProject || previewMutation.isPending || writeMutation.isPending
+                }
+                onClick={handlePreviewProject}
+              >
+                <FileCode2 data-icon="inline-start" aria-hidden="true" />
+                <span className="relay-text-trim leading-none">
+                  {previewMutation.isPending
+                    ? t("modals.workspace.mcpPreviewLoading")
+                    : activePreview
+                      ? t("modals.workspace.mcpRefreshPreviewBtn")
+                      : t("modals.workspace.mcpPreviewBtn")}
+                </span>
+              </Button>
+            </div>
           )}
 
           {!projectClient && (
-            <p className="text-[11px] text-muted-foreground">
+            <p className="text-xs text-muted-foreground">
               {t("modals.workspace.mcpCodexCopyOnlyNotice")}
             </p>
           )}
 
           {transport === "streamable_http" && (
-            <p className="text-[11px] text-muted-foreground">{t("modals.workspace.mcpHttpHint")}</p>
+            <p className="text-xs text-muted-foreground">{t("modals.workspace.mcpHttpHint")}</p>
           )}
         </>
       ) : null}
 
       {activePreview && projectClient && (
-        <div className="flex min-w-0 flex-col gap-2.5 rounded-lg border border-primary/30 bg-muted/40 p-3">
+        <div className="flex min-w-0 flex-col gap-3 rounded-lg border border-primary/30 bg-muted/40 p-4">
           <div className="flex items-center justify-between gap-2">
             <div className="flex items-center gap-1.5 text-xs font-semibold text-foreground">
               <ShieldCheck className="size-4 shrink-0 text-primary" aria-hidden="true" />
@@ -1114,7 +889,7 @@ function McpConfigTab({
 
           <div
             lang="en"
-            className="font-mono-tech truncate rounded-md bg-background/80 px-2 py-1 text-[11px] text-muted-foreground"
+            className="font-mono-tech truncate rounded-md bg-background/80 px-2.5 py-1 text-[11px] text-muted-foreground"
             title={activePreview.target_path}
           >
             {activePreview.target_path}
@@ -1130,12 +905,12 @@ function McpConfigTab({
 
           {diffLines && (
             <div className="flex min-w-0 flex-col gap-1">
-              <span className="text-[10px] font-medium text-muted-foreground">
+              <span className="text-[10.5px] font-medium text-muted-foreground">
                 {t("modals.workspace.mcpPreviewDiffLabel")}
               </span>
               <pre
                 lang="en"
-                className="font-mono-tech max-h-36 w-full overflow-x-auto overflow-y-auto rounded-md border border-border bg-background/90 p-2 text-[11px] leading-relaxed"
+                className="font-mono-tech max-h-40 w-full overflow-x-auto overflow-y-auto rounded-md border border-border bg-background/90 p-2 text-[11px] leading-relaxed"
               >
                 {diffLines.map((line, index) => (
                   <div
@@ -1157,12 +932,12 @@ function McpConfigTab({
           )}
 
           <div className="flex min-w-0 flex-col gap-1">
-            <span className="text-[10px] font-medium text-muted-foreground">
+            <span className="text-[10.5px] font-medium text-muted-foreground">
               {t("modals.workspace.mcpPreviewMergedLabel")}
             </span>
             <pre
               lang="en"
-              className="font-mono-tech max-h-44 w-full overflow-x-auto overflow-y-auto rounded-md border border-border bg-background/90 p-2.5 text-[11px] leading-relaxed text-foreground"
+              className="font-mono-tech max-h-48 w-full overflow-x-auto overflow-y-auto rounded-md border border-border bg-background/90 p-2.5 text-[11px] leading-relaxed text-foreground"
             >
               {activePreview.merged_content}
             </pre>
@@ -1225,67 +1000,332 @@ function McpConfigTab({
   );
 }
 
-export function WorkspaceSettingsModal({
-  isOpen,
-  onOpenChange,
-  activeTab,
-  onTabChange,
-  repoNotice,
-}: WorkspaceSettingsModalProps) {
+function WorkspaceManifestSection({
+  workspace,
+  onGoToWorkspace,
+}: {
+  workspace: WorkspaceInfo_Serialize | undefined;
+  onGoToWorkspace: () => void;
+}) {
+  const { t } = useTranslation();
+  const [feedback, setFeedback] = useState<FeedbackState | null>(null);
+  const initManifest = useInitWorkspaceManifest();
+  const refreshGit = useRefreshGitHead();
+
+  const hasRepo = Boolean(workspace?.repo_root);
+  const needsManifest = hasRepo && Boolean(workspace?.is_git_repo) && !workspace?.has_manifest;
+
+  const handleGenerateManifest = () => {
+    setFeedback(null);
+    initManifest.mutate(undefined, {
+      onSuccess: () => {
+        setFeedback({ ok: true, text: t("modals.workspace.manifestGenerated") });
+      },
+      onError: (err) => {
+        setFeedback({
+          ok: false,
+          text: formatErrorMessage(err, t, t("modals.workspace.errors.generateManifest")),
+        });
+      },
+    });
+  };
+
+  const handleSyncGit = () => {
+    setFeedback(null);
+    refreshGit.mutate(undefined, {
+      onSuccess: (changed) => {
+        setFeedback({
+          ok: true,
+          text: changed ? t("modals.workspace.gitSynced") : t("modals.workspace.gitUpToDate"),
+        });
+      },
+      onError: (err) => {
+        setFeedback({
+          ok: false,
+          text: formatErrorMessage(err, t, t("modals.workspace.errors.syncGit")),
+        });
+      },
+    });
+  };
+
+  return (
+    <div className="flex min-w-0 flex-col gap-5">
+      <div>
+        <h2 className="text-sm font-semibold text-foreground">{t("settings.workspaceTab")}</h2>
+        <p className="mt-0.5 text-xs text-muted-foreground">{t("settings.workspaceSubtitle")}</p>
+      </div>
+
+      {!hasRepo || !workspace ? (
+        <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-dashed border-border bg-muted/25 px-4 py-5">
+          <p className="text-xs text-muted-foreground">{t("settings.noActiveWorkspace")}</p>
+          <Button type="button" size="sm" variant="outline" onClick={onGoToWorkspace}>
+            <FolderGit2 data-icon="inline-start" aria-hidden="true" />
+            <span className="relay-text-trim leading-none">
+              {t("modals.workspace.openRepoBtn")}
+            </span>
+          </Button>
+        </div>
+      ) : (
+        <div className="flex flex-col gap-4">
+          <div className="flex flex-col gap-3 rounded-lg border border-border bg-card p-4">
+            <div className="flex items-center justify-between gap-2">
+              <div className="flex min-w-0 items-center gap-2">
+                <FolderGit2 className="size-4 shrink-0 text-primary" aria-hidden="true" />
+                <span lang="en" className="truncate text-xs font-semibold text-foreground">
+                  {workspace.name || workspace.repo_id}
+                </span>
+              </div>
+              <Badge
+                variant={workspace.is_git_repo ? "secondary" : "outline"}
+                className={
+                  workspace.is_git_repo
+                    ? "bg-emerald-500/12 text-emerald-700 dark:bg-emerald-500/20 dark:text-emerald-300"
+                    : undefined
+                }
+              >
+                <span className="relay-text-trim leading-none">
+                  {workspace.is_git_repo
+                    ? t("modals.workspace.watchingGit")
+                    : t("modals.workspace.notGitRepo")}
+                </span>
+              </Badge>
+            </div>
+
+            <div
+              lang="en"
+              className="font-mono-tech truncate rounded-md bg-muted/60 px-2.5 py-1.5 text-[11px] text-muted-foreground"
+              title={workspace.repo_root ?? undefined}
+            >
+              {workspace.repo_root}
+            </div>
+
+            {workspace.is_git_repo && (
+              <div>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  disabled={refreshGit.isPending}
+                  onClick={handleSyncGit}
+                >
+                  <RefreshCw
+                    data-icon="inline-start"
+                    className={refreshGit.isPending ? "animate-spin" : undefined}
+                    aria-hidden="true"
+                  />
+                  <span className="relay-text-trim leading-none">
+                    {t("modals.workspace.syncGitBtn")}
+                  </span>
+                </Button>
+              </div>
+            )}
+          </div>
+
+          <div className="flex flex-col gap-2.5 rounded-lg border border-border bg-card p-4">
+            <div>
+              <h3 className="text-xs font-semibold text-foreground">
+                {t("modals.workspace.presetsDiscovered")}
+              </h3>
+              <p className="mt-0.5 text-[11.5px] text-muted-foreground">
+                {t("settings.manifestHint")}
+              </p>
+            </div>
+
+            {workspace.has_manifest ? (
+              workspace.presets.length > 0 ? (
+                <div className="divide-y divide-border overflow-hidden rounded-md border border-border">
+                  {workspace.presets.map((preset) => (
+                    <div
+                      key={preset.name}
+                      className="flex flex-col gap-0.5 bg-background/60 px-3 py-2"
+                    >
+                      <div className="flex items-center justify-between gap-2">
+                        <span lang="en" className="font-mono-tech text-xs font-semibold">
+                          {preset.name}
+                        </span>
+                        <code
+                          lang="en"
+                          className="font-mono-tech truncate text-[11px] text-muted-foreground"
+                        >
+                          {[preset.program, ...preset.args].join(" ")}
+                        </code>
+                      </div>
+                      {preset.description && (
+                        <span className="text-[11px] text-muted-foreground">
+                          {preset.description}
+                        </span>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <p className="text-xs text-muted-foreground">{t("modals.workspace.noPresets")}</p>
+              )
+            ) : needsManifest ? (
+              <div className="flex items-center justify-between gap-3 rounded-md border border-dashed border-primary/40 bg-muted/30 px-3 py-2.5">
+                <span className="text-xs text-muted-foreground">
+                  {t("modals.workspace.missingManifestHint")}
+                </span>
+                <Button
+                  type="button"
+                  size="sm"
+                  disabled={initManifest.isPending}
+                  onClick={handleGenerateManifest}
+                  className="shrink-0"
+                >
+                  <FilePlus2 data-icon="inline-start" aria-hidden="true" />
+                  <span className="relay-text-trim leading-none">
+                    {t("modals.workspace.generateManifestBtn")}
+                  </span>
+                </Button>
+              </div>
+            ) : null}
+          </div>
+
+          <StatusBanner feedback={feedback} />
+        </div>
+      )}
+    </div>
+  );
+}
+
+function GeneralSettingsSection({
+  theme,
+  onToggleTheme,
+}: {
+  theme: "light" | "dark";
+  onToggleTheme: () => void;
+}) {
+  const { t, i18n } = useTranslation();
+  const currentLang: RelayLocale = i18n.language === "zh-CN" ? "zh-CN" : "en";
+
+  return (
+    <div className="flex min-w-0 flex-col gap-6">
+      <div>
+        <h2 className="text-sm font-semibold text-foreground">{t("settings.generalTab")}</h2>
+        <p className="mt-0.5 text-xs text-muted-foreground">{t("settings.generalSubtitle")}</p>
+      </div>
+
+      <div className="divide-y divide-border overflow-hidden rounded-lg border border-border bg-card">
+        <div className="flex items-center justify-between gap-4 px-4 py-3.5">
+          <div>
+            <div className="text-xs font-medium text-foreground">{t("settings.themeLabel")}</div>
+            <p className="text-[11.5px] text-muted-foreground">{t("settings.themeDesc")}</p>
+          </div>
+          <Button type="button" variant="outline" size="sm" onClick={onToggleTheme}>
+            {theme === "light" ? (
+              <Moon data-icon="inline-start" aria-hidden="true" />
+            ) : (
+              <Sun data-icon="inline-start" aria-hidden="true" />
+            )}
+            <span className="relay-text-trim leading-none">
+              {theme === "light" ? t("settings.themeLight") : t("settings.themeDark")}
+            </span>
+          </Button>
+        </div>
+
+        <div className="flex items-center justify-between gap-4 px-4 py-3.5">
+          <div>
+            <div className="text-xs font-medium text-foreground">{t("settings.languageLabel")}</div>
+            <p className="text-[11.5px] text-muted-foreground">{t("settings.languageDesc")}</p>
+          </div>
+          <div className="grid grid-cols-2 gap-1 rounded-md bg-muted p-0.5">
+            {(["en", "zh-CN"] as const).map((lang) => {
+              const active = currentLang === lang;
+              return (
+                <button
+                  key={lang}
+                  type="button"
+                  aria-pressed={active}
+                  onClick={() => setRelayLocale(lang)}
+                  className={cn(
+                    "cursor-pointer rounded-sm px-2.5 py-1 text-xs font-medium transition-all",
+                    active
+                      ? "bg-background text-foreground shadow-2xs"
+                      : "text-muted-foreground hover:text-foreground",
+                  )}
+                >
+                  {lang === "en" ? "English" : "中文"}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+export function SettingsView({
+  activeSection,
+  onSectionChange,
+  theme,
+  onToggleTheme,
+  onGoToWorkspace,
+}: SettingsViewProps) {
   const { t } = useTranslation();
   const { data: workspace } = useWorkspaceInfo();
   const { data: llmSettings } = useLlmSettings();
 
+  const sections: Array<{
+    id: SettingsSection;
+    label: string;
+    icon: typeof Cpu;
+  }> = [
+    { id: "llm", label: t("modals.workspace.llmTab"), icon: Sparkles },
+    { id: "mcp", label: t("modals.workspace.mcpTab"), icon: Terminal },
+    { id: "workspace", label: t("settings.workspaceTab"), icon: FolderGit2 },
+    { id: "general", label: t("settings.generalTab"), icon: SlidersHorizontal },
+  ];
+
   return (
-    <Dialog open={isOpen} onOpenChange={onOpenChange}>
-      <DialogContent className="max-h-[calc(100dvh-2rem)] overflow-y-auto overscroll-contain sm:max-w-xl">
-        <DialogHeader>
-          <div className="flex items-center gap-2.5">
-            <div className="flex size-8 shrink-0 items-center justify-center rounded-md bg-primary/10 text-primary">
-              <SlidersHorizontal className="size-4" aria-hidden="true" />
-            </div>
-            <DialogTitle>{t("modals.workspace.title")}</DialogTitle>
-          </div>
-        </DialogHeader>
+    <div className="flex min-h-0 min-w-0 flex-1 bg-background">
+      <nav
+        aria-label={t("modals.workspace.title")}
+        className="flex w-48 shrink-0 flex-col gap-1 border-r border-border p-3"
+      >
+        {sections.map((section) => {
+          const active = activeSection === section.id;
+          const Icon = section.icon;
+          return (
+            <button
+              key={section.id}
+              type="button"
+              aria-current={active ? "page" : undefined}
+              onClick={() => onSectionChange(section.id)}
+              className={cn(
+                "flex h-9 w-full cursor-pointer items-center gap-2.5 rounded-md px-2.5 text-[13px] leading-snug font-medium transition-colors outline-none focus-visible:ring-2 focus-visible:ring-ring/40",
+                active
+                  ? "bg-muted text-foreground"
+                  : "text-muted-foreground hover:bg-muted/50 hover:text-foreground",
+              )}
+            >
+              <Icon className="size-4 shrink-0" aria-hidden="true" />
+              <span className="truncate">{section.label}</span>
+            </button>
+          );
+        })}
+      </nav>
 
-        <Tabs
-          value={activeTab}
-          onValueChange={(value) =>
-            onTabChange(value === "llm" || value === "mcp" ? value : "repo")
-          }
-          className="min-w-0 gap-3"
-        >
-          <TabsList className="grid w-full grid-cols-3">
-            <TabsTrigger value="repo">
-              <span className="relay-text-trim leading-none">{t("modals.workspace.repoTab")}</span>
-            </TabsTrigger>
-            <TabsTrigger value="llm">
-              <span className="relay-text-trim leading-none">{t("modals.workspace.llmTab")}</span>
-            </TabsTrigger>
-            <TabsTrigger value="mcp">
-              <span className="relay-text-trim leading-none">{t("modals.workspace.mcpTab")}</span>
-            </TabsTrigger>
-          </TabsList>
+      <div className="min-h-0 min-w-0 flex-1 overflow-y-auto overscroll-contain [scrollbar-gutter:stable]">
+        <div className="w-full max-w-2xl px-8 py-6">
+          {activeSection === "llm" && llmSettings && (
+            <LlmSettingsSection key={workspace?.repo_root ?? "global"} initial={llmSettings} />
+          )}
 
-          <TabsContent value="repo" className="min-w-0">
-            <RepositorySettingsTab
-              key={workspace?.repo_root ?? "no-repo"}
-              workspace={workspace}
-              repoNotice={repoNotice}
-            />
-          </TabsContent>
+          {activeSection === "mcp" && (
+            <McpSettingsSection workspace={workspace} onGoToWorkspace={onGoToWorkspace} />
+          )}
 
-          <TabsContent value="llm" className="min-w-0">
-            {llmSettings && (
-              <LlmSettingsTab key={workspace?.repo_root ?? "global"} initial={llmSettings} />
-            )}
-          </TabsContent>
+          {activeSection === "workspace" && (
+            <WorkspaceManifestSection workspace={workspace} onGoToWorkspace={onGoToWorkspace} />
+          )}
 
-          <TabsContent value="mcp" className="min-w-0">
-            <McpConfigTab workspace={workspace} onOpenRepoTab={() => onTabChange("repo")} />
-          </TabsContent>
-        </Tabs>
-      </DialogContent>
-    </Dialog>
+          {activeSection === "general" && (
+            <GeneralSettingsSection theme={theme} onToggleTheme={onToggleTheme} />
+          )}
+        </div>
+      </div>
+    </div>
   );
 }

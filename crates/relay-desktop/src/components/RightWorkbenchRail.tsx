@@ -7,8 +7,10 @@ import type {
   AgentChatMessage_Serialize,
   GraphNode,
   LlmSettingsView_Serialize,
+  PeerStatus_Serialize,
   TaskLogSnapshot,
   TaskRecord_Serialize,
+  WorkspaceInfo_Serialize,
 } from "../bindings";
 import type { ApprovalInput } from "../lib/relayApi";
 import { isTaskRunning, type TaskLogBuffer } from "../lib/taskLogStream";
@@ -22,6 +24,12 @@ interface RightWorkbenchRailProps {
   activeTab: RightRailTab;
   onTabChange: (tab: RightRailTab) => void;
   onClose: () => void;
+  // Workspace context for Agent
+  workspace: WorkspaceInfo_Serialize | undefined;
+  status: PeerStatus_Serialize | undefined;
+  headCommitSha: string | null;
+  staleCount: number;
+  attentionCount: number;
   // Inspector props
   inspectorMode: InspectorMode;
   selectedNode: GraphNode | null;
@@ -58,6 +66,11 @@ export function RightWorkbenchRail({
   activeTab,
   onTabChange,
   onClose,
+  workspace,
+  status,
+  headCommitSha,
+  staleCount,
+  attentionCount,
   inspectorMode,
   selectedNode,
   selectedTask,
@@ -96,8 +109,8 @@ export function RightWorkbenchRail({
     selectedTask != null && cancellingTaskId === selectedTask.spec.task_id;
 
   return (
-    <aside className="z-20 flex h-full w-[400px] shrink-0 flex-col border-l border-border bg-card text-card-foreground shadow-xl xl:w-[420px]">
-      <div className="flex h-11 shrink-0 items-center justify-between gap-2 border-b border-border px-3">
+    <aside className="z-20 flex h-full w-[380px] shrink-0 flex-col border-l border-border bg-card text-card-foreground xl:w-[410px]">
+      <div className="flex h-12 shrink-0 items-center justify-between gap-2 border-b border-border px-3">
         <Tabs
           value={activeTab}
           onValueChange={(val) => {
@@ -109,11 +122,11 @@ export function RightWorkbenchRail({
         >
           <TabsList className="h-7">
             <TabsTrigger value="agent" className="gap-1.5 px-2.5">
-              <Sparkles className="size-3.5 text-primary" />
+              <Sparkles className="size-3.5 text-primary" aria-hidden="true" />
               <span className="relay-text-trim leading-none">{t("copilot.tabAgent")}</span>
             </TabsTrigger>
             <TabsTrigger value="inspector" className="gap-1.5 px-2.5">
-              <FileSearch className="size-3.5" />
+              <FileSearch className="size-3.5" aria-hidden="true" />
               <span className="relay-text-trim leading-none">{t("copilot.tabDetails")}</span>
               {(hasPendingFix || hasRunningTask) && (
                 <span
@@ -139,6 +152,7 @@ export function RightWorkbenchRail({
               title={t("copilot.newChat")}
               disabled={isClearingChat}
               onClick={() => void onClearChat()}
+              className="text-muted-foreground hover:text-foreground"
             >
               <SquarePen />
             </Button>
@@ -150,6 +164,7 @@ export function RightWorkbenchRail({
             aria-label={t("detail.close")}
             title={t("detail.close")}
             onClick={onClose}
+            className="text-muted-foreground hover:text-foreground"
           >
             <X />
           </Button>
@@ -210,6 +225,11 @@ export function RightWorkbenchRail({
 
       {activeTab === "agent" ? (
         <AgentCopilotPanel
+          workspace={workspace}
+          status={status}
+          headCommitSha={headCommitSha}
+          staleCount={staleCount}
+          attentionCount={attentionCount}
           messages={messages}
           isStreaming={isStreaming}
           streamingMessageId={streamingMessageId}
