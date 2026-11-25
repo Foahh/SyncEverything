@@ -85,9 +85,20 @@ impl WorktreeSandbox {
             if let Some(explicit) = manifest.project.package_manager.as_deref() {
                 return super::pm::adapter_by_name(explicit);
             }
+        } else if let Some(explicit) = self.host_package_manager_override()? {
+            return super::pm::adapter_by_name(&explicit);
         }
         let root_files = self.root_files_at_commit(sha).await?;
         Ok(default_registry().detect_from_file_presence(|file| root_files.contains(file)))
+    }
+
+    fn host_package_manager_override(&self) -> RelayResult<Option<String>> {
+        let manifest_path = self.repo_root().join("relay.toml");
+        match std::fs::symlink_metadata(&manifest_path) {
+            Ok(_) => Ok(super::load_manifest(self.repo_root())?.project.package_manager),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error.into()),
+        }
     }
 
     async fn root_files_at_commit(&self, sha: &str) -> RelayResult<BTreeSet<String>> {

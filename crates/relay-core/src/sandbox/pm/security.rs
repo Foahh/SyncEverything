@@ -7,8 +7,17 @@ use std::path::{Component, Path, PathBuf};
 
 const MAX_DEPENDENCY_SPEC_LEN: usize = 512;
 
-/// Reject empty specs, option injection, whitespace, control bytes, shell metacharacters,
-/// and Windows `.cmd` shim metacharacter hazards (`%`, `^`, `!`).
+const ALLOWED_PEP508_MARKER_VARS: &[&str] = &[
+    "python_version",
+    "sys_platform",
+    "platform_system",
+    "platform_machine",
+    "os_name",
+    "implementation_name",
+];
+
+/// Reject empty specs, oversized specs, option injection, control bytes, URL schemes,
+/// `file:` references, and unconditionally unsafe shell expansion characters.
 pub fn reject_common_injection<'a>(manager: &str, raw: &'a str) -> RelayResult<&'a str> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
@@ -26,6 +35,18 @@ pub fn reject_common_injection<'a>(manager: &str, raw: &'a str) -> RelayResult<&
             format!("option injection is blocked in dependency_spec: '{trimmed}'"),
         ));
     }
+    if trimmed.contains("://") {
+        return Err(pm_error(
+            manager,
+            format!("URL schemes are blocked in dependency_spec: '{trimmed}'"),
+        ));
+    }
+    if trimmed.to_ascii_lowercase().starts_with("file:") {
+        return Err(pm_error(
+            manager,
+            format!("file: references are blocked in dependency_spec: '{trimmed}'"),
+        ));
+    }
     for ch in trimmed.chars() {
         if ch == '\0' || ch.is_control() {
             return Err(pm_error(
@@ -33,25 +54,13 @@ pub fn reject_common_injection<'a>(manager: &str, raw: &'a str) -> RelayResult<&
                 "control characters are blocked in dependency_spec",
             ));
         }
-        if ch.is_whitespace() {
-            return Err(pm_error(
-                manager,
-                format!("whitespace is blocked in dependency_spec: '{trimmed}'"),
-            ));
-        }
         if matches!(
             ch,
-            '&' | '|' | ';' | '$' | '`' | '\'' | '"' | '(' | ')' | '{' | '}' | '\\'
+            '&' | '|' | '$' | '`' | '(' | ')' | '{' | '}' | '\\' | '%'
         ) {
             return Err(pm_error(
                 manager,
                 format!("shell metacharacter '{ch}' is blocked in dependency_spec"),
-            ));
-        }
-        if matches!(ch, '%' | '^' | '!') {
-            return Err(pm_error(
-                manager,
-                format!("Windows .cmd metacharacter '{ch}' is blocked in dependency_spec"),
             ));
         }
     }
@@ -59,16 +68,11 @@ pub fn reject_common_injection<'a>(manager: &str, raw: &'a str) -> RelayResult<&
 }
 
 /// Validate a Python (`uv`) dependency specification: either a strict PEP-508 registry spec
-/// (e.g. `scipy>=1.14`, `requests[security]>=2.32,<3.0`) or a confined local archive/wheel
-/// inside `worktree_path` (e.g. `./vendor/tiny_stats-0.1.0-py3-none-any.whl`).
+/// (e.g. `scipy>=1.14`, `numpy >= 1.26, < 2.0`, `urllib3>=1.26,!=2.0.0`,
+/// `foo; python_version >= "3.11"`) or a confined local archive/wheel inside `worktree_path`
+/// (e.g. `./vendor/tiny_stats-0.1.0-py3-none-any.whl`).
 pub fn validate_uv_dependency_spec(worktree_path: &Path, spec: &str) -> RelayResult<String> {
     let trimmed = reject_common_injection("uv", spec)?;
-    if trimmed.contains("://") {
-        return Err(pm_error(
-            "uv",
-            format!("URL schemes are blocked in dependency_spec: '{trimmed}'"),
-        ));
-    }
 
     let looks_like_path = trimmed.starts_with('.')
         || trimmed.contains('/')
@@ -77,7 +81,9 @@ pub fn validate_uv_dependency_spec(worktree_path: &Path, spec: &str) -> RelayRes
         || trimmed.ends_with(".zip");
 
     if looks_like_path {
-        if trimmed.contains('<') || trimmed.contains('>') {
+        if trimmed.chars().any(|ch| {
+            ch.is_whitespace() || matches!(ch, '<' | '>' | ';' | '\'' | '"' | '!' | '^')
+        }) {
             return Err(pm_error(
                 "uv",
                 format!("shell metacharacter is blocked in local path dependency_spec: '{trimmed}'"),
@@ -107,12 +113,25 @@ pub fn validate_uv_dependency_spec(worktree_path: &Path, spec: &str) -> RelayRes
 }
 
 fn validate_pep508_registry_spec(spec: &str) -> RelayResult<()> {
-    let bytes = spec.as_bytes();
+    let (req_part, marker_part) = match spec.split_once(';') {
+        Some((req, marker)) => {
+            if marker.contains(';') {
+                return Err(pm_error(
+                    "uv",
+                    format!("multiple ';' markers are blocked in dependency_spec: '{spec}'"),
+                ));
+            }
+            (req.trim(), Some(marker.trim()))
+        }
+        None => (spec, None),
+    };
+
+    let bytes = req_part.as_bytes();
     let name_end = bytes
         .iter()
         .position(|b| !(b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.')))
         .unwrap_or(bytes.len());
-    let name = &spec[..name_end];
+    let name = &req_part[..name_end];
     if !is_valid_pep508_identifier(name) {
         return Err(pm_error(
             "uv",
@@ -120,7 +139,7 @@ fn validate_pep508_registry_spec(spec: &str) -> RelayResult<()> {
         ));
     }
 
-    let mut rest = &spec[name_end..];
+    let mut rest = req_part[name_end..].trim_start();
     if let Some(after_open) = rest.strip_prefix('[') {
         let Some((extras, after_close)) = after_open.split_once(']') else {
             return Err(pm_error(
@@ -128,50 +147,138 @@ fn validate_pep508_registry_spec(spec: &str) -> RelayResult<()> {
                 format!("unclosed extras bracket in dependency_spec: '{spec}'"),
             ));
         };
-        if extras.is_empty()
+        if extras.trim().is_empty()
             || !extras
                 .split(',')
-                .all(|extra| !extra.is_empty() && is_valid_pep508_identifier(extra))
+                .all(|extra| is_valid_pep508_identifier(extra.trim()))
         {
             return Err(pm_error(
                 "uv",
                 format!("invalid extras list in dependency_spec: '{spec}'"),
             ));
         }
-        rest = after_close;
+        rest = after_close.trim_start();
     }
 
-    if rest.is_empty() {
-        return Ok(());
+    if !rest.is_empty() {
+        for raw_clause in rest.split(',') {
+            let clause = raw_clause.trim();
+            if clause.is_empty() {
+                return Err(pm_error(
+                    "uv",
+                    format!("empty version clause in dependency_spec: '{spec}'"),
+                ));
+            }
+            let version = strip_pep508_operator(clause)
+                .ok_or_else(|| {
+                    pm_error(
+                        "uv",
+                        format!("invalid version specifier '{clause}' in dependency_spec: '{spec}'"),
+                    )
+                })?
+                .trim_start();
+            if version.is_empty()
+                || !version.as_bytes()[0].is_ascii_digit()
+                || !version.bytes().all(|b| {
+                    b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-' | b'+' | b'*')
+                })
+            {
+                return Err(pm_error(
+                    "uv",
+                    format!("invalid version constraint '{clause}' in dependency_spec: '{spec}'"),
+                ));
+            }
+        }
     }
 
-    for clause in rest.split(',') {
-        if clause.is_empty() {
+    if let Some(marker) = marker_part {
+        if marker.is_empty() {
             return Err(pm_error(
                 "uv",
-                format!("empty version clause in dependency_spec: '{spec}'"),
+                format!("empty environment marker in dependency_spec: '{spec}'"),
             ));
         }
-        let version = strip_pep508_operator(clause).ok_or_else(|| {
-            pm_error(
-                "uv",
-                format!("invalid version specifier '{clause}' in dependency_spec: '{spec}'"),
-            )
-        })?;
-        if version.is_empty()
-            || !version.as_bytes()[0].is_ascii_digit()
-            || !version.bytes().all(|b| {
-                b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-' | b'+' | b'*')
-            })
-        {
-            return Err(pm_error(
-                "uv",
-                format!("invalid version constraint '{clause}' in dependency_spec: '{spec}'"),
-            ));
-        }
+        validate_pep508_marker(marker, spec)?;
     }
 
     Ok(())
+}
+
+fn validate_pep508_marker(marker: &str, full_spec: &str) -> RelayResult<()> {
+    let mut cursor = marker;
+    loop {
+        cursor = cursor.trim_start();
+        let var_end = cursor
+            .bytes()
+            .position(|b| !(b.is_ascii_alphanumeric() || b == b'_'))
+            .unwrap_or(cursor.len());
+        let var = &cursor[..var_end];
+        if !ALLOWED_PEP508_MARKER_VARS.contains(&var) {
+            return Err(pm_error(
+                "uv",
+                format!("disallowed environment marker '{var}' in dependency_spec: '{full_spec}'"),
+            ));
+        }
+        cursor = cursor[var_end..].trim_start();
+        let after_op = strip_pep508_operator(cursor).ok_or_else(|| {
+            pm_error(
+                "uv",
+                format!("invalid marker operator in dependency_spec: '{full_spec}'"),
+            )
+        })?;
+        cursor = after_op.trim_start();
+
+        let quote = match cursor.as_bytes().first().copied() {
+            Some(b'"') => '"',
+            Some(b'\'') => '\'',
+            _ => {
+                return Err(pm_error(
+                    "uv",
+                    format!("marker value must be quoted in dependency_spec: '{full_spec}'"),
+                ));
+            }
+        };
+        let after_open = &cursor[1..];
+        let Some((literal, after_close)) = after_open.split_once(quote) else {
+            return Err(pm_error(
+                "uv",
+                format!("unclosed quote in environment marker: '{full_spec}'"),
+            ));
+        };
+        if literal.is_empty()
+            || !literal
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'_'))
+        {
+            return Err(pm_error(
+                "uv",
+                format!("invalid marker literal '{literal}' in dependency_spec: '{full_spec}'"),
+            ));
+        }
+
+        cursor = after_close;
+        if cursor.trim().is_empty() {
+            return Ok(());
+        }
+        if !cursor.starts_with(' ') {
+            return Err(pm_error(
+                "uv",
+                format!("invalid trailing marker syntax in dependency_spec: '{full_spec}'"),
+            ));
+        }
+        cursor = cursor.trim_start();
+        if let Some(rest) = cursor
+            .strip_prefix("and ")
+            .or_else(|| cursor.strip_prefix("or "))
+        {
+            cursor = rest;
+        } else {
+            return Err(pm_error(
+                "uv",
+                format!("only 'and'/'or' combinators are allowed in environment markers: '{full_spec}'"),
+            ));
+        }
+    }
 }
 
 fn is_valid_pep508_identifier(name: &str) -> bool {
@@ -188,7 +295,7 @@ fn is_valid_pep508_identifier(name: &str) -> bool {
 }
 
 fn strip_pep508_operator(clause: &str) -> Option<&str> {
-    for op in ["===", "==", "<=", ">=", "~=", "<", ">"] {
+    for op in ["===", "==", "!=", "<=", ">=", "~=", "<", ">"] {
         if let Some(rest) = clause.strip_prefix(op) {
             return Some(rest);
         }
@@ -196,10 +303,54 @@ fn strip_pep508_operator(clause: &str) -> Option<&str> {
     None
 }
 
-/// Validate a Cargo crate specification (`<crate>` or `<crate>@<version>`).
+fn strip_semver_comparator(clause: &str) -> (bool, &str) {
+    for op in ["<=", ">=", "^", "~", "=", "<", ">"] {
+        if let Some(rest) = clause.strip_prefix(op) {
+            return (true, rest);
+        }
+    }
+    (false, clause)
+}
+
+fn is_valid_semver_version_atom(atom: &str, allow_bare_wildcard: bool, allow_x_wildcard: bool) -> bool {
+    if atom.is_empty() || atom.starts_with('-') {
+        return false;
+    }
+    if atom == "*" {
+        return allow_bare_wildcard;
+    }
+    if !atom.as_bytes()[0].is_ascii_digit() {
+        return false;
+    }
+    if !atom
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'+' | b'*'))
+    {
+        return false;
+    }
+    if atom.contains('*') {
+        let mut parts = atom.split('.').peekable();
+        while let Some(part) = parts.next() {
+            if part == "*" {
+                return parts.peek().is_none();
+            }
+            if part.is_empty() || !part.bytes().all(|b| b.is_ascii_digit()) {
+                return false;
+            }
+        }
+        return false;
+    }
+    if !allow_x_wildcard && atom.split('.').any(|part| matches!(part, "x" | "X")) {
+        return false;
+    }
+    true
+}
+
+/// Validate a Cargo crate specification (`<crate>` or `<crate>@<semver-req>`),
+/// supporting standard Cargo semver comparators (`^`, `~`, `=`, `>=`, `<=`, `<`, `>`, `,`, `*`).
 pub fn validate_cargo_dependency_spec(spec: &str) -> RelayResult<String> {
     let trimmed = reject_common_injection("cargo", spec)?;
-    for forbidden in ['<', '>', '/', ':', '[', ']', ',', '*', '?', '~'] {
+    for forbidden in ['/', ':', '[', ']', '?', ';', '\'', '"', '!'] {
         if trimmed.contains(forbidden) {
             return Err(pm_error(
                 "cargo",
@@ -235,17 +386,29 @@ pub fn validate_cargo_dependency_spec(spec: &str) -> RelayResult<String> {
     }
 
     if let Some(ver) = version {
-        let ver = ver.strip_prefix('=').unwrap_or(ver);
-        if ver.is_empty()
-            || !ver.as_bytes()[0].is_ascii_digit()
-            || !ver
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'+'))
-        {
+        let ver = ver.trim();
+        if ver.is_empty() {
             return Err(pm_error(
                 "cargo",
                 format!("invalid Cargo version constraint in dependency_spec: '{trimmed}'"),
             ));
+        }
+        for raw_clause in ver.split(',') {
+            let clause = raw_clause.trim();
+            if clause.is_empty() {
+                return Err(pm_error(
+                    "cargo",
+                    format!("empty Cargo version clause in dependency_spec: '{trimmed}'"),
+                ));
+            }
+            let (has_op, rest) = strip_semver_comparator(clause);
+            let atom = rest.trim_start();
+            if !is_valid_semver_version_atom(atom, !has_op, false) {
+                return Err(pm_error(
+                    "cargo",
+                    format!("invalid Cargo version constraint in dependency_spec: '{trimmed}'"),
+                ));
+            }
         }
     }
 
@@ -265,11 +428,12 @@ fn is_valid_cargo_crate_name(name: &str) -> bool {
         .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'))
 }
 
-/// Validate a JavaScript/TypeScript registry dependency spec (`<pkg>[@<version>]` or
-/// `@<scope>/<pkg>[@<version>]`) ensuring every character is cmd.exe-inert on Windows.
+/// Validate a JavaScript/TypeScript registry dependency spec (`<pkg>[@<version-or-range>]` or
+/// `@<scope>/<pkg>[@<version-or-range>]`), accepting standard semver ranges (`^`, `~`,
+/// `>=`, `<=`, `<`, `>`, `*`, space-separated comparators) and dist-tags.
 pub fn validate_js_dependency_spec(manager: &str, spec: &str) -> RelayResult<String> {
     let trimmed = reject_common_injection(manager, spec)?;
-    for forbidden in ['<', '>', ':', '[', ']', ',', '*', '?', '~', '='] {
+    for forbidden in [':', '[', ']', ',', '?', ';', '\'', '"', '!'] {
         if trimmed.contains(forbidden) {
             return Err(pm_error(
                 manager,
@@ -315,27 +479,54 @@ pub fn validate_js_dependency_spec(manager: &str, spec: &str) -> RelayResult<Str
         ));
     }
 
-    if let Some(ver) = version
-        && (ver.is_empty()
-            || !ver.as_bytes()[0].is_ascii_alphanumeric()
-            || !ver
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'_' | b'+')))
-    {
-        return Err(pm_error(
-            manager,
-            format!("invalid version or dist-tag in dependency_spec: '{trimmed}'"),
-        ));
-    }
-
-    if !is_safe_cmd_arg(trimmed) {
-        return Err(pm_error(
-            manager,
-            format!("dependency_spec '{trimmed}' contains characters disallowed for safe launcher execution"),
-        ));
+    if let Some(ver) = version {
+        let ver = ver.trim();
+        if ver.is_empty() || ver.contains('@') || !is_valid_js_version_or_range(ver) {
+            return Err(pm_error(
+                manager,
+                format!("invalid version or dist-tag in dependency_spec: '{trimmed}'"),
+            ));
+        }
     }
 
     Ok(trimmed.to_owned())
+}
+
+fn is_valid_js_version_or_range(ver: &str) -> bool {
+    if !ver.contains(' ')
+        && ver.as_bytes()[0].is_ascii_alphabetic()
+        && ver
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'_'))
+    {
+        return true;
+    }
+
+    let tokens: Vec<&str> = ver.split(' ').filter(|token| !token.is_empty()).collect();
+    if tokens.is_empty() {
+        return false;
+    }
+
+    let mut idx = 0;
+    while idx < tokens.len() {
+        let token = tokens[idx];
+        if matches!(token, "<=" | ">=" | "^" | "~" | "=" | "<" | ">") {
+            let Some(&next) = tokens.get(idx + 1) else {
+                return false;
+            };
+            if !is_valid_semver_version_atom(next, false, true) {
+                return false;
+            }
+            idx += 2;
+        } else {
+            let (has_op, atom) = strip_semver_comparator(token);
+            if !is_valid_semver_version_atom(atom, !has_op, true) {
+                return false;
+            }
+            idx += 1;
+        }
+    }
+    true
 }
 
 fn is_valid_js_segment(segment: &str) -> bool {
@@ -530,49 +721,177 @@ pub async fn stage_intent_to_add(
 
 /// Strict allowlist of characters safe to pass through a Windows `.cmd` shim without
 /// triggering `cmd.exe` metacharacter interpretation or argument splitting.
+/// Bare `~` is inert in `cmd.exe` when `%` is disallowed.
 pub fn is_safe_cmd_arg(arg: &str) -> bool {
     !arg.is_empty()
         && arg.bytes().all(|byte| {
             byte.is_ascii_alphanumeric()
-                || matches!(byte, b'-' | b'_' | b'.' | b':' | b'/' | b'@' | b'+' | b'=')
+                || matches!(
+                    byte,
+                    b'-' | b'_' | b'.' | b':' | b'/' | b'@' | b'+' | b'=' | b'~'
+                )
         })
 }
 
 #[cfg(windows)]
-/// Resolve an installed package manager executable or checked Windows command shim.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WindowsLauncher {
+    pub program: PathBuf,
+    pub prefix_args: Vec<std::ffi::OsString>,
+}
+
+#[cfg(windows)]
+impl WindowsLauncher {
+    pub fn direct(program: PathBuf) -> Self {
+        Self {
+            program,
+            prefix_args: Vec::new(),
+        }
+    }
+
+    pub fn with_script(node_exe: PathBuf, script: PathBuf) -> Self {
+        Self {
+            program: node_exe,
+            prefix_args: vec![script.into_os_string()],
+        }
+    }
+}
+
+#[cfg(windows)]
+/// Resolve an installed JS package manager executable on Windows.
+///
+/// Preference order (avoiding `cmd.exe` BatBadBut exposure whenever possible):
+/// 1. Native `{program}.exe` on `PATH`
+/// 2. Direct `node.exe` + JS manager CLI script (bypasses `cmd.exe` completely)
+/// 3. Checked `{program}.cmd` shim with strict `is_safe_cmd_arg` validation
 pub fn resolve_windows_package_launcher(
     program: &str,
     args: &[String],
     search_path: &std::ffi::OsStr,
-) -> RelayResult<Option<PathBuf>> {
-    // Standard Windows npm/pnpm/yarn installs often expose only a .cmd shim.
-    // Prefer a native .exe if available; otherwise allow .cmd only when every
-    // resolved argument belongs to a strict cmd.exe-inert character allowlist.
+) -> RelayResult<Option<WindowsLauncher>> {
     if !matches!(program, "npm" | "pnpm" | "yarn") {
         return Ok(None);
     }
-    let mut cmd_candidate = None;
+    let mut cmd_candidate: Option<(PathBuf, PathBuf)> = None;
     for dir in std::env::split_paths(search_path).filter(|dir| dir.is_absolute()) {
         let exe = dir.join(format!("{program}.exe"));
         if exe.is_file() {
-            return Ok(Some(exe));
+            return Ok(Some(WindowsLauncher::direct(exe)));
         }
         if cmd_candidate.is_none() {
             let cmd = dir.join(format!("{program}.cmd"));
             if cmd.is_file() {
-                cmd_candidate = Some(cmd);
+                cmd_candidate = Some((dir, cmd));
             }
         }
     }
-    let Some(cmd) = cmd_candidate else {
+    let Some((cmd_dir, cmd_path)) = cmd_candidate else {
         return Ok(None);
     };
+    if let Some(direct_node) =
+        resolve_windows_node_cli_launcher(program, &cmd_dir, &cmd_path, search_path)
+    {
+        return Ok(Some(direct_node));
+    }
     if let Some(unsafe_arg) = args.iter().find(|arg| !is_safe_cmd_arg(arg)) {
         return Err(RelayError::Internal(format!(
             "argument '{unsafe_arg}' contains characters not allowed for Windows .cmd launcher '{program}'"
         )));
     }
-    Ok(Some(cmd))
+    Ok(Some(WindowsLauncher::direct(cmd_path)))
+}
+
+#[cfg(windows)]
+fn resolve_windows_node_cli_launcher(
+    program: &str,
+    cmd_dir: &Path,
+    cmd_path: &Path,
+    search_path: &std::ffi::OsStr,
+) -> Option<WindowsLauncher> {
+    let node_exe = find_windows_node_exe(cmd_dir, search_path)?;
+    let script = find_windows_js_cli_script(program, cmd_dir, cmd_path)?;
+    Some(WindowsLauncher::with_script(node_exe, script))
+}
+
+#[cfg(windows)]
+fn find_windows_node_exe(cmd_dir: &Path, search_path: &std::ffi::OsStr) -> Option<PathBuf> {
+    let sibling = cmd_dir.join("node.exe");
+    if sibling.is_file() {
+        return Some(sibling);
+    }
+    for dir in std::env::split_paths(search_path).filter(|dir| dir.is_absolute()) {
+        let candidate = dir.join("node.exe");
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+#[cfg(windows)]
+fn find_windows_js_cli_script(program: &str, cmd_dir: &Path, cmd_path: &Path) -> Option<PathBuf> {
+    let known_rel_paths: &[&str] = match program {
+        "npm" => &["node_modules/npm/bin/npm-cli.js"],
+        "pnpm" => &[
+            "node_modules/pnpm/bin/pnpm.cjs",
+            "node_modules/pnpm/dist/pnpm.cjs",
+            "node_modules/corepack/dist/pnpm.js",
+        ],
+        "yarn" => &[
+            "node_modules/yarn/bin/yarn.js",
+            "node_modules/corepack/dist/yarn.js",
+        ],
+        _ => &[],
+    };
+    for rel in known_rel_paths {
+        let candidate = cmd_dir.join(rel);
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+
+    // Fallback: inspect standard npm/cmd-shim `%dp0%\...` or `%~dp0\...` JS entrypoint references.
+    let meta = std::fs::metadata(cmd_path).ok()?;
+    if meta.len() > 16 * 1024 {
+        return None;
+    }
+    let raw = std::fs::read_to_string(cmd_path).ok()?;
+    extract_cmd_shim_js_script(cmd_dir, &raw)
+}
+
+#[cfg(windows)]
+fn extract_cmd_shim_js_script(cmd_dir: &Path, shim_content: &str) -> Option<PathBuf> {
+    for raw_token in shim_content.split(['"', '\r', '\n']) {
+        let token = raw_token.trim();
+        let lower = token.to_ascii_lowercase();
+        let rel = if let Some(idx) = lower.find("%~dp0\\") {
+            &token[idx + "%~dp0\\".len()..]
+        } else if let Some(idx) = lower.find("%~dp0/") {
+            &token[idx + "%~dp0/".len()..]
+        } else if let Some(idx) = lower.find("%dp0%\\") {
+            &token[idx + "%dp0%\\".len()..]
+        } else if let Some(idx) = lower.find("%dp0%/") {
+            &token[idx + "%dp0%/".len()..]
+        } else {
+            continue;
+        };
+        let rel = rel.trim_start_matches(['\\', '/']);
+        let rel_lower = rel.to_ascii_lowercase();
+        if !(rel_lower.ends_with(".js") || rel_lower.ends_with(".cjs") || rel_lower.ends_with(".mjs"))
+            || rel.contains("..")
+            || rel.contains('%')
+            || rel.contains(':')
+            || rel.chars().any(char::is_control)
+        {
+            continue;
+        }
+        let normalized = rel.replace('\\', "/");
+        let candidate = cmd_dir.join(&normalized);
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+    None
 }
 
 pub(crate) fn pm_error(manager: &str, message: impl Into<String>) -> RelayError {

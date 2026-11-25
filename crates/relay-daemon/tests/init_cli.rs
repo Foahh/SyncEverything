@@ -256,3 +256,96 @@ fn init_refuses_overwrite_without_force_and_overwrites_with_force() {
     assert_eq!(updated.project.package_manager.as_deref(), Some("uv"));
     assert!(updated.presets.contains_key(&updated.project.smoke_preset));
 }
+
+fn find_binary_dir(binary: &str) -> Option<PathBuf> {
+    let path = std::env::var_os("PATH")?;
+    let candidates: Vec<String> = if cfg!(windows) {
+        vec![
+            format!("{binary}.exe"),
+            format!("{binary}.cmd"),
+            binary.to_owned(),
+        ]
+    } else {
+        vec![binary.to_owned()]
+    };
+    std::env::split_paths(&path).find(|dir| candidates.iter().any(|name| dir.join(name).is_file()))
+}
+
+#[test]
+fn doctor_warns_on_missing_autodetected_pm_and_requires_preset_programs() {
+    let repo = TempRepo::new("doctor-smart-bins");
+    fs::create_dir(repo.path().join(".git")).unwrap();
+    fs::write(repo.path().join("package.json"), r#"{"name":"demo"}"#).unwrap();
+    fs::write(repo.path().join("bun.lock"), "{}").unwrap();
+    fs::write(
+        repo.path().join("relay.toml"),
+        "[project]\nrepo_id = 'smart'\nname = 'Smart'\nsmoke_preset = 'smoke'\n\
+         [presets.smoke]\nprogram = 'git'\nargs = ['status']\ndescription = 'Status'\ntimeout_secs = 5\n",
+    )
+    .unwrap();
+
+    let repo_path = repo.path().to_string_lossy().into_owned();
+    let data = repo.path().join("state");
+    let data_path = data.to_string_lossy().into_owned();
+
+    // Restrict PATH to only git's directory so auto-detected `bun` is guaranteed absent.
+    let git_dir = find_binary_dir("git").expect("git must be available on PATH");
+    let output = Command::new(env!("CARGO_BIN_EXE_relay-daemon"))
+        .env("PATH", &git_dir)
+        .args([
+            "--repo-root",
+            &repo_path,
+            "--data-dir",
+            &data_path,
+            "doctor",
+            "--json",
+            "--skip-llm",
+        ])
+        .output()
+        .expect("execute relay-daemon doctor");
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(output.status.success(), "doctor should pass with warn-only auto-detected PM: {report}");
+    assert_eq!(report["ok"], true, "{report}");
+    let checks = report["checks"].as_array().unwrap();
+    let bun_check = checks
+        .iter()
+        .find(|check| check["name"] == "bun")
+        .expect("expected advisory bun check");
+    assert_eq!(bun_check["required"], false, "{report}");
+    if !git_dir.join("bun").is_file() && !git_dir.join("bun.exe").is_file() {
+        assert_eq!(bun_check["status"], "warn", "{report}");
+    }
+
+    // Adding a preset that references a missing binary MUST fail doctor as required.
+    fs::write(
+        repo.path().join("relay.toml"),
+        "[project]\nrepo_id = 'smart'\nname = 'Smart'\nsmoke_preset = 'smoke'\n\
+         [presets.smoke]\nprogram = 'git'\nargs = ['status']\ndescription = 'Status'\ntimeout_secs = 5\n\
+         [presets.custom]\nprogram = 'relay-missing-tool-9f8e7d'\nargs = ['--help']\ndescription = 'Missing'\ntimeout_secs = 5\n",
+    )
+    .unwrap();
+    let missing_out = Command::new(env!("CARGO_BIN_EXE_relay-daemon"))
+        .env("PATH", &git_dir)
+        .args([
+            "--repo-root",
+            &repo_path,
+            "--data-dir",
+            &data_path,
+            "doctor",
+            "--json",
+            "--skip-llm",
+        ])
+        .output()
+        .expect("execute relay-daemon doctor with missing preset program");
+    let missing_report: serde_json::Value = serde_json::from_slice(&missing_out.stdout).unwrap();
+    assert!(!missing_out.status.success(), "missing preset program must fail doctor: {missing_report}");
+    assert_eq!(missing_report["ok"], false, "{missing_report}");
+    let tool_check = missing_report["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|check| check["name"] == "relay-missing-tool-9f8e7d")
+        .expect("expected required check for preset program");
+    assert_eq!(tool_check["required"], true, "{missing_report}");
+    assert_eq!(tool_check["status"], "fail", "{missing_report}");
+}

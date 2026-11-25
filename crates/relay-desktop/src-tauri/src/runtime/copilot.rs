@@ -28,6 +28,7 @@ use uuid::Uuid;
 const MAX_COPILOT_TURNS: usize = 8;
 const MAX_IDENTICAL_CALLS: u32 = 3;
 const HISTORY_WINDOW: u32 = 16;
+const AGENT_ORIGIN_LABEL: &str = "SyncEverything Agent";
 
 pub(super) struct ChatTurn {
     cancel: Arc<AtomicBool>,
@@ -376,19 +377,7 @@ impl DesktopRuntime {
             let _ = self.engine.upsert_chat_message(&assistant_msg).await;
 
             if stop_for_approval {
-                if assistant_msg.content.trim().is_empty() {
-                    let note = "A verified fix or run requires your confirmation before executing. Review the preview below and click **Approve** or **Dismiss**.";
-                    assistant_msg.content = note.to_owned();
-                    self.emit_chat_event(AgentChatStreamEvent {
-                        turn_id: turn_id.clone(),
-                        message_id: message_id.clone(),
-                        kind: "token_delta".into(),
-                        delta: Some(note.to_owned()),
-                        trace: None,
-                        approval: None,
-                        error: None,
-                    });
-                }
+                assistant_msg.content = approval_turn_content(&assistant_msg.content);
                 break 'turns;
             }
         }
@@ -680,7 +669,7 @@ impl DesktopRuntime {
             command_preset: args.preset,
             params: args.params,
             require_approval: args.require_approval.unwrap_or(true),
-            requested_by_device: "relay-copilot".into(),
+            requested_by_device: AGENT_ORIGIN_LABEL.into(),
             user_note: args.user_note,
         };
         let submitted = match self.submit(spec).await {
@@ -764,7 +753,7 @@ impl DesktopRuntime {
                 constraints: args.constraints,
             },
             freshness: Freshness::Fresh,
-            device_origin: "relay-copilot".into(),
+            device_origin: AGENT_ORIGIN_LABEL.into(),
             created_at: now,
             updated_at: now,
         };
@@ -870,6 +859,14 @@ fn err_outcome(message: String) -> ToolExecOutcome {
     }
 }
 
+fn approval_turn_content(content: &str) -> String {
+    if content.trim().is_empty() {
+        String::new()
+    } else {
+        content.to_owned()
+    }
+}
+
 fn truncate_preview(raw: &str, max_chars: usize) -> String {
     let mut chars = raw.chars();
     let taken: String = chars.by_ref().take(max_chars).collect();
@@ -877,5 +874,21 @@ fn truncate_preview(raw: &str, max_chars: usize) -> String {
         format!("{taken}…")
     } else {
         taken
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn agent_origin_label_and_empty_approval_content_are_clean() {
+        assert_eq!(AGENT_ORIGIN_LABEL, "SyncEverything Agent");
+        assert_eq!(approval_turn_content(""), "");
+        assert_eq!(approval_turn_content("   \n\t "), "");
+        assert_eq!(
+            approval_turn_content("Patch verified against smoke check."),
+            "Patch verified against smoke check."
+        );
     }
 }

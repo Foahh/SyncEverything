@@ -557,13 +557,24 @@ async fn run_doctor(cli: &Cli, as_json: bool, skip_llm: bool) -> Result<()> {
                     if has_git && has_smoke {
                         match relay_core::sandbox::resolve_adapter(&root, manifest.project.package_manager.as_deref()) {
                             Ok(adapter) => {
-                                if adapter.name() != "generic" {
-                                    let (ok, detail) = probe_binary(adapter.name(), &["--version"]).await;
+                                let (required_bins, advisory_bin) =
+                                    collect_doctor_binary_checks(&manifest, adapter.name());
+                                for binary in required_bins {
+                                    let (ok, detail) = probe_binary(&binary, &["--version"]).await;
                                     required_ok &= ok;
                                     checks.push(json!({
-                                        "name": adapter.name(),
+                                        "name": binary,
                                         "required": true,
                                         "status": if ok { "ok" } else { "fail" },
+                                        "detail": detail,
+                                    }));
+                                }
+                                if let Some(binary) = advisory_bin {
+                                    let (ok, detail) = probe_binary(&binary, &["--version"]).await;
+                                    checks.push(json!({
+                                        "name": binary,
+                                        "required": false,
+                                        "status": if ok { "ok" } else { "warn" },
                                         "detail": detail,
                                     }));
                                 }
@@ -679,20 +690,68 @@ async fn run_doctor(cli: &Cli, as_json: bool, skip_llm: bool) -> Result<()> {
     Ok(())
 }
 
+/// Compute which binaries `relay-daemon doctor` requires (`required: true`) vs reports
+/// as advisory (`required: false`, warning if missing).
+///
+/// Always requires every unique `program` referenced by `[presets]` (excluding `git`, which
+/// is probed separately) plus `project.package_manager` when explicitly configured in `relay.toml`.
+/// An auto-detected-only package manager binary not used by any preset is advisory-only.
+fn collect_doctor_binary_checks(
+    manifest: &RelayManifest,
+    resolved_adapter: &str,
+) -> (Vec<String>, Option<String>) {
+    let mut required = std::collections::BTreeSet::new();
+    for preset in manifest.presets.values() {
+        let program = preset.program.trim();
+        if !program.is_empty() && !program.eq_ignore_ascii_case("git") {
+            required.insert(program.to_owned());
+        }
+    }
+    let has_explicit_pm = manifest
+        .project
+        .package_manager
+        .as_deref()
+        .is_some_and(|pm| !pm.trim().is_empty());
+    let mut advisory = None;
+    if resolved_adapter != "generic" && !resolved_adapter.eq_ignore_ascii_case("git") {
+        let already_required = required
+            .iter()
+            .any(|bin| bin.eq_ignore_ascii_case(resolved_adapter));
+        if has_explicit_pm {
+            if !already_required {
+                required.insert(resolved_adapter.to_owned());
+            }
+        } else if !already_required {
+            advisory = Some(resolved_adapter.to_owned());
+        }
+    }
+    (required.into_iter().collect(), advisory)
+}
+
 async fn probe_binary(program: &str, args: &[&str]) -> (bool, String) {
     let executable = PathBuf::from(program);
     #[cfg(windows)]
-    let executable = match std::env::var_os("PATH") {
+    let launcher = match std::env::var_os("PATH") {
         Some(path) => match relay_core::sandbox::pm::security::resolve_windows_package_launcher(
             program,
             &args.iter().map(|arg| (*arg).to_owned()).collect::<Vec<_>>(),
             &path,
         ) {
-            Ok(shim) => shim.unwrap_or(executable),
+            Ok(resolved) => resolved,
             Err(error) => return (false, error.to_string()),
         },
-        None => executable,
+        None => None,
     };
+    #[cfg(windows)]
+    let mut command = match launcher {
+        Some(resolved) => {
+            let mut cmd = Command::new(resolved.program);
+            cmd.args(resolved.prefix_args);
+            cmd
+        }
+        None => Command::new(executable),
+    };
+    #[cfg(not(windows))]
     let mut command = Command::new(executable);
     command.args(args).stdin(Stdio::null()).kill_on_drop(true);
     let result = tokio::time::timeout(Duration::from_secs(5), command.output()).await;
@@ -1018,5 +1077,66 @@ mod tests {
             }
             other => panic!("expected Init command, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn doctor_binary_plan_requires_presets_and_explicit_pm_but_warns_for_autodetected_only() {
+        let polyglot_implicit: RelayManifest = toml::from_str(
+            r#"
+[project]
+repo_id = "poly"
+name = "Polyglot"
+smoke_preset = "check"
+
+[presets.check]
+description = "Cargo check"
+program = "cargo"
+args = ["check"]
+timeout_secs = 60
+"#,
+        )
+        .unwrap();
+        let (req, adv) = collect_doctor_binary_checks(&polyglot_implicit, "uv");
+        assert_eq!(req, vec!["cargo".to_owned()]);
+        assert_eq!(adv.as_deref(), Some("uv"));
+
+        let explicit_pm: RelayManifest = toml::from_str(
+            r#"
+[project]
+repo_id = "explicit"
+name = "Explicit"
+package_manager = "cargo"
+smoke_preset = "smoke"
+
+[presets.smoke]
+description = "Git status"
+program = "git"
+args = ["status"]
+timeout_secs = 10
+"#,
+        )
+        .unwrap();
+        let (req, adv) = collect_doctor_binary_checks(&explicit_pm, "cargo");
+        assert_eq!(req, vec!["cargo".to_owned()]);
+        assert_eq!(adv, None);
+
+        let autodetected_used_by_preset: RelayManifest = toml::from_str(
+            r#"
+[project]
+repo_id = "py"
+name = "Python"
+smoke_preset = "smoke"
+
+[presets.smoke]
+description = "Smoke via uv"
+program = "uv"
+args = ["run", "python", "--version"]
+timeout_secs = 30
+"#,
+        )
+        .unwrap();
+        let (req, adv) = collect_doctor_binary_checks(&autodetected_used_by_preset, "uv");
+        assert_eq!(req, vec!["uv".to_owned()]);
+        assert_eq!(adv, None);
     }
 }

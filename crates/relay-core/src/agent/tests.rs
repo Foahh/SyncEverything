@@ -205,6 +205,28 @@ async fn agent_parses_markdown_fenced_json_diagnosis() {
 }
 
 #[tokio::test]
+async fn agent_ignores_benign_extra_fields_in_structured_diagnosis() {
+    let response = json!({
+        "patch_kind": "dependency_spec",
+        "summary": "Install scipy to fix ModuleNotFoundError",
+        "dependency_spec": "scipy>=1.14",
+        "reasoning": "Traceback reports missing module scipy",
+        "confidence": 0.96,
+        "extra_metadata": {"source": "qwen3.5"}
+    });
+    let (url, server) = mock_completion(response.to_string()).await;
+    let proposal = SelfHealingAgent::new(endpoint(url))
+        .diagnose_preflight_failure(&failure("scipy"), "Forecast fixture")
+        .await
+        .unwrap();
+    assert_eq!(proposal.patch_kind, PatchKind::DependencySpec);
+    assert_eq!(proposal.summary, "Install scipy to fix ModuleNotFoundError");
+    assert_eq!(proposal.dependency_spec.as_deref(), Some("scipy>=1.14"));
+    assert_eq!(proposal.source, "llm");
+    let _ = server.await.unwrap();
+}
+
+#[tokio::test]
 async fn llm_client_probe_and_config_persistence_work() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();

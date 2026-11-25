@@ -460,7 +460,6 @@ pub struct DiagnosticProposal {
 }
 
 #[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
 struct ModelDiagnosis {
     patch_kind: PatchKind,
     summary: String,

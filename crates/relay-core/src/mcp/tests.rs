@@ -210,7 +210,10 @@ async fn mcp_end_to_end_preflight_patch_approval_and_stale_block() {
     assert!(!report.error_snippets.is_empty());
     let task = fixture.task(task_id).await;
     assert_eq!(task.state, TaskState::PreflightRunning);
-    assert!(task.preflight_summary.unwrap().contains("failed"));
+    assert_eq!(
+        task.preflight_summary.as_deref(),
+        Some("Quick check failed (exit code 1)")
+    );
 
     let worktree_file = server
         .handle_read_worktree_file(ReadWorktreeFileArgs {
@@ -548,4 +551,20 @@ async fn cancelling_patch_verification_persists_its_partial_log() {
     let (_, log) = fixture.engine.read_task_log(id).await.unwrap().unwrap();
     assert!(log.contains("verification started"));
     assert!(!fixture.sandbox.task_worktree(id).unwrap().0.exists());
+}
+
+#[test]
+fn formats_smoke_failure_summaries_without_rust_debug_syntax() {
+    assert_eq!(
+        format_smoke_failure_summary(Some(1)),
+        "Quick check failed (exit code 1)"
+    );
+    assert_eq!(
+        format_smoke_failure_summary(Some(127)),
+        "Quick check failed (exit code 127)"
+    );
+    assert_eq!(
+        format_smoke_failure_summary(None),
+        "Quick check failed (terminated by signal)"
+    );
 }

@@ -571,12 +571,19 @@ fn security_blocks_option_injection_shell_metachars_cmd_hazards_and_traversal() 
     fs::write(wt.join("vendor/good.whl"), "placeholder").unwrap();
     fs::write(temp.join("outside.whl"), "outside").unwrap();
 
-    // Valid specs pass.
+    // Valid specs pass across Python (uv), Cargo, and JS/TS (npm/pnpm/yarn/bun).
     for valid_uv in [
         "scipy",
         "scipy>=1.14",
         "requests[security]>=2.32,<3.0",
+        "requests[socks, security] >= 2.31, != 2.32.0",
+        "numpy >= 1.26, < 2.0",
+        "urllib3>=1.26,!=2.0.0",
         "tiny_stats==0.1.0",
+        "foo; python_version >= \"3.11\"",
+        "foo>=1.0; python_version >= \"3.11\" and sys_platform == 'linux'",
+        "bar; os_name == \"nt\" or platform_machine == \"x86_64\"",
+        "baz; platform_system != \"Windows\" and implementation_name == \"cpython\"",
         "./vendor/good.whl",
         "vendor/good.whl",
     ] {
@@ -585,17 +592,42 @@ fn security_blocks_option_injection_shell_metachars_cmd_hazards_and_traversal() 
             "expected valid uv spec '{valid_uv}'"
         );
     }
-    for valid_cargo in ["serde", "serde@1.0.210", "tokio@=1.40.0", "my_crate"] {
+    for valid_cargo in [
+        "serde",
+        "serde@1.0.210",
+        "tokio@=1.40.0",
+        "serde@^1.0",
+        "tokio@~1.40",
+        "serde@>=1.0,<2.0",
+        "serde@>=1.0, <2.0",
+        "serde@1.*",
+        "serde@*",
+        "my_crate",
+    ] {
         assert!(
             validate_cargo_dependency_spec(valid_cargo).is_ok(),
             "expected valid cargo spec '{valid_cargo}'"
         );
     }
-    for valid_js in ["lodash", "zod@3.23.8", "@types/node", "@types/node@22.10.0"] {
-        assert!(
-            validate_js_dependency_spec("npm", valid_js).is_ok(),
-            "expected valid js spec '{valid_js}'"
-        );
+    for manager in ["bun", "pnpm", "yarn", "npm"] {
+        for valid_js in [
+            "lodash",
+            "zod@3.23.8",
+            "@types/node",
+            "@types/node@22.10.0",
+            "react@^18.3.0",
+            "@types/node@^22",
+            "zod@~3.23.0",
+            "pkg@>=1.0.0 <2.0.0",
+            "pkg@>= 1.0.0 < 2.0.0",
+            "react@18.*",
+            "react@latest",
+        ] {
+            assert!(
+                validate_js_dependency_spec(manager, valid_js).is_ok(),
+                "expected valid {manager} spec '{valid_js}'"
+            );
+        }
     }
 
     // Injection & traversal vectors blocked across ALL ecosystems.
@@ -603,12 +635,15 @@ fn security_blocks_option_injection_shell_metachars_cmd_hazards_and_traversal() 
         "",
         "   ",
         "-e",
+        "--pre",
         "--editable=.",
         "--index-url=https://evil.invalid/simple",
         "--git=https://evil.invalid/repo.git",
         "--path=../outside",
         "pkg;rm -rf /",
+        "pkg; rm -rf /",
         "pkg&&calc",
+        "pkg && calc",
         "pkg|whoami",
         "pkg$(id)",
         "pkg`id`",
@@ -645,17 +680,64 @@ fn security_blocks_option_injection_shell_metachars_cmd_hazards_and_traversal() 
         );
     }
 
+    // Ecosystem-specific malformed specs and marker injection attempts remain blocked.
+    for bad_uv in [
+        "foo; ",
+        "foo; extra == \"dev\"",
+        "foo; python_version >= \"3.11\"; rm -rf /",
+        "foo; python_version >= 3.11",
+        "foo; python_version >= \"3.11\" and",
+        "foo; python_version >= \"$(id)\"",
+        "foo; python_version >= \"3.11\" or evil == \"1\"",
+        "foo>=1.0 --pre",
+    ] {
+        assert!(
+            validate_uv_dependency_spec(&wt, bad_uv).is_err(),
+            "uv must reject '{bad_uv}'"
+        );
+    }
+    for bad_cargo in [
+        "serde@",
+        "serde@>=*",
+        "serde@1.0,",
+        "serde@1.0 --offline",
+        "serde@>out.txt",
+        "serde@1.*.0",
+    ] {
+        assert!(
+            validate_cargo_dependency_spec(bad_cargo).is_err(),
+            "cargo must reject '{bad_cargo}'"
+        );
+    }
+    for bad_js in [
+        "react@",
+        "react@>=*",
+        "react@18.0 --registry=https://evil.invalid",
+        "react@latest --ignore-scripts",
+        "react@>out.txt",
+        "react@1.0;rm -rf /",
+    ] {
+        assert!(
+            validate_js_dependency_spec("npm", bad_js).is_err(),
+            "js must reject '{bad_js}'"
+        );
+    }
+
     // Non-regular directory masquerading as a manifest or lockfile is rejected.
     fs::create_dir(wt.join("Cargo.toml")).unwrap();
     let dir_err = ensure_regular_or_absent("cargo", &wt, &["Cargo.toml", "Cargo.lock"], &["Cargo.toml"])
         .unwrap_err();
     assert!(dir_err.to_string().contains("regular file"), "{dir_err}");
 
-    // Cross-platform cmd.exe arg allowlist check.
+    // Cross-platform cmd.exe arg allowlist check (bare ~ is inert without %).
     assert!(is_safe_cmd_arg("@scope/pkg@1.2.3"));
+    assert!(is_safe_cmd_arg("zod@~3.23.0"));
     assert!(!is_safe_cmd_arg("pkg^1.0.0"));
     assert!(!is_safe_cmd_arg("%PATH%"));
     assert!(!is_safe_cmd_arg("a&b"));
+    assert!(!is_safe_cmd_arg("pkg!1"));
+    assert!(!is_safe_cmd_arg("pkg>out"));
+    assert!(!is_safe_cmd_arg("two words"));
 
     // Symlink escape test when the host OS allows creating symlinks without elevation.
     let link_path = wt.join("vendor/escape.whl");

@@ -110,7 +110,7 @@ pub fn spawn_auto_reconnect(
                 .filter(|peer| {
                     !peer.is_revoked()
                         && peer.node_id != local_id
-                        && peer.role == expected_role
+                        && (peer.role == expected_role || peer.role == PeerRole::Peer)
                         && !remotely_revoked.contains(&peer.node_id)
                 })
                 .filter_map(|peer| {

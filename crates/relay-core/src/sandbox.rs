@@ -24,7 +24,6 @@ use crate::contracts::{
 use crate::engine::RelayEngine;
 use crate::error::{RelayError, RelayResult};
 use chrono::Utc;
-use std::io::ErrorKind;
 use std::path::{Component, Path, PathBuf};
 use std::process::{Output, Stdio};
 use tokio::io::AsyncReadExt;
@@ -123,13 +122,9 @@ pub struct WorktreeSandbox {
 }
 
 impl WorktreeSandbox {
-    pub(crate) fn task_manifest(&self, worktree: &Path) -> RelayResult<RelayManifest> {
-        match std::fs::symlink_metadata(worktree.join("relay.toml")) {
-            Ok(_) => load_manifest(worktree),
-            // A freshly generated manifest may not yet be present in the task's base commit.
-            Err(error) if error.kind() == ErrorKind::NotFound => load_manifest(self.repo_root()),
-            Err(error) => Err(error.into()),
-        }
+    /// Load the Host checkout's `relay.toml` as the single execution policy authority.
+    pub(crate) fn host_manifest(&self) -> RelayResult<RelayManifest> {
+        load_manifest(self.repo_root())
     }
 
     pub fn new(repo_root: impl Into<PathBuf>, worktrees_base: impl Into<PathBuf>) -> Self {
@@ -630,26 +625,27 @@ pub(crate) fn validate_confined_relative_path(raw: &str) -> RelayResult<PathBuf>
     validate_confined_path_components(rel, trimmed)
 }
 
+pub(crate) fn is_blocked_env_name(lower_name: &str) -> bool {
+    lower_name.starts_with(".env")
+        && !matches!(
+            lower_name,
+            ".env.example" | ".env.sample" | ".env.template" | ".env.dist" | ".env.schema"
+        )
+}
+
+pub(crate) fn is_blocked_secret_file_extension(lower_name: &str) -> bool {
+    lower_name.ends_with(".db")
+        || lower_name.ends_with(".db-wal")
+        || lower_name.ends_with(".db-shm")
+        || lower_name.ends_with(".pem")
+        || lower_name.ends_with(".key")
+}
+
 pub(crate) fn validate_confined_path_components(path: &Path, raw: &str) -> RelayResult<PathBuf> {
-    let mut normalized = PathBuf::new();
+    let mut parts = Vec::new();
     for component in path.components() {
         match component {
-            Component::Normal(part) => {
-                let name = part.to_string_lossy().to_ascii_lowercase();
-                if matches!(name.as_str(), ".git" | ".venv" | ".relay" | ".relay-desktop")
-                    || name.starts_with(".env")
-                    || name.ends_with(".db")
-                    || name.ends_with(".db-wal")
-                    || name.ends_with(".db-shm")
-                    || name.ends_with(".pem")
-                    || name.ends_with(".key")
-                {
-                    return Err(RelayError::Internal(format!(
-                        "access to protected path '{raw}' is blocked"
-                    )));
-                }
-                normalized.push(part);
-            }
+            Component::Normal(part) => parts.push(part),
             Component::CurDir => {}
             Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
                 return Err(RelayError::Internal(format!(
@@ -658,8 +654,23 @@ pub(crate) fn validate_confined_path_components(path: &Path, raw: &str) -> Relay
             }
         }
     }
-    if normalized.as_os_str().is_empty() {
+    if parts.is_empty() {
         return Err(RelayError::Internal("invalid repository file path".into()));
+    }
+    let last_idx = parts.len() - 1;
+    let mut normalized = PathBuf::new();
+    for (idx, part) in parts.into_iter().enumerate() {
+        let name = part.to_string_lossy().to_ascii_lowercase();
+        let is_last = idx == last_idx;
+        if matches!(name.as_str(), ".git" | ".venv" | ".relay" | ".relay-desktop")
+            || is_blocked_env_name(&name)
+            || (is_last && is_blocked_secret_file_extension(&name))
+        {
+            return Err(RelayError::Internal(format!(
+                "access to protected path '{raw}' is blocked"
+            )));
+        }
+        normalized.push(part);
     }
     Ok(normalized)
 }

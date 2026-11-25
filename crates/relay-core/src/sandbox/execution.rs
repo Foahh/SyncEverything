@@ -1,6 +1,7 @@
 use super::pm;
 use super::{
-    WorktreeSandbox, git_command, git_output, load_manifest, resolve_preset,
+    WorktreeSandbox, git_command, git_output, is_blocked_env_name,
+    is_blocked_secret_file_extension, load_manifest, resolve_preset,
     validate_confined_path_components, validate_confined_relative_path, working_diff,
 };
 use crate::contracts::{
@@ -104,26 +105,6 @@ pub(crate) enum PatchVerification {
 }
 
 impl WorktreeSandbox {
-    fn authorized_smoke_preset<'a>(&self, manifest: &'a RelayManifest) -> RelayResult<&'a str> {
-        if load_manifest(self.repo_root())?.project.smoke_preset != manifest.project.smoke_preset {
-            return Err(RelayError::Internal("smoke preset differs from the host relay.toml".into()));
-        }
-        Ok(&manifest.project.smoke_preset)
-    }
-
-    fn authorized_package_manager<'a>(
-        &self,
-        manifest: &'a RelayManifest,
-    ) -> RelayResult<Option<&'a str>> {
-        let host_pm = load_manifest(self.repo_root())?.project.package_manager;
-        if host_pm != manifest.project.package_manager {
-            return Err(RelayError::Internal(
-                "package_manager differs from the host relay.toml".into(),
-            ));
-        }
-        Ok(manifest.project.package_manager.as_deref())
-    }
-
     fn shared_cargo_target_dir(&self) -> RelayResult<PathBuf> {
         Ok(std::path::absolute(&self.worktrees_base)?.join("cargo-target"))
     }
@@ -148,21 +129,17 @@ impl WorktreeSandbox {
     pub async fn run_preset_streaming(
         &self,
         worktree_path: &Path,
-        manifest: &RelayManifest,
+        _manifest: &RelayManifest,
         preset_name: &str,
         params: &BTreeMap<String, String>,
         options: PresetRunOptions,
     ) -> RelayResult<PresetRunOutput> {
-        let preset = resolve_preset(manifest, preset_name)?;
-        let args = preset_args(preset, params)?;
-
-        // Authorize the command using the host checkout, even if a candidate patch edits relay.toml.
+        // Always resolve and authorize presets from the Host checkout's `relay.toml` so
+        // historical `--base-commit` runs and cosmetic edits work without allowing worktree
+        // commits or candidate patches to alter Host commands.
         let host_manifest = load_manifest(self.repo_root())?;
-        if resolve_preset(&host_manifest, preset_name)? != preset {
-            return Err(RelayError::Internal(format!(
-                "preset '{preset_name}' differs from the host relay.toml"
-            )));
-        }
+        let preset = resolve_preset(&host_manifest, preset_name)?;
+        let args = preset_args(preset, params)?;
 
         let start = Instant::now();
         if options
@@ -189,9 +166,15 @@ impl WorktreeSandbox {
             None => None,
         };
         #[cfg(windows)]
-        let program = launcher.as_deref().unwrap_or(program);
+        let program = launcher
+            .as_ref()
+            .map_or(program, |resolved| resolved.program.as_path());
         let cargo_target_dir = self.shared_cargo_target_dir()?;
         let mut command = worktree_command(program, &worktree_path, Some(&cargo_target_dir));
+        #[cfg(windows)]
+        if let Some(resolved) = &launcher {
+            command.args(&resolved.prefix_args);
+        }
         #[cfg(unix)]
         command.process_group(0);
         let is_uv = Path::new(&preset.program)
@@ -373,7 +356,7 @@ impl WorktreeSandbox {
         task_id: TaskId,
         worktree_path: &Path,
         worktree_branch: &str,
-        manifest: &RelayManifest,
+        _manifest: &RelayManifest,
         mut options: PresetRunOptions,
     ) -> RelayResult<PreflightReport> {
         self.validate_task_worktree(task_id, worktree_path, worktree_branch)
@@ -381,16 +364,17 @@ impl WorktreeSandbox {
         if options.task_id.is_none() {
             options.task_id = Some(task_id);
         }
+        let host_manifest = load_manifest(self.repo_root())?;
         let output = self
             .run_preset_streaming(
                 worktree_path,
-                manifest,
-                self.authorized_smoke_preset(manifest)?,
+                &host_manifest,
+                &host_manifest.project.smoke_preset,
                 &BTreeMap::new(),
                 options,
             )
             .await?;
-        let adapter = pm::resolve_adapter(worktree_path, self.authorized_package_manager(manifest)?)?;
+        let adapter = pm::resolve_adapter(worktree_path, host_manifest.project.package_manager.as_deref())?;
         let error_snippets = if output.success || output.cancelled {
             Vec::new()
         } else {
@@ -447,7 +431,7 @@ impl WorktreeSandbox {
         task_id: TaskId,
         worktree_path: &Path,
         worktree_branch: &str,
-        manifest: &RelayManifest,
+        _manifest: &RelayManifest,
         patch: PatchInput<'_>,
         summary: &str,
         mut options: PresetRunOptions,
@@ -458,13 +442,15 @@ impl WorktreeSandbox {
             options.task_id = Some(task_id);
         }
         let worktree_path = std::path::absolute(worktree_path)?;
-        let smoke_preset = self.authorized_smoke_preset(manifest)?;
-        let adapter = pm::resolve_adapter(&worktree_path, self.authorized_package_manager(manifest)?)?;
+        let host_manifest = load_manifest(self.repo_root())?;
+        let smoke_preset = host_manifest.project.smoke_preset.as_str();
+        let adapter =
+            pm::resolve_adapter(&worktree_path, host_manifest.project.package_manager.as_deref())?;
         let kind = patch.kind();
         let diff_before = working_diff(&worktree_path).await?;
         let apply_result = match patch {
             PatchInput::DependencySpec(spec) => {
-                let timeout_secs = resolve_preset(manifest, smoke_preset)?.timeout_secs;
+                let timeout_secs = resolve_preset(&host_manifest, smoke_preset)?.timeout_secs;
                 adapter
                     .add_dependency(
                         &worktree_path,
@@ -493,7 +479,7 @@ impl WorktreeSandbox {
             let smoke = self
                 .run_preset_streaming(
                     &worktree_path,
-                    manifest,
+                    &host_manifest,
                     smoke_preset,
                     &BTreeMap::new(),
                     options,
@@ -899,11 +885,12 @@ pub(super) async fn run_dependency_command(
 #[cfg(all(windows, test))]
 #[test]
 fn package_manager_shims_allow_safe_custom_scripts_and_reject_unsafe_chars() {
-    use pm::security::resolve_windows_package_launcher;
+    use pm::security::{WindowsLauncher, resolve_windows_package_launcher};
     let dir = tempfile::tempdir().unwrap();
 
     for (program, args) in [
         ("npm", vec!["run".into(), "test:unit".into()]),
+        ("npm", vec!["install".into(), "zod@~3.23.0".into()]),
         (
             "pnpm",
             vec!["--filter".into(), "@app/web".into(), "run".into(), "check:ci".into()],
@@ -917,7 +904,7 @@ fn package_manager_shims_allow_safe_custom_scripts_and_reject_unsafe_chars() {
         std::fs::write(&other, "").unwrap();
         assert_eq!(
             resolve_windows_package_launcher(program, &args, dir.path().as_os_str()).unwrap(),
-            Some(other)
+            Some(WindowsLauncher::direct(other))
         );
     }
 
@@ -936,6 +923,9 @@ fn package_manager_shims_allow_safe_custom_scripts_and_reject_unsafe_chars() {
         "foo|dir",
         "%COMSPEC%",
         "foo^bar",
+        "foo!bar",
+        "foo>out",
+        "foo<in",
         "\"quoted\"",
         "two words",
         "line\nbreak",
@@ -954,7 +944,7 @@ fn package_manager_shims_allow_safe_custom_scripts_and_reject_unsafe_chars() {
 #[cfg(all(windows, test))]
 #[test]
 fn package_manager_launcher_prefers_exe_over_cmd() {
-    use pm::security::resolve_windows_package_launcher;
+    use pm::security::{WindowsLauncher, resolve_windows_package_launcher};
     let dir = tempfile::tempdir().unwrap();
     let exe = dir.path().join("npm.exe");
     let cmd = dir.path().join("npm.cmd");
@@ -968,7 +958,46 @@ fn package_manager_launcher_prefers_exe_over_cmd() {
         dir.path().as_os_str(),
     )
     .unwrap();
-    assert_eq!(resolved, Some(exe));
+    assert_eq!(resolved, Some(WindowsLauncher::direct(exe)));
+}
+
+#[cfg(all(windows, test))]
+#[test]
+fn package_manager_launcher_bypasses_cmd_via_node_and_cli_script() {
+    use pm::security::{WindowsLauncher, resolve_windows_package_launcher};
+    let dir = tempfile::tempdir().unwrap();
+    let node_exe = dir.path().join("node.exe");
+    std::fs::write(&node_exe, "").unwrap();
+
+    let npm_cmd = dir.path().join("npm.cmd");
+    let npm_cli = dir.path().join("node_modules/npm/bin/npm-cli.js");
+    std::fs::create_dir_all(npm_cli.parent().unwrap()).unwrap();
+    std::fs::write(&npm_cmd, "").unwrap();
+    std::fs::write(&npm_cli, "").unwrap();
+
+    let pnpm_cmd = dir.path().join("pnpm.cmd");
+    let pnpm_cli = dir.path().join("node_modules/pnpm/bin/pnpm.cjs");
+    std::fs::create_dir_all(pnpm_cli.parent().unwrap()).unwrap();
+    std::fs::write(&pnpm_cmd, "").unwrap();
+    std::fs::write(&pnpm_cli, "").unwrap();
+
+    // Complex args (^, ~, spaces, [id], *) work safely because node.exe bypasses cmd.exe.
+    let rich_args = vec![
+        "install".into(),
+        "react@^18.3.0".into(),
+        "zod@~3.23.0".into(),
+        "--testNamePattern=auth flow".into(),
+        "src/[id]/page.test.ts".into(),
+        "./packages/*".into(),
+    ];
+    assert_eq!(
+        resolve_windows_package_launcher("npm", &rich_args, dir.path().as_os_str()).unwrap(),
+        Some(WindowsLauncher::with_script(node_exe.clone(), npm_cli))
+    );
+    assert_eq!(
+        resolve_windows_package_launcher("pnpm", &rich_args, dir.path().as_os_str()).unwrap(),
+        Some(WindowsLauncher::with_script(node_exe, pnpm_cli))
+    );
 }
 
 pub(crate) fn worktree_command(
@@ -1084,6 +1113,11 @@ async fn apply_code_diff_edits(worktree_path: &Path, edits: &[FileEdit]) -> Rela
         let edit_num = idx + 1;
         let rel = validate_confined_relative_path(&edit.file_path)?;
         let display_path = rel_display_path(&rel);
+        if display_path.eq_ignore_ascii_case("relay.toml") {
+            return Err(RelayError::Internal(
+                "editing 'relay.toml' is blocked in code_diff patches because host relay.toml is the execution policy authority".into(),
+            ));
+        }
         let target_path = ensure_no_symlink_escape(&canonical_root, &rel, &edit.file_path)?;
 
         match edit.old_text.as_deref() {
@@ -1613,11 +1647,20 @@ fn resolve_snippet_target(canonical_root: &Path, raw_path: &str) -> Option<(Stri
         std::fs::canonicalize(canonical_root.join(rel)).ok()?
     };
     let resolved = full.strip_prefix(canonical_root).ok()?;
+    let mut parts = Vec::new();
     for component in resolved.components() {
         let Component::Normal(part) = component else {
             return None;
         };
+        parts.push(part);
+    }
+    if parts.is_empty() {
+        return None;
+    }
+    let last_idx = parts.len() - 1;
+    for (idx, part) in parts.into_iter().enumerate() {
         let name = part.to_string_lossy().to_ascii_lowercase();
+        let is_last = idx == last_idx;
         if matches!(
             name.as_str(),
             ".git"
@@ -1627,12 +1670,8 @@ fn resolve_snippet_target(canonical_root: &Path, raw_path: &str) -> Option<(Stri
                 | ".relay-desktop"
                 | "node_modules"
                 | "__pycache__"
-        ) || name.starts_with(".env")
-            || name.ends_with(".db")
-            || name.ends_with(".db-wal")
-            || name.ends_with(".db-shm")
-            || name.ends_with(".pem")
-            || name.ends_with(".key")
+        ) || is_blocked_env_name(&name)
+            || (is_last && is_blocked_secret_file_extension(&name))
         {
             return None;
         }

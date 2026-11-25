@@ -733,11 +733,7 @@ impl RelayEngine {
         if task.state != TaskState::Cancelled {
             move_task(&mut task, TaskState::Cancelled)?;
         }
-        task.preflight_summary = Some(if raw_log.is_empty() {
-            "Cancelled by user".into()
-        } else {
-            format!("Cancelled by user (partial log blake3:{})", &hash[..12])
-        });
+        task.preflight_summary = Some("Cancelled by user".into());
         task.error_message = None;
         task.updated_at = task.updated_at.max(Utc::now());
         write_task(&mut tx, &task).await?;

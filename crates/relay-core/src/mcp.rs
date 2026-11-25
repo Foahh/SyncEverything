@@ -394,7 +394,7 @@ impl RelayMcpContext {
         let options = self.engine.preset_run_options(id, cancel_guard.token());
         let result = async {
             let handle = self.worktree(task).await?;
-            let manifest = sandbox.task_manifest(handle.worktree_path())?;
+            let manifest = sandbox.host_manifest()?;
             let report = sandbox
                 .run_preflight_with_options(
                     id,
@@ -421,7 +421,7 @@ impl RelayMcpContext {
             } else if let Some(module) = &report.detected_missing_module {
                 format!("Smoke preflight failed: missing dependency {module}")
             } else {
-                format!("Smoke preflight failed (exit code {:?})", report.exit_code)
+                format_smoke_failure_summary(report.exit_code)
             };
             if let Err(err) = self.engine.set_preflight_summary(id, summary).await {
                 if cancel_guard.token().is_cancelled()
@@ -498,7 +498,7 @@ impl RelayMcpContext {
             .engine
             .preset_run_options(task.spec.task_id, cancel_guard.token());
         let handle = self.worktree(task).await?;
-        let manifest = sandbox.task_manifest(handle.worktree_path())?;
+        let manifest = sandbox.host_manifest()?;
         let patch_input = match args.patch_kind.as_str() {
             "dependency_spec" => PatchInput::DependencySpec(
                 args.dependency_spec
@@ -658,7 +658,7 @@ impl RelayMcpContext {
             ));
         }
 
-        let manifest = sandbox.task_manifest(handle.worktree_path())?;
+        let manifest = sandbox.host_manifest()?;
         let output = sandbox
             .run_preset_streaming(
                 handle.worktree_path(),
@@ -695,10 +695,10 @@ impl RelayMcpContext {
                 .lines()
                 .rev()
                 .find(|line| !line.trim().is_empty());
+            let status_desc = format_exit_status_detail(output.exit_code);
             return Err(RelayError::Internal(format!(
-                "preset '{}' failed (exit code {:?}){}",
+                "preset '{}' failed ({status_desc}){}",
                 spec.command_preset,
-                output.exit_code,
                 detail.map_or_else(String::new, |line| format!(": {line}")),
             )));
         }
@@ -785,6 +785,17 @@ async fn elicit_approval(
         }
         Err(_) => None,
     }
+}
+
+fn format_exit_status_detail(exit_code: Option<i32>) -> String {
+    match exit_code {
+        Some(code) => format!("exit code {code}"),
+        None => "terminated by signal".into(),
+    }
+}
+
+fn format_smoke_failure_summary(exit_code: Option<i32>) -> String {
+    format!("Quick check failed ({})", format_exit_status_detail(exit_code))
 }
 
 fn rejected(task_id: TaskId) -> ApprovalExecutionResponse {

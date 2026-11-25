@@ -72,9 +72,15 @@ impl JsAdapter {
             None => None,
         };
         #[cfg(windows)]
-        let program = launcher.as_deref().unwrap_or(program);
+        let program = launcher
+            .as_ref()
+            .map_or(program, |resolved| resolved.program.as_path());
 
         let mut command = worktree_command(program, worktree_path, None);
+        #[cfg(windows)]
+        if let Some(resolved) = &launcher {
+            command.args(&resolved.prefix_args);
+        }
         command.args(args);
         Ok(command)
     }

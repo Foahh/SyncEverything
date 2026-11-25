@@ -142,21 +142,32 @@ pub(crate) async fn write_project_mcp_config(
 }
 
 pub fn validate_http_url(raw: &str) -> Result<String, String> {
-    if raw.chars().any(|ch| ch.is_control()) {
-        return Err("MCP HTTP endpoint URL cannot contain control characters.".into());
-    }
     let trimmed = raw.trim();
     if trimmed.is_empty() {
         return Err("MCP HTTP endpoint URL cannot be empty.".into());
     }
+    if trimmed.chars().any(|ch| ch.is_control()) {
+        return Err("MCP HTTP endpoint URL cannot contain control characters.".into());
+    }
     if trimmed.chars().any(|ch| ch.is_whitespace()) {
         return Err("MCP HTTP endpoint URL cannot contain whitespace.".into());
     }
-    let rest = trimmed
-        .strip_prefix("http://")
-        .or_else(|| trimmed.strip_prefix("https://"))
-        .ok_or_else(|| "MCP HTTP endpoint URL must start with http:// or https://.".to_owned())?;
+    if trimmed.contains('\\') {
+        return Err("MCP HTTP endpoint URL is not a valid URL.".into());
+    }
 
+    let url = tauri::Url::parse(trimmed)
+        .map_err(|_| "MCP HTTP endpoint URL is not a valid URL.".to_owned())?;
+    if !matches!(url.scheme(), "http" | "https") {
+        return Err("MCP HTTP endpoint URL must start with http:// or https://.".into());
+    }
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err("MCP HTTP endpoint URL must not include embedded credentials.".into());
+    }
+
+    let Some((_, rest)) = trimmed.split_once("://") else {
+        return Err("MCP HTTP endpoint URL must start with http:// or https://.".into());
+    };
     let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
     if authority.is_empty() {
         return Err("MCP HTTP endpoint URL must include a valid host.".into());
@@ -164,16 +175,15 @@ pub fn validate_http_url(raw: &str) -> Result<String, String> {
     if authority.contains('@') {
         return Err("MCP HTTP endpoint URL must not include embedded credentials.".into());
     }
-
-    if trimmed.contains('\\') || authority.ends_with(':') {
+    if authority.ends_with(':') {
         return Err("MCP HTTP endpoint URL is not a valid URL.".into());
     }
-    let url = tauri::Url::parse(trimmed)
-        .map_err(|_| "MCP HTTP endpoint URL is not a valid URL.".to_owned())?;
+
     if url.host_str().is_none_or(|host| {
-        !host
-            .chars()
-            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '-' | ':' | '[' | ']'))
+        host.is_empty()
+            || !host.chars().all(|ch| {
+                ch.is_ascii_alphanumeric() || matches!(ch, '.' | '-' | '_' | ':' | '[' | ']')
+            })
     }) {
         return Err("MCP HTTP endpoint URL contains an invalid host.".into());
     }
@@ -415,7 +425,7 @@ fn resolve_target_layout(
             let candidate = canonical_root.join(subdir);
             match fs::symlink_metadata(&candidate) {
                 Ok(meta) => {
-                    reject_if_symlink(&meta, subdir)?;
+                    reject_if_symlink(&candidate, &meta, subdir)?;
                     if !meta.is_dir() {
                         return Err(format!(
                             "Refusing to write {}: `{subdir}` exists and is not a directory.",
@@ -448,7 +458,7 @@ fn resolve_target_layout(
 
     match fs::symlink_metadata(&candidate_file) {
         Ok(meta) => {
-            reject_if_symlink(&meta, client.relative_path())?;
+            reject_if_symlink(&candidate_file, &meta, client.relative_path())?;
             if !meta.is_file() {
                 return Err(format!(
                     "Refusing to overwrite {}: target exists and is not a regular file.",
@@ -491,7 +501,52 @@ fn resolve_target_layout(
     }
 }
 
-fn reject_if_symlink(meta: &fs::Metadata, label: &str) -> Result<(), String> {
+#[cfg(any(windows, test))]
+const IO_REPARSE_TAG_MOUNT_POINT: u32 = 0xA000_0003;
+#[cfg(any(windows, test))]
+const IO_REPARSE_TAG_SYMLINK: u32 = 0xA000_000C;
+
+#[cfg(any(windows, test))]
+fn is_blocked_windows_reparse_tag(tag: u32) -> bool {
+    matches!(tag, IO_REPARSE_TAG_SYMLINK | IO_REPARSE_TAG_MOUNT_POINT)
+}
+
+#[cfg(windows)]
+fn read_windows_reparse_tag(path: &Path) -> std::io::Result<Option<u32>> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_ATTRIBUTE_REPARSE_POINT, FindClose, FindFirstFileW, WIN32_FIND_DATAW,
+    };
+
+    let mut wide: Vec<u16> = path.as_os_str().encode_wide().collect();
+    // Strip trailing path separators so FindFirstFileW queries the directory entry itself.
+    const BACKSLASH: u16 = b'\\' as u16;
+    const SLASH: u16 = b'/' as u16;
+    while wide.len() > 1 && matches!(wide.last().copied(), Some(BACKSLASH | SLASH)) {
+        wide.pop();
+    }
+    wide.push(0);
+
+    let mut data: WIN32_FIND_DATAW = unsafe { std::mem::zeroed() };
+    // `wide` is null-terminated and `data` is valid writable storage for FindFirstFileW.
+    let handle = unsafe { FindFirstFileW(wide.as_ptr(), &mut data) };
+    if handle == INVALID_HANDLE_VALUE {
+        return Err(std::io::Error::last_os_error());
+    }
+    // Close the search handle returned by FindFirstFileW immediately after reading metadata.
+    unsafe {
+        FindClose(handle);
+    }
+
+    if (data.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0 {
+        Ok(Some(data.dwReserved0))
+    } else {
+        Ok(None)
+    }
+}
+
+fn reject_if_symlink(path: &Path, meta: &fs::Metadata, label: &str) -> Result<(), String> {
     if meta.file_type().is_symlink() {
         return Err(format!(
             "Refusing to access `{label}` because it is a symbolic link."
@@ -502,11 +557,17 @@ fn reject_if_symlink(meta: &fs::Metadata, label: &str) -> Result<(), String> {
         use std::os::windows::fs::MetadataExt;
         const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
         if (meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT) != 0 {
-            return Err(format!(
-                "Refusing to access `{label}` because it is a symbolic link or directory junction."
-            ));
+            let tag = read_windows_reparse_tag(path).map_err(|err| {
+                format!("Unable to inspect Windows reparse tag for `{label}`: {err}")
+            })?;
+            if tag.is_some_and(is_blocked_windows_reparse_tag) {
+                return Err(format!(
+                    "Refusing to access `{label}` because it is a symbolic link or directory junction."
+                ));
+            }
         }
     }
+    let _ = path;
     Ok(())
 }
 
@@ -922,6 +983,26 @@ mod tests {
             "http://127.0.0.1:7608/mcp"
         );
         assert_eq!(
+            validate_http_url("\thttp://127.0.0.1:7608/mcp\r\n").unwrap(),
+            "http://127.0.0.1:7608/mcp"
+        );
+        assert_eq!(
+            validate_http_url("http://127.0.0.1:7608/mcp\n").unwrap(),
+            "http://127.0.0.1:7608/mcp"
+        );
+        assert_eq!(
+            validate_http_url("HTTP://127.0.0.1:7608/mcp").unwrap(),
+            "HTTP://127.0.0.1:7608/mcp"
+        );
+        assert_eq!(
+            validate_http_url("HTTPS://relay.example.com:8443/mcp").unwrap(),
+            "HTTPS://relay.example.com:8443/mcp"
+        );
+        assert_eq!(
+            validate_http_url("http://relay_daemon:7608/mcp").unwrap(),
+            "http://relay_daemon:7608/mcp"
+        );
+        assert_eq!(
             validate_http_url("https://relay.example.com:8443/mcp").unwrap(),
             "https://relay.example.com:8443/mcp"
         );
@@ -933,13 +1014,19 @@ mod tests {
         for invalid in [
             "",
             "   ",
+            "\r\n\t",
             "127.0.0.1:7608/mcp",
             "file:///etc/passwd",
+            "ftp://127.0.0.1:7608/mcp",
             "http://",
+            "http://127.0.0.1:/mcp",
             "http://127.0.0.1:0/mcp",
             "http://127.0.0.1:99999/mcp",
             "http://user:pass@127.0.0.1:7608/mcp",
-            "http://127.0.0.1:7608/mcp\n",
+            "http://@127.0.0.1:7608/mcp",
+            "http://127.0.0.1:7608/mcp\nbad",
+            "http://127.0.0.1:7608/mcp\r\nX-Header: 1",
+            "http://127.0.0.1:7608/mc\x00p",
             "http://127.0.0.1:7608/mcp bad",
         ] {
             assert!(
@@ -947,6 +1034,43 @@ mod tests {
                 "expected invalid URL to fail: {invalid:?}"
             );
         }
+    }
+
+    #[test]
+    fn classifies_windows_reparse_tags_allowing_cloud_placeholders() {
+        assert!(is_blocked_windows_reparse_tag(IO_REPARSE_TAG_SYMLINK));
+        assert!(is_blocked_windows_reparse_tag(IO_REPARSE_TAG_MOUNT_POINT));
+        // Cloud placeholder tags (e.g. OneDrive IO_REPARSE_TAG_CLOUD = 0x9000001A,
+        // IO_REPARSE_TAG_CLOUD_1..8, ProjFS 0x9000001C, dedup 0x80000013) must be allowed.
+        for allowed in [0x9000_001Au32, 0x9000_101A, 0x9000_001C, 0x8000_0013, 0] {
+            assert!(
+                !is_blocked_windows_reparse_tag(allowed),
+                "expected non-link reparse tag 0x{allowed:08X} to be allowed"
+            );
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn reads_windows_reparse_tag_for_junction_and_regular_dir() {
+        let repo = TempDir::new().expect("repo dir");
+        let outside = TempDir::new().expect("outside dir");
+        let regular_dir = repo.path().join("normal");
+        fs::create_dir(&regular_dir).unwrap();
+        assert_eq!(read_windows_reparse_tag(&regular_dir).unwrap(), None);
+
+        let junction = repo.path().join("junction");
+        let created = std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(&junction)
+            .arg(outside.path())
+            .output()
+            .is_ok_and(|out| out.status.success());
+        assert!(created, "expected NTFS junction creation to succeed");
+        assert_eq!(
+            read_windows_reparse_tag(&junction).unwrap(),
+            Some(IO_REPARSE_TAG_MOUNT_POINT)
+        );
     }
 
     #[test]

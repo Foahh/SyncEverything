@@ -590,11 +590,9 @@ async fn cancellation_handles_queued_active_raii_cleanup_and_persisted_partial_l
         .unwrap();
     assert_eq!(updated.state, TaskState::Cancelled);
     assert_eq!(hash, blake3::hash(partial.as_bytes()).to_hex().to_string());
-    assert!(
-        updated
-            .preflight_summary
-            .as_deref()
-            .is_some_and(|s| s.contains(&hash[..12]))
+    assert_eq!(
+        updated.preflight_summary.as_deref(),
+        Some("Cancelled by user")
     );
     close(engine).await;
 

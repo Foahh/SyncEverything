@@ -1067,6 +1067,156 @@ async fn startup_auto_reconnect_skips_revoked_hosts_and_other_clients() {
 }
 
 #[tokio::test]
+async fn startup_auto_reconnect_allows_peer_role_while_blocking_same_role() {
+    let temp = TempDir::new();
+    let now = Utc::now();
+
+    // 1. Client mode: skips another Client, reconnects to a PeerRole::Peer device.
+    let (other_client, other_client_engine) = start_local(&temp, "peer-other-client", None).await;
+    other_client_engine
+        .set_runtime_mode(RuntimeMode::Client)
+        .await
+        .unwrap();
+    let (peer_device, peer_device_engine) = start_local(&temp, "peer-role-target", None).await;
+    let (client, client_engine) = start_local(&temp, "peer-role-client", None).await;
+    let client = Arc::new(client);
+    client_engine
+        .set_runtime_mode(RuntimeMode::Client)
+        .await
+        .unwrap();
+
+    peer_device_engine
+        .upsert_trusted_peer(&TrustedPeerRecord {
+            node_id: client.id().to_string(),
+            label: "Laptop Client".into(),
+            role: PeerRole::Client,
+            ticket_or_addrs: serde_json::to_string(&client.addr()).unwrap(),
+            paired_at: now,
+            last_seen_at: now,
+            revoked_at: None,
+        })
+        .await
+        .unwrap();
+    client_engine
+        .upsert_trusted_peer(&TrustedPeerRecord {
+            node_id: other_client.id().to_string(),
+            label: "Other Client".into(),
+            role: PeerRole::Client,
+            ticket_or_addrs: serde_json::to_string(&other_client.addr()).unwrap(),
+            paired_at: now,
+            last_seen_at: now,
+            revoked_at: None,
+        })
+        .await
+        .unwrap();
+    client_engine
+        .upsert_trusted_peer(&TrustedPeerRecord {
+            node_id: peer_device.id().to_string(),
+            label: "Symmetric Peer".into(),
+            role: PeerRole::Peer,
+            ticket_or_addrs: serde_json::to_string(&peer_device.addr()).unwrap(),
+            paired_at: now,
+            last_seen_at: now,
+            revoked_at: None,
+        })
+        .await
+        .unwrap();
+
+    let (handle, mut reconnected_rx) = spawn_auto_reconnect(
+        client.clone(),
+        client_engine.clone(),
+        AutoReconnectConfig {
+            initial_backoff: Duration::from_millis(25),
+            max_backoff: Duration::from_millis(100),
+            attempt_timeout: Duration::from_millis(400),
+            sender_device: "laptop".into(),
+            max_attempts: Some(3),
+        },
+    );
+    let reconnected = tokio::time::timeout(Duration::from_secs(5), reconnected_rx.recv())
+        .await
+        .expect("client auto-reconnect to PeerRole::Peer timed out")
+        .expect("client auto-reconnect channel closed");
+    assert_eq!(reconnected.record.node_id, peer_device.id().to_string());
+    assert_eq!(reconnected.record.role, PeerRole::Peer);
+    handle.cancel();
+
+    // 2. Host mode: skips another Host, reconnects to a PeerRole::Peer device.
+    let (other_host, other_host_engine) = start_local(&temp, "peer-other-host", None).await;
+    other_host_engine
+        .set_runtime_mode(RuntimeMode::Host)
+        .await
+        .unwrap();
+    let (host, host_engine) = start_local(&temp, "peer-role-host", None).await;
+    let host = Arc::new(host);
+    host_engine
+        .set_runtime_mode(RuntimeMode::Host)
+        .await
+        .unwrap();
+    peer_device_engine
+        .upsert_trusted_peer(&TrustedPeerRecord {
+            node_id: host.id().to_string(),
+            label: "Workstation Host".into(),
+            role: PeerRole::Host,
+            ticket_or_addrs: serde_json::to_string(&host.addr()).unwrap(),
+            paired_at: now,
+            last_seen_at: now,
+            revoked_at: None,
+        })
+        .await
+        .unwrap();
+    host_engine
+        .upsert_trusted_peer(&TrustedPeerRecord {
+            node_id: other_host.id().to_string(),
+            label: "Other Host".into(),
+            role: PeerRole::Host,
+            ticket_or_addrs: serde_json::to_string(&other_host.addr()).unwrap(),
+            paired_at: now,
+            last_seen_at: now,
+            revoked_at: None,
+        })
+        .await
+        .unwrap();
+    host_engine
+        .upsert_trusted_peer(&TrustedPeerRecord {
+            node_id: peer_device.id().to_string(),
+            label: "Symmetric Peer".into(),
+            role: PeerRole::Peer,
+            ticket_or_addrs: serde_json::to_string(&peer_device.addr()).unwrap(),
+            paired_at: now,
+            last_seen_at: now,
+            revoked_at: None,
+        })
+        .await
+        .unwrap();
+
+    let (host_handle, mut host_rx) = spawn_auto_reconnect(
+        host.clone(),
+        host_engine.clone(),
+        AutoReconnectConfig {
+            initial_backoff: Duration::from_millis(25),
+            max_backoff: Duration::from_millis(100),
+            attempt_timeout: Duration::from_millis(400),
+            sender_device: "workstation".into(),
+            max_attempts: Some(3),
+        },
+    );
+    let host_reconnected = tokio::time::timeout(Duration::from_secs(5), host_rx.recv())
+        .await
+        .expect("host auto-reconnect to PeerRole::Peer timed out")
+        .expect("host auto-reconnect channel closed");
+    assert_eq!(host_reconnected.record.node_id, peer_device.id().to_string());
+    assert_eq!(host_reconnected.record.role, PeerRole::Peer);
+    host_handle.cancel();
+
+    client.shutdown_shared().await.unwrap();
+    host.shutdown_shared().await.unwrap();
+    peer_device.shutdown().await.unwrap();
+    other_client.shutdown().await.unwrap();
+    other_host.shutdown().await.unwrap();
+}
+
+#[tokio::test]
 async fn simultaneous_identity_initialization_uses_one_persisted_key() {
     let temp = TempDir::new();
     let (first, second) = tokio::join!(
