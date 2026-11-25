@@ -1,2 +1,2 @@
 # Each ablation result stores the SHA-256 of this exact input file.
-bench/results/context_ablation_inputs.json text eol=lf
+course/bench/results/context_ablation_inputs.json text eol=lf

@@ -13,6 +13,8 @@ import {
 } from "../src/lib/relayApi";
 
 import i18n from "../src/i18n";
+import enLocale from "../src/i18n/locales/en.json";
+import zhLocale from "../src/i18n/locales/zh-CN.json";
 import { formatErrorMessage } from "../src/lib/formatError";
 import { buildMcpSnippet } from "../src/lib/mcpConfig";
 
@@ -103,7 +105,7 @@ test("a stale approval card cannot resolve a different proposal for the same tas
     active_proposal: {
       patch_id: "current-fix",
       task_id: taskId,
-      kind: "uv_spec" as const,
+      kind: "dependency_spec" as const,
       summary: "fix",
       diff_preview: "",
       worktree_branch: "task/test",
@@ -184,6 +186,64 @@ test("formatErrorMessage maps known backend errors, strips Error prefix, and fal
   expect(formatErrorMessage("   ", tZh, "自定义兜底")).toBe("自定义兜底");
   expect(formatErrorMessage("", tZh)).toBe(tZh("errors.generic"));
   expect(formatErrorMessage(null, tEn)).toBe(tEn("errors.generic"));
+  expect(formatErrorMessage("transport error: remote PEER_REVOKED: revoked by host", tEn)).toBe(
+    tEn("errors.peerRevoked"),
+  );
+  expect(formatErrorMessage("peer has been revoked: node-123", tZh)).toBe(
+    tZh("errors.peerRevoked"),
+  );
+  expect(formatErrorMessage("internal error: device label cannot be empty", tEn)).toBe(
+    tEn("errors.emptyDeviceLabel"),
+  );
+});
+
+test("trusted peer preview API supports pairing, rename, revoke, reconnect guard, and remove", async () => {
+  resetBrowserPreviewState();
+  await relayApi.switchRuntimeMode("client");
+
+  const ticket = JSON.stringify({ id: "peer-workstation-001", addrs: ["192.168.1.9:7608"] });
+  const connected = await relayApi.connectPeerTicket(ticket);
+  expect(connected.connected).toBe(true);
+  expect(connected.remote_node_id).toBe("peer-workstation-001");
+
+  const initialPeers = await relayApi.listTrustedPeers();
+  expect(initialPeers).toHaveLength(1);
+  expect(initialPeers[0].node_id).toBe("peer-workstation-001");
+  expect(initialPeers[0].revoked_at).toBeNull();
+
+  await expect(relayApi.renameTrustedPeer("peer-workstation-001", "   ")).rejects.toThrow("empty");
+  const renamed = await relayApi.renameTrustedPeer("peer-workstation-001", "GPU Rig 4090");
+  expect(renamed.label).toBe("GPU Rig 4090");
+
+  const revoked = await relayApi.revokeTrustedPeer("peer-workstation-001");
+  expect(revoked.revoked_at).not.toBeNull();
+  expect((await relayApi.getRuntimeStatus()).connected).toBe(false);
+
+  await expect(relayApi.reconnectTrustedPeer("peer-workstation-001")).rejects.toThrow("revoked");
+  await expect(relayApi.connectPeerTicket(ticket)).rejects.toThrow("revoked");
+
+  await relayApi.removeTrustedPeer("peer-workstation-001");
+  expect(await relayApi.listTrustedPeers()).toEqual([]);
+
+  const repaired = await relayApi.connectPeerTicket(ticket);
+  expect(repaired.connected).toBe(true);
+  resetBrowserPreviewState();
+});
+
+function flattenLocaleKeys(obj: Record<string, unknown>, prefix = ""): string[] {
+  return Object.entries(obj)
+    .flatMap(([key, value]) => {
+      const fullKey = prefix ? `${prefix}.${key}` : key;
+      if (value && typeof value === "object" && !Array.isArray(value)) {
+        return flattenLocaleKeys(value as Record<string, unknown>, fullKey);
+      }
+      return [fullKey];
+    })
+    .sort();
+}
+
+test("en.json and zh-CN.json expose strictly symmetrical i18n key sets", () => {
+  expect(flattenLocaleKeys(enLocale)).toEqual(flattenLocaleKeys(zhLocale));
 });
 
 test("preview Copilot reports live evidence authority after graph changes", async () => {

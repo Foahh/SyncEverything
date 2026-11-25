@@ -34,6 +34,7 @@ import {
   GitCompare,
   History,
   Play,
+  RotateCcw,
   ShieldCheck,
   SlidersHorizontal,
   Sparkles,
@@ -50,7 +51,7 @@ import type {
   AgentToolTrace_Serialize,
 } from "../bindings";
 import { useQuery } from "@tanstack/react-query";
-import { formatErrorMessage } from "../lib/formatError";
+import { formatErrorMessage, isLlmConfigurationError } from "../lib/formatError";
 import { relayKeys } from "../lib/queries";
 import { relayApi, type ApprovalInput } from "../lib/relayApi";
 
@@ -326,6 +327,7 @@ interface CopilotMessageItemProps {
   onResolveApproval: (approval: ApprovalInput) => void;
   isResolvingApproval: boolean;
   onOpenLlmSettings: () => void;
+  onRetry?: () => void;
 }
 
 export function CopilotMessageItem({
@@ -334,6 +336,7 @@ export function CopilotMessageItem({
   onResolveApproval,
   isResolvingApproval,
   onOpenLlmSettings,
+  onRetry,
 }: CopilotMessageItemProps) {
   const { t } = useTranslation();
 
@@ -351,7 +354,18 @@ export function CopilotMessageItem({
     );
   }
 
-  const showThinking = isStreaming && message.content.length === 0 && message.traces.length === 0;
+  const hasContent = message.content.trim().length > 0;
+  const showThinking =
+    isStreaming &&
+    !hasContent &&
+    message.traces.length === 0 &&
+    message.approval == null &&
+    message.error == null;
+  const formattedError =
+    message.error != null ? formatErrorMessage(message.error, t, t("copilot.turnFailed")) : null;
+  const showConfigureModel =
+    message.error != null &&
+    (isLlmConfigurationError(message.error) || isLlmConfigurationError(formattedError));
 
   return (
     <Message align="start">
@@ -375,7 +389,7 @@ export function CopilotMessageItem({
           </Trace>
         )}
 
-        {message.content.length > 0 ? (
+        {hasContent && (
           <Streamdown
             plugins={STREAMDOWN_PLUGINS}
             mode={isStreaming ? "streaming" : "static"}
@@ -385,13 +399,12 @@ export function CopilotMessageItem({
           >
             {message.content}
           </Streamdown>
-        ) : (
-          !isStreaming &&
-          message.approval != null && (
-            <p className="text-[13px] leading-relaxed text-muted-foreground">
-              {t("copilot.approvalIntro")}
-            </p>
-          )
+        )}
+
+        {!hasContent && message.approval != null && (
+          <p className="text-[13px] leading-relaxed text-foreground">
+            {t("copilot.approvalReady")}
+          </p>
         )}
 
         {message.approval != null && (
@@ -402,7 +415,7 @@ export function CopilotMessageItem({
           />
         )}
 
-        {message.error != null && (
+        {formattedError != null && (
           <Alert
             variant="destructive"
             className="border-destructive/30 bg-[var(--relay-stale-soft)]"
@@ -410,15 +423,31 @@ export function CopilotMessageItem({
             <AlertCircle />
             <AlertTitle>{t("copilot.errorTitle")}</AlertTitle>
             <AlertDescription className="flex flex-col gap-2">
-              <span className="break-words">{formatErrorMessage(message.error, t)}</span>
-              <div>
-                <Button type="button" variant="outline" size="xs" onClick={onOpenLlmSettings}>
-                  <SlidersHorizontal data-icon="inline-start" />
-                  <span className="relay-text-trim leading-none">
-                    {t("copilot.configureModel")}
-                  </span>
-                </Button>
-              </div>
+              <span className="break-words">{formattedError}</span>
+              {(onRetry || showConfigureModel) && (
+                <div className="flex flex-wrap items-center gap-1.5">
+                  {onRetry && (
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="xs"
+                      disabled={isStreaming}
+                      onClick={onRetry}
+                    >
+                      <RotateCcw data-icon="inline-start" />
+                      <span className="relay-text-trim leading-none">{t("copilot.retry")}</span>
+                    </Button>
+                  )}
+                  {showConfigureModel && (
+                    <Button type="button" variant="outline" size="xs" onClick={onOpenLlmSettings}>
+                      <SlidersHorizontal data-icon="inline-start" />
+                      <span className="relay-text-trim leading-none">
+                        {t("copilot.configureModel")}
+                      </span>
+                    </Button>
+                  )}
+                </div>
+              )}
             </AlertDescription>
           </Alert>
         )}

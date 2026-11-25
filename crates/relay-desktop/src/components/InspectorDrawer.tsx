@@ -2,19 +2,40 @@ import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
-import { AlertCircle, CheckCircle2, ChevronRight, ShieldCheck, X } from "lucide-react";
+import {
+  AlertCircle,
+  CheckCircle2,
+  ChevronRight,
+  Loader2,
+  ShieldCheck,
+  Sparkles,
+  Square,
+  X,
+} from "lucide-react";
 import { useTranslation } from "react-i18next";
-import type { GraphNode, JsonValue, TaskRecord_Serialize } from "../bindings";
-import type { ApprovalInput } from "../lib/relayApi";
+import type { GraphNode, JsonValue, TaskLogSnapshot, TaskRecord_Serialize } from "../bindings";
+import { formatDeviceOrigin, formatErrorMessage, formatTaskSummary } from "../lib/formatError";
+import { needsTaskApproval, type ApprovalInput } from "../lib/relayApi";
+import { isTaskCancellable, taskStateBadgeProps, type TaskLogBuffer } from "../lib/taskLogStream";
+import { TaskLogViewer } from "./TaskLogViewer";
 
 type ActiveProposal = NonNullable<TaskRecord_Serialize["active_proposal"]>;
 
+export type InspectorMode = "node" | "fix" | "task";
+
 interface InspectorDrawerProps {
-  mode: "closed" | "node" | "fix";
+  mode: "closed" | InspectorMode;
   selectedNode: GraphNode | null;
+  selectedTask?: TaskRecord_Serialize | null;
+  taskLogBuffer?: TaskLogBuffer;
+  persistedTaskLog?: TaskLogSnapshot | null;
   pendingFixTask: TaskRecord_Serialize | null;
   onResolveApproval: (approval: ApprovalInput) => void;
   isResolvingApproval: boolean;
+  onCancelTask?: (taskId: string) => void;
+  isCancellingTask?: boolean;
+  onOpenApproval?: (task: TaskRecord_Serialize) => void;
+  onSelectEvidenceNode?: (nodeId: string) => void;
   onClose: () => void;
 }
 
@@ -151,10 +172,12 @@ function NodePayloadSection({ node }: { node: GraphNode }) {
   if (payload.kind === "decision") {
     return (
       <div className="flex flex-col gap-4">
-        <div className="flex flex-col gap-1.5">
-          <div className="text-[11.5px] font-medium text-muted-foreground">{t("detail.why")}</div>
-          <p className="text-[13px] leading-relaxed text-foreground">{payload.rationale}</p>
-        </div>
+        {payload.rationale.trim().length > 0 && (
+          <div className="flex flex-col gap-1.5">
+            <div className="text-[11.5px] font-medium text-muted-foreground">{t("detail.why")}</div>
+            <p className="text-[13px] leading-relaxed text-foreground">{payload.rationale}</p>
+          </div>
+        )}
 
         {payload.constraints.length > 0 && (
           <div className="flex flex-col gap-1.5">
@@ -218,7 +241,9 @@ function NodeTechnicalDetails({ node }: { node: GraphNode }) {
       <div className="flex flex-col gap-2 border-t border-border px-3 py-2.5 text-[11.5px]">
         <div className="flex justify-between gap-2">
           <span className="text-muted-foreground">{t("detail.device")}</span>
-          <span className="font-mono-tech text-foreground">{node.device_origin}</span>
+          <span className="font-mono-tech text-foreground">
+            {formatDeviceOrigin(node.device_origin, t)}
+          </span>
         </div>
         <div className="flex justify-between gap-2">
           <span className="text-muted-foreground">{t("detail.updated")}</span>
@@ -255,19 +280,111 @@ function NodeTechnicalDetails({ node }: { node: GraphNode }) {
   );
 }
 
+function TaskInspectorBody({
+  task,
+  buffer,
+  persistedLog,
+}: {
+  task: TaskRecord_Serialize;
+  buffer: TaskLogBuffer | undefined;
+  persistedLog: TaskLogSnapshot | null | undefined;
+}) {
+  const { t } = useTranslation();
+
+  return (
+    <>
+      {task.error_message && (
+        <Alert variant="destructive" className="border-destructive/30 bg-[var(--relay-stale-soft)]">
+          <AlertCircle />
+          <AlertTitle>{t("detail.taskError")}</AlertTitle>
+          <AlertDescription>{formatErrorMessage(task.error_message, t)}</AlertDescription>
+        </Alert>
+      )}
+
+      {task.preflight_summary && (
+        <p className="text-[12.5px] leading-relaxed text-muted-foreground">
+          {formatTaskSummary(task.preflight_summary, t)}
+        </p>
+      )}
+
+      {task.spec.user_note && (
+        <div className="flex flex-col gap-1">
+          <div className="text-[11px] font-medium text-muted-foreground">
+            {t("detail.taskNote")}
+          </div>
+          <p className="text-[12.5px] leading-relaxed text-foreground">{task.spec.user_note}</p>
+        </div>
+      )}
+
+      <TaskLogViewer
+        key={task.spec.task_id}
+        taskState={task.state}
+        waitingForApproval={needsTaskApproval(task)}
+        buffer={buffer}
+        persistedLog={persistedLog}
+      />
+
+      {task.state === "cancelled" && Boolean(persistedLog?.content) && (
+        <p className="text-[11.5px] text-muted-foreground">{t("detail.partialLogSaved")}</p>
+      )}
+
+      <details className="group rounded-lg border border-border bg-muted/40">
+        <summary className="flex cursor-pointer list-none items-center justify-between px-3 py-2 text-[11.5px] font-medium text-muted-foreground">
+          <span className="relay-text-trim leading-none">{t("detail.techDetails")}</span>
+          <ChevronRight className="size-3.5 transition-transform group-open:rotate-90" />
+        </summary>
+        <div className="flex flex-col gap-2 border-t border-border px-3 py-2.5 text-[11.5px]">
+          <div className="flex justify-between gap-2">
+            <span className="text-muted-foreground">{t("detail.taskPreset")}</span>
+            <span className="font-mono-tech text-foreground">{task.spec.command_preset}</span>
+          </div>
+          <div className="flex justify-between gap-2">
+            <span className="text-muted-foreground">{t("detail.taskCommit")}</span>
+            <span className="font-mono-tech truncate text-foreground">
+              {task.spec.base_commit_sha}
+            </span>
+          </div>
+          <div className="flex justify-between gap-2">
+            <span className="text-muted-foreground">{t("detail.updated")}</span>
+            <span className="font-mono-tech text-foreground">
+              {new Date(task.updated_at).toLocaleTimeString()}
+            </span>
+          </div>
+          {persistedLog?.log_blob_hash && (
+            <div className="flex justify-between gap-2">
+              <span className="text-muted-foreground">{t("detail.logHash")}</span>
+              <span className="font-mono-tech truncate text-foreground">
+                {persistedLog.log_blob_hash}
+              </span>
+            </div>
+          )}
+        </div>
+      </details>
+    </>
+  );
+}
+
 export function InspectorPanelBody({
   mode,
   selectedNode,
+  selectedTask = null,
+  taskLogBuffer,
+  persistedTaskLog,
   pendingFixTask,
   onResolveApproval,
   isResolvingApproval,
+  onCancelTask,
+  isCancellingTask = false,
+  onOpenApproval,
+  onSelectEvidenceNode,
 }: Omit<InspectorDrawerProps, "onClose">) {
   const { t } = useTranslation();
 
   const proposal = pendingFixTask?.active_proposal ?? null;
   const isFixMode = mode === "fix" && pendingFixTask != null;
+  const isTaskMode = mode === "task" && selectedTask != null;
 
-  if (!isFixMode && !selectedNode) {
+  if (!isFixMode && !isTaskMode && !selectedNode) {
     return (
       <div className="flex flex-1 flex-col items-center justify-center gap-2 px-6 text-center">
         <h3 className="text-sm font-medium text-foreground">{t("detail.emptyTitle")}</h3>
@@ -276,17 +393,38 @@ export function InspectorPanelBody({
     );
   }
 
+  const taskBadge = isTaskMode ? taskStateBadgeProps(selectedTask.state) : null;
+  const canCancelSelectedTask = isTaskMode && isTaskCancellable(selectedTask.state);
+  const selectedTaskNeedsApproval = isTaskMode && needsTaskApproval(selectedTask);
+
   return (
     <div className="flex min-h-0 flex-1 flex-col">
-      <div className="border-b border-border px-4 py-2.5">
-        <div className="text-[11px] font-medium text-muted-foreground">
-          {isFixMode
-            ? t(proposal ? "detail.fixTitle" : "detail.cleanRunTitle")
-            : t(`canvas.kind.${selectedNode!.payload.kind}`)}
+      <div className="flex items-center justify-between gap-2 border-b border-border px-4 py-2.5">
+        <div className="min-w-0">
+          <div className="text-[11px] font-medium text-muted-foreground">
+            {isFixMode
+              ? t(proposal ? "detail.fixTitle" : "detail.cleanRunTitle")
+              : isTaskMode
+                ? t("detail.taskTitle")
+                : t(`canvas.kind.${selectedNode!.payload.kind}`)}
+          </div>
+          <h3 className="truncate text-sm font-semibold text-foreground">
+            {isFixMode
+              ? pendingFixTask.spec.command_preset
+              : isTaskMode
+                ? selectedTask.spec.command_preset
+                : selectedNode!.label}
+          </h3>
         </div>
-        <h3 className="truncate text-sm font-semibold text-foreground">
-          {isFixMode ? pendingFixTask.spec.command_preset : selectedNode!.label}
-        </h3>
+        {isTaskMode && taskBadge && (
+          <Badge variant={taskBadge.variant} className={cn("shrink-0", taskBadge.className)}>
+            <span className="relay-text-trim leading-none">
+              {selectedTaskNeedsApproval && !selectedTask.active_proposal
+                ? t("sidebar.awaitingApproval")
+                : t(`taskState.${selectedTask.state}`)}
+            </span>
+          </Badge>
+        )}
       </div>
 
       <div className="flex flex-1 flex-col gap-4 overflow-y-auto p-4">
@@ -296,6 +434,12 @@ export function InspectorPanelBody({
           ) : (
             <CleanRunApprovalBody />
           )
+        ) : isTaskMode ? (
+          <TaskInspectorBody
+            task={selectedTask}
+            buffer={taskLogBuffer}
+            persistedLog={persistedTaskLog}
+          />
         ) : (
           selectedNode && (
             <>
@@ -357,6 +501,58 @@ export function InspectorPanelBody({
           </Button>
         </div>
       )}
+
+      {isTaskMode &&
+        (canCancelSelectedTask ||
+          (selectedTaskNeedsApproval && onOpenApproval) ||
+          (selectedTask.evidence_node_id && onSelectEvidenceNode)) && (
+          <div className="flex items-center gap-2 border-t border-border bg-muted/40 p-3.5">
+            {canCancelSelectedTask && onCancelTask && (
+              <Button
+                variant="destructive"
+                size="lg"
+                className="flex-1"
+                disabled={isCancellingTask}
+                onClick={() => onCancelTask(selectedTask.spec.task_id)}
+              >
+                {isCancellingTask ? (
+                  <Loader2 className="animate-spin" data-icon="inline-start" />
+                ) : (
+                  <Square data-icon="inline-start" />
+                )}
+                <span className="relay-text-trim leading-none">
+                  {t(isCancellingTask ? "detail.cancellingTaskBtn" : "detail.cancelTaskBtn")}
+                </span>
+              </Button>
+            )}
+
+            {selectedTaskNeedsApproval && onOpenApproval && (
+              <Button
+                variant="default"
+                size="lg"
+                className="flex-1"
+                onClick={() => onOpenApproval(selectedTask)}
+              >
+                <Sparkles data-icon="inline-start" />
+                <span className="relay-text-trim leading-none">
+                  {t(selectedTask.active_proposal ? "sidebar.reviewFix" : "sidebar.reviewRun")}
+                </span>
+              </Button>
+            )}
+
+            {selectedTask.evidence_node_id && onSelectEvidenceNode && (
+              <Button
+                variant="outline"
+                size="lg"
+                className="flex-1"
+                onClick={() => onSelectEvidenceNode(selectedTask.evidence_node_id!)}
+              >
+                <CheckCircle2 data-icon="inline-start" />
+                <span className="relay-text-trim leading-none">{t("sidebar.viewResult")}</span>
+              </Button>
+            )}
+          </div>
+        )}
     </div>
   );
 }
@@ -364,9 +560,16 @@ export function InspectorPanelBody({
 export function InspectorDrawer({
   mode,
   selectedNode,
+  selectedTask = null,
+  taskLogBuffer,
+  persistedTaskLog,
   pendingFixTask,
   onResolveApproval,
   isResolvingApproval,
+  onCancelTask,
+  isCancellingTask,
+  onOpenApproval,
+  onSelectEvidenceNode,
   onClose,
 }: InspectorDrawerProps) {
   const { t } = useTranslation();
@@ -375,8 +578,9 @@ export function InspectorDrawer({
 
   const proposal = pendingFixTask?.active_proposal ?? null;
   const isFixMode = mode === "fix" && pendingFixTask != null;
+  const isTaskMode = mode === "task" && selectedTask != null;
 
-  if (!isFixMode && !selectedNode) return null;
+  if (!isFixMode && !isTaskMode && !selectedNode) return null;
 
   return (
     <aside className="z-20 flex h-full w-[380px] shrink-0 flex-col border-l border-border bg-card text-card-foreground shadow-xl">
@@ -385,10 +589,16 @@ export function InspectorDrawer({
           <div className="text-[11px] font-medium text-muted-foreground">
             {isFixMode
               ? t(proposal ? "detail.fixTitle" : "detail.cleanRunTitle")
-              : t(`canvas.kind.${selectedNode!.payload.kind}`)}
+              : isTaskMode
+                ? t("detail.taskTitle")
+                : t(`canvas.kind.${selectedNode!.payload.kind}`)}
           </div>
           <h3 className="truncate text-sm font-semibold text-foreground">
-            {isFixMode ? pendingFixTask.spec.command_preset : selectedNode!.label}
+            {isFixMode
+              ? pendingFixTask.spec.command_preset
+              : isTaskMode
+                ? selectedTask.spec.command_preset
+                : selectedNode!.label}
           </h3>
         </div>
 
@@ -406,9 +616,16 @@ export function InspectorDrawer({
       <InspectorPanelBody
         mode={mode}
         selectedNode={selectedNode}
+        selectedTask={selectedTask}
+        taskLogBuffer={taskLogBuffer}
+        persistedTaskLog={persistedTaskLog}
         pendingFixTask={pendingFixTask}
         onResolveApproval={onResolveApproval}
         isResolvingApproval={isResolvingApproval}
+        onCancelTask={onCancelTask}
+        isCancellingTask={isCancellingTask}
+        onOpenApproval={onOpenApproval}
+        onSelectEvidenceNode={onSelectEvidenceNode}
       />
     </aside>
   );

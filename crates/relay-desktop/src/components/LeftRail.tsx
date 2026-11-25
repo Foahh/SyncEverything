@@ -1,16 +1,22 @@
+import { Alert, AlertAction, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import {
+  AlertCircle,
   ArrowRight,
   CheckCircle2,
   ChevronDown,
   ChevronUp,
   Cpu,
   Link2,
+  Loader2,
   Play,
   Settings2,
   Sparkles,
+  Square,
+  Terminal,
+  X,
 } from "lucide-react";
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
@@ -18,18 +24,28 @@ import type {
   PeerStatus_Serialize,
   RuntimeMode,
   TaskRecord_Serialize,
-  TaskState,
+  TrustedPeerRecord_Serialize,
 } from "../bindings";
+import { formatTaskSummary } from "../lib/formatError";
 import { isTauriRuntime, needsTaskApproval } from "../lib/relayApi";
+import { isTaskCancellable, isTaskRunning, taskStateBadgeProps } from "../lib/taskLogStream";
 
 interface LeftRailProps {
   status: PeerStatus_Serialize | undefined;
+  trustedPeers: TrustedPeerRecord_Serialize[];
   tasks: TaskRecord_Serialize[];
+  selectedTaskId: string | null;
+  cancellingTaskId: string | null;
   onOpenRunTask: () => void;
   onOpenPairModal: () => void;
   onOpenApproval: (task: TaskRecord_Serialize) => void;
+  onInspectTask: (task: TaskRecord_Serialize) => void;
+  onCancelTask: (taskId: string) => void;
   onSelectEvidenceNode: (nodeId: string) => void;
   onSwitchMode: (mode: RuntimeMode) => void;
+  isSwitchingMode?: boolean;
+  switchModeError?: string | null;
+  onDismissSwitchModeError?: () => void;
   onTriggerUpstreamEdit: () => void;
   onResetDemo: () => void;
   isSimulatingEdit: boolean;
@@ -37,41 +53,22 @@ interface LeftRailProps {
 
 const RUNTIME_MODES: RuntimeMode[] = ["client", "host", "local_dual_sandbox"];
 
-function stateBadgeProps(state: TaskState): {
-  variant: "default" | "secondary" | "destructive" | "outline";
-  className?: string;
-} {
-  switch (state) {
-    case "completed":
-      return {
-        variant: "secondary",
-        className:
-          "bg-emerald-500/12 text-emerald-700 dark:bg-emerald-500/20 dark:text-emerald-300",
-      };
-    case "self_healing_proposed":
-      return { variant: "default" };
-    case "queued":
-    case "preflight_running":
-    case "executing":
-      return {
-        variant: "secondary",
-        className: "bg-amber-500/15 text-amber-700 dark:bg-amber-500/20 dark:text-amber-300",
-      };
-    case "failed":
-    case "stale":
-    case "rejected":
-      return { variant: "destructive" };
-  }
-}
-
 export function LeftRail({
   status,
+  trustedPeers,
   tasks,
+  selectedTaskId,
+  cancellingTaskId,
   onOpenRunTask,
   onOpenPairModal,
   onOpenApproval,
+  onInspectTask,
+  onCancelTask,
   onSelectEvidenceNode,
   onSwitchMode,
+  isSwitchingMode = false,
+  switchModeError = null,
+  onDismissSwitchModeError,
   onTriggerUpstreamEdit,
   onResetDemo,
   isSimulatingEdit,
@@ -82,6 +79,12 @@ export function LeftRail({
   const activeMode: RuntimeMode = status?.mode ?? "local_dual_sandbox";
   const isConnected = status?.connected ?? false;
   const pendingOutbox = status?.pending_outbox_count ?? 0;
+  const activePeer = status?.remote_node_id
+    ? trustedPeers.find(
+        (peer) => peer.node_id === status.remote_node_id && peer.revoked_at === null,
+      )
+    : undefined;
+  const activeTrustedCount = trustedPeers.filter((peer) => peer.revoked_at === null).length;
 
   return (
     <aside className="flex h-full w-[268px] shrink-0 flex-col border-r border-border bg-sidebar text-sidebar-foreground">
@@ -103,7 +106,11 @@ export function LeftRail({
                 </div>
                 <div className="min-w-0">
                   <div className="truncate text-xs font-semibold text-foreground">
-                    {isConnected ? t("sidebar.connectedTo") : t("sidebar.waitingPeer")}
+                    {isConnected
+                      ? (activePeer?.label ?? t("sidebar.connectedTo"))
+                      : activeTrustedCount > 0
+                        ? t("sidebar.trustedCount", { count: activeTrustedCount })
+                        : t("sidebar.waitingPeer")}
                   </div>
                   <div className="text-[11px] text-muted-foreground">
                     {t(`sidebar.mode.${activeMode}`)}
@@ -123,7 +130,9 @@ export function LeftRail({
 
             <Button variant="outline" size="default" className="w-full" onClick={onOpenPairModal}>
               <Link2 data-icon="inline-start" />
-              <span className="relay-text-trim leading-none">{t("topbar.pairDevice")}</span>
+              <span className="relay-text-trim leading-none">
+                {trustedPeers.length > 0 ? t("sidebar.manageDevices") : t("topbar.pairDevice")}
+              </span>
             </Button>
           </div>
         </section>
@@ -148,18 +157,30 @@ export function LeftRail({
             <div className="flex flex-col gap-2">
               {tasks.map((task) => {
                 const needsFixReview = needsTaskApproval(task);
-                const badge = stateBadgeProps(task.state);
+                const badge = taskStateBadgeProps(task.state);
+                const running = isTaskRunning(task.state) && !needsFixReview;
+                const cancellable = isTaskCancellable(task.state);
+                const isCancelling = cancellingTaskId === task.spec.task_id;
+                const isSelected = selectedTaskId === task.spec.task_id;
 
                 return (
                   <div
                     key={task.spec.task_id}
                     className={cn(
-                      "rounded-lg border p-3 transition-colors",
+                      "relative overflow-hidden rounded-lg border p-3 transition-colors",
                       needsFixReview
                         ? "border-primary/40 bg-[var(--relay-heal-soft)]"
-                        : "border-border bg-card hover:border-foreground/20",
+                        : isSelected
+                          ? "border-primary/50 bg-card ring-1 ring-primary/20"
+                          : "border-border bg-card hover:border-foreground/20",
                     )}
                   >
+                    {running && (
+                      <div
+                        className="absolute inset-x-0 top-0 h-0.5 animate-pulse bg-amber-500"
+                        aria-hidden="true"
+                      />
+                    )}
                     <div className="flex items-center justify-between gap-2">
                       <span className="truncate text-xs font-semibold text-foreground">
                         {task.spec.command_preset}
@@ -175,7 +196,9 @@ export function LeftRail({
 
                     {(task.preflight_summary || task.spec.user_note) && (
                       <p className="mt-1 line-clamp-2 text-[11.5px] leading-relaxed text-muted-foreground">
-                        {task.preflight_summary ?? task.spec.user_note}
+                        {task.preflight_summary
+                          ? formatTaskSummary(task.preflight_summary, t)
+                          : task.spec.user_note}
                       </p>
                     )}
 
@@ -193,18 +216,53 @@ export function LeftRail({
                       </Button>
                     )}
 
-                    {task.evidence_node_id && (
-                      <button
-                        type="button"
-                        onClick={() => onSelectEvidenceNode(task.evidence_node_id!)}
-                        className="mt-2 inline-flex cursor-pointer items-center gap-1 text-[11.5px] font-medium text-primary hover:underline"
-                      >
-                        <CheckCircle2 className="size-3 shrink-0" />
-                        <span className="relay-text-trim leading-none">
-                          {t("sidebar.viewResult")}
-                        </span>
-                      </button>
-                    )}
+                    <div className="mt-2 flex flex-wrap items-center justify-between gap-2">
+                      <div className="flex items-center gap-3">
+                        <button
+                          type="button"
+                          onClick={() => onInspectTask(task)}
+                          className="inline-flex cursor-pointer items-center gap-1 text-[11.5px] font-medium text-muted-foreground transition-colors hover:text-foreground"
+                        >
+                          <Terminal className="size-3 shrink-0" />
+                          <span className="relay-text-trim leading-none">
+                            {t(running ? "sidebar.liveLogs" : "sidebar.viewLogs")}
+                          </span>
+                        </button>
+
+                        {task.evidence_node_id && (
+                          <button
+                            type="button"
+                            onClick={() => onSelectEvidenceNode(task.evidence_node_id!)}
+                            className="inline-flex cursor-pointer items-center gap-1 text-[11.5px] font-medium text-primary hover:underline"
+                          >
+                            <CheckCircle2 className="size-3 shrink-0" />
+                            <span className="relay-text-trim leading-none">
+                              {t("sidebar.viewResult")}
+                            </span>
+                          </button>
+                        )}
+                      </div>
+
+                      {cancellable && (
+                        <Button
+                          type="button"
+                          size="xs"
+                          variant="outline"
+                          disabled={isCancelling}
+                          onClick={() => onCancelTask(task.spec.task_id)}
+                          className="h-6 gap-1 border-destructive/30 px-2 text-[11px] text-destructive hover:bg-destructive/10 hover:text-destructive"
+                        >
+                          {isCancelling ? (
+                            <Loader2 className="size-3 shrink-0 animate-spin" />
+                          ) : (
+                            <Square className="size-2.5 shrink-0" />
+                          )}
+                          <span className="relay-text-trim leading-none">
+                            {t(isCancelling ? "sidebar.cancellingTask" : "sidebar.cancelTask")}
+                          </span>
+                        </Button>
+                      )}
+                    </div>
                   </div>
                 );
               })}
@@ -240,9 +298,11 @@ export function LeftRail({
                     <button
                       key={mode}
                       type="button"
+                      disabled={isSwitchingMode}
+                      aria-pressed={active}
                       onClick={() => onSwitchMode(mode)}
                       className={cn(
-                        "cursor-pointer rounded-sm px-1.5 py-1 text-[10.5px] font-medium transition-all",
+                        "cursor-pointer rounded-sm px-1.5 py-1 text-[10.5px] font-medium transition-all disabled:pointer-events-none disabled:opacity-50",
                         active
                           ? "bg-background text-foreground shadow-2xs"
                           : "text-muted-foreground hover:text-foreground",
@@ -253,6 +313,31 @@ export function LeftRail({
                   );
                 })}
               </div>
+              {switchModeError && (
+                <Alert
+                  role="alert"
+                  variant="destructive"
+                  className="border-destructive/30 bg-[var(--relay-stale-soft)] py-1.5"
+                >
+                  <AlertCircle className="size-3.5" aria-hidden="true" />
+                  <AlertDescription className="text-[11px] leading-snug break-words">
+                    {switchModeError}
+                  </AlertDescription>
+                  {onDismissSwitchModeError && (
+                    <AlertAction>
+                      <Button
+                        type="button"
+                        size="icon-xs"
+                        variant="ghost"
+                        aria-label={t("detail.close")}
+                        onClick={onDismissSwitchModeError}
+                      >
+                        <X />
+                      </Button>
+                    </AlertAction>
+                  )}
+                </Alert>
+              )}
             </div>
 
             {import.meta.env.DEV && (

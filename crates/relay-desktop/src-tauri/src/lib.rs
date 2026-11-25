@@ -1,13 +1,16 @@
+mod mcp_files;
+pub mod recent_workspaces;
 mod runtime;
 
-use chrono::Utc;
+use chrono::{DateTime, Utc};
+use recent_workspaces::RecentWorkspaceEntry;
 use relay_core::agent::{
     AgentApprovalCard, AgentChatMessage, AgentToolTrace, InferenceTier, LlmProbeResult,
     LlmSettingsView,
 };
 use relay_core::contracts::{
     ApprovalDecision, DagSnapshot, GraphEdge, GraphNode, HandoffSummary, PeerStatus, RuntimeMode,
-    StalePropagationReport, TaskRecord, TaskSpec,
+    StalePropagationReport, TaskLogStreamKind, TaskRecord, TaskSpec, TrustedPeerRecord,
 };
 use runtime::{DesktopRuntime, validate_user_repo};
 use serde::{Deserialize, Serialize};
@@ -43,6 +46,23 @@ pub struct AgentChatStreamEvent {
     pub error: Option<String>,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize, Type, Event)]
+pub struct TaskLogStreamEvent {
+    pub task_id: String,
+    pub preset: String,
+    pub stream: TaskLogStreamKind,
+    pub seq: u32,
+    pub text: String,
+    pub timestamp: DateTime<Utc>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, Type)]
+pub struct TaskLogSnapshot {
+    pub task_id: String,
+    pub log_blob_hash: String,
+    pub content: String,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, Type)]
 pub struct PresetInfo {
     pub name: String,
@@ -60,6 +80,7 @@ pub struct WorkspaceInfo {
     pub mcp_data_dir: Option<String>,
     pub is_git_repo: bool,
     pub has_manifest: bool,
+    pub package_manager: Option<String>,
     pub smoke_preset: String,
     pub presets: Vec<PresetInfo>,
 }
@@ -77,13 +98,13 @@ pub struct LlmSettingsUpdate {
 }
 
 #[derive(Default)]
-struct RuntimeManager {
+pub(crate) struct RuntimeManager {
     current: RwLock<Option<Arc<DesktopRuntime>>>,
     lifecycle: Mutex<()>,
 }
 
 impl RuntimeManager {
-    async fn get_or_init(&self, app: &AppHandle) -> Result<Arc<DesktopRuntime>, String> {
+    pub(crate) async fn get_or_init(&self, app: &AppHandle) -> Result<Arc<DesktopRuntime>, String> {
         if let Some(runtime) = self.current.read().await.clone() {
             return Ok(runtime);
         }
@@ -108,6 +129,9 @@ impl RuntimeManager {
         let _guard = self.lifecycle.lock().await;
         let mut current = self.current.write().await;
         if let Some(active) = current.as_ref() && active.matches_workspace(&validated) {
+            if let Err(error) = active.record_recent_workspace(&validated) {
+                tracing::warn!(%error, "Unable to refresh recent workspace entry");
+            }
             return Ok(active.workspace_info());
         }
         let shares_storage = current.as_ref().is_some_and(|runtime| runtime.shares_storage(&validated));
@@ -187,10 +211,50 @@ async fn open_workspace_repo(
 
 #[tauri::command]
 #[specta::specta]
+async fn list_recent_workspaces(
+    app: AppHandle,
+    state: State<'_, RuntimeManager>,
+) -> Result<Vec<RecentWorkspaceEntry>, String> {
+    state
+        .get_or_init(&app)
+        .await?
+        .list_recent_workspaces()
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+#[specta::specta]
+async fn switch_workspace(
+    app: AppHandle,
+    state: State<'_, RuntimeManager>,
+    repo_path: String,
+) -> Result<WorkspaceInfo, String> {
+    state.switch_repo(&app, repo_path).await
+}
+
+#[tauri::command]
+#[specta::specta]
+async fn remove_recent_workspace(
+    app: AppHandle,
+    state: State<'_, RuntimeManager>,
+    repo_path: String,
+) -> Result<Vec<RecentWorkspaceEntry>, String> {
+    let updated = state
+        .get_or_init(&app)
+        .await?
+        .remove_recent_workspace(Path::new(repo_path.trim()))
+        .map_err(|error| error.to_string())?;
+    emit_state(&app, "recent_workspaces_changed", "Updated recent workspaces");
+    Ok(updated)
+}
+
+#[tauri::command]
+#[specta::specta]
 async fn init_workspace_manifest(
     app: AppHandle,
     state: State<'_, RuntimeManager>,
     repo_path: Option<String>,
+    package_manager: Option<String>,
 ) -> Result<WorkspaceInfo, String> {
     let target = match repo_path
         .map(|raw| raw.trim().to_owned())
@@ -207,10 +271,17 @@ async fn init_workspace_manifest(
         }
     };
     let validated = validate_user_repo(&target).map_err(|error| error.to_string())?;
-    relay_core::sandbox::write_default_manifest(&validated).map_err(|error| error.to_string())?;
-    state
+    relay_core::sandbox::write_manifest_for_repo(&validated, package_manager.as_deref())
+        .map_err(|error| error.to_string())?;
+    let info = state
         .switch_repo(&app, validated.to_string_lossy().into_owned())
-        .await
+        .await?;
+    emit_state(
+        &app,
+        "workspace_changed",
+        format!("Initialized relay.toml for {}", info.repo_id),
+    );
+    Ok(info)
 }
 
 #[tauri::command]
@@ -339,6 +410,41 @@ async fn submit_task(
 
 #[tauri::command]
 #[specta::specta]
+async fn cancel_task(
+    app: AppHandle,
+    state: State<'_, RuntimeManager>,
+    task_id: Uuid,
+) -> Result<TaskRecord, String> {
+    state
+        .get_or_init(&app)
+        .await?
+        .cancel_task(task_id)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+#[specta::specta]
+async fn get_task_log(
+    app: AppHandle,
+    state: State<'_, RuntimeManager>,
+    task_id: Uuid,
+) -> Result<Option<TaskLogSnapshot>, String> {
+    let runtime = state.get_or_init(&app).await?;
+    let log = runtime
+        .engine
+        .read_task_log(task_id)
+        .await
+        .map_err(|error| error.to_string())?;
+    Ok(log.map(|(log_blob_hash, content)| TaskLogSnapshot {
+        task_id: task_id.to_string(),
+        log_blob_hash,
+        content,
+    }))
+}
+
+#[tauri::command]
+#[specta::specta]
 async fn resolve_patch_approval(
     app: AppHandle,
     state: State<'_, RuntimeManager>,
@@ -421,6 +527,81 @@ async fn connect_peer_ticket(
 
 #[tauri::command]
 #[specta::specta]
+async fn list_trusted_peers(
+    app: AppHandle,
+    state: State<'_, RuntimeManager>,
+) -> Result<Vec<TrustedPeerRecord>, String> {
+    state
+        .get_or_init(&app)
+        .await?
+        .list_trusted_peers()
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+#[specta::specta]
+async fn rename_trusted_peer(
+    app: AppHandle,
+    state: State<'_, RuntimeManager>,
+    node_id: String,
+    label: String,
+) -> Result<TrustedPeerRecord, String> {
+    state
+        .get_or_init(&app)
+        .await?
+        .rename_trusted_peer(&node_id, &label)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+#[specta::specta]
+async fn reconnect_trusted_peer(
+    app: AppHandle,
+    state: State<'_, RuntimeManager>,
+    node_id: String,
+) -> Result<PeerStatus, String> {
+    state
+        .get_or_init(&app)
+        .await?
+        .reconnect_trusted_peer(&node_id)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+#[specta::specta]
+async fn revoke_trusted_peer(
+    app: AppHandle,
+    state: State<'_, RuntimeManager>,
+    node_id: String,
+) -> Result<TrustedPeerRecord, String> {
+    state
+        .get_or_init(&app)
+        .await?
+        .revoke_trusted_peer(&node_id)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+#[specta::specta]
+async fn remove_trusted_peer(
+    app: AppHandle,
+    state: State<'_, RuntimeManager>,
+    node_id: String,
+) -> Result<(), String> {
+    state
+        .get_or_init(&app)
+        .await?
+        .remove_trusted_peer(&node_id)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+#[specta::specta]
 async fn list_chat_messages(
     app: AppHandle,
     state: State<'_, RuntimeManager>,
@@ -479,6 +660,9 @@ pub fn specta_builder() -> Builder<tauri::Wry> {
             get_workspace_info,
             pick_repository_folder,
             open_workspace_repo,
+            list_recent_workspaces,
+            switch_workspace,
+            remove_recent_workspace,
             init_workspace_manifest,
             refresh_git_head,
             get_llm_settings,
@@ -489,20 +673,30 @@ pub fn specta_builder() -> Builder<tauri::Wry> {
             list_tasks,
             list_handoffs,
             submit_task,
+            cancel_task,
+            get_task_log,
             resolve_patch_approval,
             simulate_artifact_update,
             upsert_dag_node,
             get_pairing_ticket,
             connect_peer_ticket,
+            list_trusted_peers,
+            rename_trusted_peer,
+            reconnect_trusted_peer,
+            revoke_trusted_peer,
+            remove_trusted_peer,
             list_chat_messages,
             send_chat_message,
             cancel_chat_turn,
             clear_chat_messages,
+            mcp_files::preview_project_mcp_config,
+            mcp_files::write_project_mcp_config,
         ])
         .events(collect_events![
             RelayStateChangedEvent,
             DagStaleAlertEvent,
             AgentChatStreamEvent,
+            TaskLogStreamEvent,
         ])
 }
 

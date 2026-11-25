@@ -80,7 +80,7 @@ pub const COPILOT_SYSTEM_PROMPT: &str = concat!(
     "Hard rules:\n",
     "1. Treat `get_dag_snapshot` as the sole authoritative source (SSOT) for experiment metrics. Always call `get_dag_snapshot` before stating metrics. When `fresh_evidence_count == 0` or `metric_authority_note` is present, NEVER cite `stale` evidence metrics OR historical numbers from static repository text files, logs, or handoff notes as valid for current HEAD; explain why prior results are outdated and offer to re-run.\n",
     "2. Never run arbitrary shell commands. Only submit tasks matching presets declared in `<repo>/relay.toml` via `submit_task`.\n",
-    "3. For a task_id on Host: follow `run_preflight_in_worktree` -> inspect `stderr_tail` / `error_snippets` (and use `read_worktree_file` if more context is needed) -> `propose_worktree_patch` (`patch_kind: \"uv_spec\"` with `uv_spec` for missing dependencies, or `patch_kind: \"file_edits\"` with exact `edits: [{file_path, old_text, new_text}]`; omit/null `old_text` to overwrite or create an entire file) -> `approve_and_execute_task`.\n",
+    "3. For a task_id on Host: follow `run_preflight_in_worktree` -> inspect `stderr_tail` / `error_snippets` (and use `read_worktree_file` if more context is needed) -> `propose_worktree_patch` (`patch_kind: \"dependency_spec\"` with `dependency_spec` for missing dependencies, or `patch_kind: \"code_diff\"` with exact `edits: [{file_path, old_text, new_text}]`; omit/null `old_text` to overwrite or create an entire file) -> `approve_and_execute_task`.\n",
     "4. Use `read_repo_file` and `git_diff` for read-only inspection of the main repository when needed, and `read_worktree_file` when inspecting a task's isolated worktree.\n",
     "5. If `approve_and_execute_task` returns `approval_required`, STOP immediately and ask the user to confirm using the inline approval card — never loop.\n",
     "6. Keep responses concise, structured, and grounded strictly in tool outputs."
@@ -105,7 +105,7 @@ pub fn copilot_tool_definitions() -> Vec<Value> {
         ),
         tool_def(
             "check_env_diff",
-            "Compare a target Git commit's pyproject.toml and uv.lock environment fingerprint against the Host environment and list missing Python packages.",
+            "Compare a target Git commit's dependency manifest and lockfile fingerprint against the Host environment across supported package managers (uv, cargo, bun, pnpm, yarn, npm, generic) and list missing or changed packages.",
             json!({
                 "type": "object",
                 "properties": {
@@ -153,7 +153,7 @@ pub fn copilot_tool_definitions() -> Vec<Value> {
                 "type": "object",
                 "properties": {
                     "task_id": { "type": "string" },
-                    "file_path": { "type": "string", "description": "Worktree-relative path, e.g. 'src/main.py' or 'uv.lock'" },
+                    "file_path": { "type": "string", "description": "Worktree-relative path, e.g. 'src/main.py', 'Cargo.toml', or 'package.json'" },
                     "start_line": { "type": "integer", "minimum": 1 },
                     "end_line": { "type": "integer", "minimum": 1 }
                 },
@@ -167,12 +167,12 @@ pub fn copilot_tool_definitions() -> Vec<Value> {
                 "type": "object",
                 "properties": {
                     "task_id": { "type": "string" },
-                    "patch_kind": { "type": "string", "enum": ["uv_spec", "file_edits"] },
+                    "patch_kind": { "type": "string", "enum": ["dependency_spec", "code_diff"] },
                     "summary": { "type": "string" },
-                    "uv_spec": { "type": "string", "description": "Required when patch_kind='uv_spec': PEP-508 package spec or local wheel path" },
+                    "dependency_spec": { "type": "string", "description": "Required when patch_kind='dependency_spec': package spec for the active package manager (e.g. 'requests>=2.32', './vendor/pkg.whl', 'serde@1.0', or 'zod@3.23.8')" },
                     "edits": {
                         "type": "array",
-                        "description": "Required when patch_kind='file_edits': ordered exact search-and-replace or full-file edits",
+                        "description": "Required when patch_kind='code_diff': ordered exact search-and-replace or full-file edits",
                         "items": {
                             "type": "object",
                             "properties": {

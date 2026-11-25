@@ -15,6 +15,8 @@ fn failure(module: &str) -> PreflightReport {
         worktree_branch: "relay/worktree/test".into(),
         smoke_passed: false,
         exit_code: Some(1),
+        timed_out: false,
+        cancelled: false,
         stdout_tail: String::new(),
         stderr_tail: traceback.clone(),
         detected_missing_module: Some(module.into()),
@@ -114,8 +116,8 @@ async fn agent_deterministic_fallback_diagnoses_missing_module() {
     let agent = SelfHealingAgent::new(client);
     for (module, package) in [("scipy", "scipy"), ("sklearn.model_selection", "scikit-learn")] {
         let proposal = agent.diagnose_preflight_failure(&failure(module), "").await.unwrap();
-        assert_eq!(proposal.patch_kind, PatchKind::UvSpec);
-        assert_eq!(proposal.uv_spec.as_deref(), Some(package));
+        assert_eq!(proposal.patch_kind, PatchKind::DependencySpec);
+        assert_eq!(proposal.dependency_spec.as_deref(), Some(package));
         assert_eq!(proposal.source, "deterministic_fallback");
     }
 
@@ -191,17 +193,17 @@ async fn llm_client_parses_openai_chat_completions() {
 #[tokio::test]
 async fn agent_uses_structured_llm_diagnosis() {
     let response = json!({
-        "patch_kind": "uv_spec",
+        "patch_kind": "dependency_spec",
         "summary": "Add the missing library",
-        "uv_spec": "scipy>=1.14"
+        "dependency_spec": "scipy>=1.14"
     });
     let (url, server) = mock_completion(response.to_string()).await;
     let proposal = SelfHealingAgent::new(endpoint(url))
         .diagnose_preflight_failure(&failure("scipy"), "Forecast fixture")
         .await
         .unwrap();
-    assert_eq!(proposal.patch_kind, PatchKind::UvSpec);
-    assert_eq!(proposal.uv_spec.as_deref(), Some("scipy>=1.14"));
+    assert_eq!(proposal.patch_kind, PatchKind::DependencySpec);
+    assert_eq!(proposal.dependency_spec.as_deref(), Some("scipy>=1.14"));
     assert_eq!(proposal.source, "llm");
     let body = server.await.unwrap();
     assert_eq!(body["response_format"]["type"], "json_object");
@@ -210,14 +212,36 @@ async fn agent_uses_structured_llm_diagnosis() {
 
 #[tokio::test]
 async fn agent_parses_markdown_fenced_json_diagnosis() {
-    let fenced = "```json\n{\"patch_kind\":\"file_edits\",\"summary\":\"Define constant\",\"edits\":[{\"file_path\":\"src/app.py\",\"old_text\":\"a = 1\",\"new_text\":\"a = 2\"}]}\n```";
+    let fenced = "```json\n{\"patch_kind\":\"code_diff\",\"summary\":\"Define constant\",\"edits\":[{\"file_path\":\"src/app.py\",\"old_text\":\"a = 1\",\"new_text\":\"a = 2\"}]}\n```";
     let (url, server) = mock_completion(fenced.into()).await;
     let proposal = SelfHealingAgent::new(endpoint(url))
         .diagnose_preflight_failure(&failure("scipy"), "Fixture")
         .await
         .unwrap();
-    assert_eq!(proposal.patch_kind, PatchKind::FileEdits);
+    assert_eq!(proposal.patch_kind, PatchKind::CodeDiff);
     assert_eq!(proposal.edits.as_ref().unwrap().len(), 1);
+    let _ = server.await.unwrap();
+}
+
+#[tokio::test]
+async fn agent_ignores_benign_extra_fields_in_structured_diagnosis() {
+    let response = json!({
+        "patch_kind": "dependency_spec",
+        "summary": "Install scipy to fix ModuleNotFoundError",
+        "dependency_spec": "scipy>=1.14",
+        "reasoning": "Traceback reports missing module scipy",
+        "confidence": 0.96,
+        "extra_metadata": {"source": "qwen3.5"}
+    });
+    let (url, server) = mock_completion(response.to_string()).await;
+    let proposal = SelfHealingAgent::new(endpoint(url))
+        .diagnose_preflight_failure(&failure("scipy"), "Forecast fixture")
+        .await
+        .unwrap();
+    assert_eq!(proposal.patch_kind, PatchKind::DependencySpec);
+    assert_eq!(proposal.summary, "Install scipy to fix ModuleNotFoundError");
+    assert_eq!(proposal.dependency_spec.as_deref(), Some("scipy>=1.14"));
+    assert_eq!(proposal.source, "llm");
     let _ = server.await.unwrap();
 }
 

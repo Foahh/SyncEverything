@@ -4,6 +4,8 @@ import type {
   GraphEdge,
   GraphNode,
   LlmSettingsUpdate_Deserialize,
+  ProjectMcpConfigConfirmation_Deserialize,
+  ProjectMcpConfigRequest_Deserialize,
   RuntimeMode,
   TaskSpec_Deserialize,
 } from "../bindings";
@@ -13,11 +15,14 @@ export const relayKeys = {
   all: ["relay"] as const,
   status: () => [...relayKeys.all, "status"] as const,
   workspace: () => [...relayKeys.all, "workspace"] as const,
+  recentWorkspaces: () => [...relayKeys.all, "recentWorkspaces"] as const,
   llm: () => [...relayKeys.all, "llm"] as const,
   dag: (includeStale: boolean) => [...relayKeys.all, "dag", includeStale] as const,
   tasks: () => [...relayKeys.all, "tasks"] as const,
+  taskLog: (taskId: string) => [...relayKeys.all, "taskLog", taskId] as const,
   handoffs: () => [...relayKeys.all, "handoffs"] as const,
   chat: () => [...relayKeys.all, "chat"] as const,
+  trustedPeers: () => [...relayKeys.all, "trustedPeers"] as const,
 };
 
 export function useRelayEventSync() {
@@ -66,6 +71,13 @@ export function useWorkspaceInfo() {
   });
 }
 
+export function useRecentWorkspaces() {
+  return useQuery({
+    queryKey: relayKeys.recentWorkspaces(),
+    queryFn: () => relayApi.listRecentWorkspaces(),
+  });
+}
+
 export function useLlmSettings() {
   return useQuery({
     queryKey: relayKeys.llm(),
@@ -83,10 +95,37 @@ export function useOpenWorkspaceRepo() {
   });
 }
 
+export function useSwitchWorkspace() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (repoPath: string) => relayApi.switchWorkspace(repoPath),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: relayKeys.all });
+    },
+  });
+}
+
+export function useRemoveRecentWorkspace() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (repoPath: string) => relayApi.removeRecentWorkspace(repoPath),
+    onSuccess: (updated) => {
+      queryClient.setQueryData(relayKeys.recentWorkspaces(), updated);
+      void queryClient.invalidateQueries({ queryKey: relayKeys.recentWorkspaces() });
+    },
+  });
+}
+
+export interface InitWorkspaceManifestInput {
+  repoPath?: string | null;
+  packageManager?: string | null;
+}
+
 export function useInitWorkspaceManifest() {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: (repoPath?: string | null) => relayApi.initWorkspaceManifest(repoPath),
+    mutationFn: (input?: InitWorkspaceManifestInput) =>
+      relayApi.initWorkspaceManifest(input?.repoPath ?? null, input?.packageManager ?? null),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: relayKeys.all });
     },
@@ -173,6 +212,26 @@ export function useSubmitTask() {
   });
 }
 
+export function useCancelTask() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (taskId: string) => relayApi.cancelTask(taskId),
+    onSettled: (_data, _error, taskId) => {
+      void queryClient.invalidateQueries({ queryKey: relayKeys.tasks() });
+      void queryClient.invalidateQueries({ queryKey: relayKeys.taskLog(taskId) });
+      void queryClient.invalidateQueries({ queryKey: relayKeys.status() });
+    },
+  });
+}
+
+export function useTaskLog(taskId: string | null, enabled: boolean) {
+  return useQuery({
+    queryKey: relayKeys.taskLog(taskId ?? ""),
+    queryFn: () => (taskId ? relayApi.getTaskLog(taskId) : Promise.resolve(null)),
+    enabled: Boolean(taskId) && enabled,
+  });
+}
+
 export function useResolvePatchApproval() {
   const queryClient = useQueryClient();
   return useMutation({
@@ -228,6 +287,54 @@ export function useConnectPeerTicket() {
   });
 }
 
+export function useTrustedPeers() {
+  return useQuery({
+    queryKey: relayKeys.trustedPeers(),
+    queryFn: () => relayApi.listTrustedPeers(),
+  });
+}
+
+export function useRenameTrustedPeer() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ nodeId, label }: { nodeId: string; label: string }) =>
+      relayApi.renameTrustedPeer(nodeId, label),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: relayKeys.trustedPeers() });
+    },
+  });
+}
+
+export function useReconnectTrustedPeer() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (nodeId: string) => relayApi.reconnectTrustedPeer(nodeId),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: relayKeys.all });
+    },
+  });
+}
+
+export function useRevokeTrustedPeer() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (nodeId: string) => relayApi.revokeTrustedPeer(nodeId),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: relayKeys.all });
+    },
+  });
+}
+
+export function useRemoveTrustedPeer() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (nodeId: string) => relayApi.removeTrustedPeer(nodeId),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: relayKeys.all });
+    },
+  });
+}
+
 export function useResetPreviewDemo() {
   const queryClient = useQueryClient();
   return useMutation({
@@ -237,5 +344,24 @@ export function useResetPreviewDemo() {
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: relayKeys.all });
     },
+  });
+}
+
+export function usePreviewProjectMcpConfig() {
+  return useMutation({
+    mutationFn: (request: ProjectMcpConfigRequest_Deserialize) =>
+      relayApi.previewProjectMcpConfig(request),
+  });
+}
+
+export function useWriteProjectMcpConfig() {
+  return useMutation({
+    mutationFn: ({
+      request,
+      confirmation,
+    }: {
+      request: ProjectMcpConfigRequest_Deserialize;
+      confirmation: ProjectMcpConfigConfirmation_Deserialize;
+    }) => relayApi.writeProjectMcpConfig(request, confirmation),
   });
 }

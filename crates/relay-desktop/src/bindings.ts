@@ -10,7 +10,10 @@ export const commands = {
 	getWorkspaceInfo: (options?: InvokeOptions) => __TAURI_INVOKE<WorkspaceInfo_Serialize>("get_workspace_info", undefined, options),
 	pickRepositoryFolder: (options?: InvokeOptions) => __TAURI_INVOKE<string | null>("pick_repository_folder", undefined, options),
 	openWorkspaceRepo: (repoPath: string, options?: InvokeOptions) => __TAURI_INVOKE<WorkspaceInfo_Serialize>("open_workspace_repo", { repoPath }, options),
-	initWorkspaceManifest: (repoPath: string | null, options?: InvokeOptions) => __TAURI_INVOKE<WorkspaceInfo_Serialize>("init_workspace_manifest", { repoPath }, options),
+	listRecentWorkspaces: (options?: InvokeOptions) => __TAURI_INVOKE<RecentWorkspaceEntry_Serialize[]>("list_recent_workspaces", undefined, options),
+	switchWorkspace: (repoPath: string, options?: InvokeOptions) => __TAURI_INVOKE<WorkspaceInfo_Serialize>("switch_workspace", { repoPath }, options),
+	removeRecentWorkspace: (repoPath: string, options?: InvokeOptions) => __TAURI_INVOKE<RecentWorkspaceEntry_Serialize[]>("remove_recent_workspace", { repoPath }, options),
+	initWorkspaceManifest: (repoPath: string | null, packageManager: string | null, options?: InvokeOptions) => __TAURI_INVOKE<WorkspaceInfo_Serialize>("init_workspace_manifest", { repoPath, packageManager }, options),
 	refreshGitHead: (options?: InvokeOptions) => __TAURI_INVOKE<boolean>("refresh_git_head", undefined, options),
 	getLlmSettings: (options?: InvokeOptions) => __TAURI_INVOKE<LlmSettingsView_Serialize>("get_llm_settings", undefined, options),
 	saveLlmSettings: (update: LlmSettingsUpdate_Deserialize, options?: InvokeOptions) => __TAURI_INVOKE<LlmSettingsView_Serialize>("save_llm_settings", { update }, options),
@@ -20,15 +23,24 @@ export const commands = {
 	listTasks: (options?: InvokeOptions) => __TAURI_INVOKE<TaskRecord_Serialize[]>("list_tasks", undefined, options),
 	listHandoffs: (options?: InvokeOptions) => __TAURI_INVOKE<HandoffSummary[]>("list_handoffs", undefined, options),
 	submitTask: (spec: TaskSpec_Deserialize, options?: InvokeOptions) => __TAURI_INVOKE<TaskRecord_Serialize>("submit_task", { spec }, options),
+	cancelTask: (taskId: string, options?: InvokeOptions) => __TAURI_INVOKE<TaskRecord_Serialize>("cancel_task", { taskId }, options),
+	getTaskLog: (taskId: string, options?: InvokeOptions) => __TAURI_INVOKE<TaskLogSnapshot | null>("get_task_log", { taskId }, options),
 	resolvePatchApproval: (taskId: string, patchId: string | null, decision: ApprovalDecision, options?: InvokeOptions) => __TAURI_INVOKE<TaskRecord_Serialize>("resolve_patch_approval", { taskId, patchId, decision }, options),
 	simulateArtifactUpdate: (oldArtifactId: string, newCommitSha: string, reason: string, options?: InvokeOptions) => __TAURI_INVOKE<StalePropagationReport>("simulate_artifact_update", { oldArtifactId, newCommitSha, reason }, options),
 	upsertDagNode: (node: GraphNode, edges: GraphEdge[], options?: InvokeOptions) => __TAURI_INVOKE<DagSnapshot_Serialize>("upsert_dag_node", { node, edges }, options),
 	getPairingTicket: (options?: InvokeOptions) => __TAURI_INVOKE<string>("get_pairing_ticket", undefined, options),
 	connectPeerTicket: (ticketJson: string, options?: InvokeOptions) => __TAURI_INVOKE<PeerStatus_Serialize>("connect_peer_ticket", { ticketJson }, options),
+	listTrustedPeers: (options?: InvokeOptions) => __TAURI_INVOKE<TrustedPeerRecord_Serialize[]>("list_trusted_peers", undefined, options),
+	renameTrustedPeer: (nodeId: string, label: string, options?: InvokeOptions) => __TAURI_INVOKE<TrustedPeerRecord_Serialize>("rename_trusted_peer", { nodeId, label }, options),
+	reconnectTrustedPeer: (nodeId: string, options?: InvokeOptions) => __TAURI_INVOKE<PeerStatus_Serialize>("reconnect_trusted_peer", { nodeId }, options),
+	revokeTrustedPeer: (nodeId: string, options?: InvokeOptions) => __TAURI_INVOKE<TrustedPeerRecord_Serialize>("revoke_trusted_peer", { nodeId }, options),
+	removeTrustedPeer: (nodeId: string, options?: InvokeOptions) => __TAURI_INVOKE<null>("remove_trusted_peer", { nodeId }, options),
 	listChatMessages: (limit: number | null, options?: InvokeOptions) => __TAURI_INVOKE<AgentChatMessage_Serialize[]>("list_chat_messages", { limit }, options),
 	sendChatMessage: (prompt: string, options?: InvokeOptions) => __TAURI_INVOKE<AgentChatMessage_Serialize>("send_chat_message", { prompt }, options),
 	cancelChatTurn: (options?: InvokeOptions) => __TAURI_INVOKE<boolean>("cancel_chat_turn", undefined, options),
 	clearChatMessages: (options?: InvokeOptions) => __TAURI_INVOKE<null>("clear_chat_messages", undefined, options),
+	previewProjectMcpConfig: (request: ProjectMcpConfigRequest_Deserialize, options?: InvokeOptions) => __TAURI_INVOKE<ProjectMcpConfigPreview_Serialize>("preview_project_mcp_config", { request }, options),
+	writeProjectMcpConfig: (request: ProjectMcpConfigRequest_Deserialize, confirmation: ProjectMcpConfigConfirmation_Deserialize, options?: InvokeOptions) => __TAURI_INVOKE<ProjectMcpConfigWriteResult>("write_project_mcp_config", { request, confirmation }, options),
 };
 
 /** Events */
@@ -36,6 +48,7 @@ export const events = {
 	agentChatStreamEvent: makeEvent<AgentChatStreamEvent_Serialize, AgentChatStreamEvent_Deserialize>("agent-chat-stream-event"),
 	dagStaleAlertEvent: makeEvent<DagStaleAlertEvent, DagStaleAlertEvent>("dag-stale-alert-event"),
 	relayStateChangedEvent: makeEvent<RelayStateChangedEvent, RelayStateChangedEvent>("relay-state-changed-event"),
+	taskLogStreamEvent: makeEvent<TaskLogStreamEvent, TaskLogStreamEvent>("task-log-stream-event"),
 };
 
 /* Types */
@@ -251,9 +264,11 @@ export type LlmSettingsView_Serialize = {
 	reasoning_effort: string | null,
 };
 
+export type McpTransportMode = "stdio" | "streamable_http";
+
 export type NodeKind = { kind: "decision"; rationale: string; constraints: string[] } | { kind: "artifact"; git_commit_sha: string; env_fingerprint: string; working_tree_dirty: boolean; changed_files: string[] } | { kind: "evidence"; task_id: string; preset: string; metrics_json: JsonValue; log_blob_hash: string };
 
-export type PatchKind = "uv_spec" | "file_edits";
+export type PatchKind = "dependency_spec" | "code_diff";
 
 export type PatchProposal = {
 	patch_id: string,
@@ -266,6 +281,9 @@ export type PatchProposal = {
 	smoke_stdout_tail: string,
 	created_at: string,
 };
+
+/**  Role of a persisted trusted peer device. */
+export type PeerRole = "host" | "client" | "peer";
 
 export type PeerStatus = PeerStatus_Serialize | PeerStatus_Deserialize;
 
@@ -299,6 +317,101 @@ export type PresetInfo = {
 	allowed_params: string[],
 };
 
+export type ProjectMcpClient = "claude_code" | "cursor";
+
+export type ProjectMcpConfigConfirmation = ProjectMcpConfigConfirmation_Serialize | ProjectMcpConfigConfirmation_Deserialize;
+
+export type ProjectMcpConfigConfirmation_Deserialize = {
+	target_path: string,
+	existing_content?: string | null,
+	merged_content: string,
+};
+
+export type ProjectMcpConfigConfirmation_Serialize = {
+	target_path: string,
+	existing_content: string | null,
+	merged_content: string,
+};
+
+export type ProjectMcpConfigPreview = ProjectMcpConfigPreview_Serialize | ProjectMcpConfigPreview_Deserialize;
+
+export type ProjectMcpConfigPreview_Deserialize = {
+	client: ProjectMcpClient,
+	transport: McpTransportMode,
+	relative_path: string,
+	target_path: string,
+	file_exists: boolean,
+	status: ProjectMcpFileStatus,
+	existing_content?: string | null,
+	merged_content: string,
+	preserved_server_names: string[],
+};
+
+export type ProjectMcpConfigPreview_Serialize = {
+	client: ProjectMcpClient,
+	transport: McpTransportMode,
+	relative_path: string,
+	target_path: string,
+	file_exists: boolean,
+	status: ProjectMcpFileStatus,
+	existing_content: string | null,
+	merged_content: string,
+	preserved_server_names: string[],
+};
+
+export type ProjectMcpConfigRequest = ProjectMcpConfigRequest_Serialize | ProjectMcpConfigRequest_Deserialize;
+
+export type ProjectMcpConfigRequest_Deserialize = {
+	client: ProjectMcpClient,
+	transport: McpTransportMode,
+	/**  Optional Streamable HTTP endpoint URL. When `None`, defaults to `http://127.0.0.1:7608/mcp`. */
+	http_url?: string | null,
+};
+
+export type ProjectMcpConfigRequest_Serialize = {
+	client: ProjectMcpClient,
+	transport: McpTransportMode,
+	/**  Optional Streamable HTTP endpoint URL. When `None`, defaults to `http://127.0.0.1:7608/mcp`. */
+	http_url: string | null,
+};
+
+export type ProjectMcpConfigWriteResult = {
+	client: ProjectMcpClient,
+	transport: McpTransportMode,
+	relative_path: string,
+	target_path: string,
+	created: boolean,
+	status: ProjectMcpFileStatus,
+	written_content: string,
+};
+
+export type ProjectMcpFileStatus = "create_new" | "add_server" | "update_server" | "unchanged";
+
+/**  Specta-safe recent workspace descriptor returned to the desktop UI. */
+export type RecentWorkspaceEntry = RecentWorkspaceEntry_Serialize | RecentWorkspaceEntry_Deserialize;
+
+/**  Specta-safe recent workspace descriptor returned to the desktop UI. */
+export type RecentWorkspaceEntry_Deserialize = {
+	path: string,
+	repo_id: string,
+	name: string,
+	package_manager?: string | null,
+	last_opened_at: string,
+	exists: boolean,
+	has_manifest: boolean,
+};
+
+/**  Specta-safe recent workspace descriptor returned to the desktop UI. */
+export type RecentWorkspaceEntry_Serialize = {
+	path: string,
+	repo_id: string,
+	name: string,
+	package_manager: string | null,
+	last_opened_at: string,
+	exists: boolean,
+	has_manifest: boolean,
+};
+
 export type RelayStateChangedEvent = {
 	kind: string,
 	message: string,
@@ -312,6 +425,23 @@ export type StalePropagationReport = {
 	invalidated_evidence_ids: string[],
 	reason: string,
 };
+
+export type TaskLogSnapshot = {
+	task_id: string,
+	log_blob_hash: string,
+	content: string,
+};
+
+export type TaskLogStreamEvent = {
+	task_id: string,
+	preset: string,
+	stream: TaskLogStreamKind,
+	seq: number,
+	text: string,
+	timestamp: string,
+};
+
+export type TaskLogStreamKind = "stdout" | "stderr";
 
 export type TaskRecord = TaskRecord_Serialize | TaskRecord_Deserialize;
 
@@ -361,11 +491,36 @@ export type TaskSpec_Serialize = {
 	user_note: string | null,
 };
 
-export type TaskState = "queued" | "preflight_running" | "self_healing_proposed" | "executing" | "completed" | "failed" | "stale" | "rejected";
+export type TaskState = "queued" | "preflight_running" | "self_healing_proposed" | "executing" | "completed" | "failed" | "stale" | "rejected" | "cancelled";
 
 export type ToolTraceStatus = "running" | "done" | "error";
 
 export type TransportPath = "direct_lan" | "relay" | "loopback" | "offline";
+
+/**  Persistent trusted peer entry stored in SQLite and exported to desktop UI via Specta. */
+export type TrustedPeerRecord = TrustedPeerRecord_Serialize | TrustedPeerRecord_Deserialize;
+
+/**  Persistent trusted peer entry stored in SQLite and exported to desktop UI via Specta. */
+export type TrustedPeerRecord_Deserialize = {
+	node_id: string,
+	label: string,
+	role: PeerRole,
+	ticket_or_addrs: string,
+	paired_at: string,
+	last_seen_at: string,
+	revoked_at?: string | null,
+};
+
+/**  Persistent trusted peer entry stored in SQLite and exported to desktop UI via Specta. */
+export type TrustedPeerRecord_Serialize = {
+	node_id: string,
+	label: string,
+	role: PeerRole,
+	ticket_or_addrs: string,
+	paired_at: string,
+	last_seen_at: string,
+	revoked_at: string | null,
+};
 
 export type WorkspaceInfo = WorkspaceInfo_Serialize | WorkspaceInfo_Deserialize;
 
@@ -376,6 +531,7 @@ export type WorkspaceInfo_Deserialize = {
 	mcp_data_dir?: string | null,
 	is_git_repo: boolean,
 	has_manifest: boolean,
+	package_manager?: string | null,
 	smoke_preset: string,
 	presets: PresetInfo[],
 };
@@ -387,6 +543,7 @@ export type WorkspaceInfo_Serialize = {
 	mcp_data_dir: string | null,
 	is_git_repo: boolean,
 	has_manifest: boolean,
+	package_manager: string | null,
 	smoke_preset: string,
 	presets: PresetInfo[],
 };

@@ -2,17 +2,19 @@ mod copilot;
 mod network;
 
 use crate::{
-    DagStaleAlertEvent, LlmSettingsUpdate, PresetInfo, WorkspaceInfo, emit_state,
+    DagStaleAlertEvent, LlmSettingsUpdate, PresetInfo, TaskLogStreamEvent, WorkspaceInfo,
+    emit_state,
 };
 use chrono::Utc;
-use network::{Network, NodeEvents, fetch_dag, rpc_error};
+use network::{Network, NodeEvents, ReconnectEvents, fetch_dag, rpc_error};
 use relay_core::agent::{
     HostTaskOutcome, LlmClient, LlmEndpointConfig, LlmProbeResult, LlmSettingsView,
     load_llm_config, run_host_task_pipeline, save_llm_config,
 };
 use relay_core::contracts::{
     ApprovalDecision, DagDelta, Freshness, GraphNode, NodeKind, PeerStatus, RuntimeMode,
-    StalePropagationReport, TaskId, TaskRecord, TaskSpec, WireRequest, WireResponse,
+    StalePropagationReport, TaskId, TaskRecord, TaskSpec, TrustedPeerRecord, WireRequest,
+    WireResponse,
 };
 use relay_core::engine::RelayEngine;
 use relay_core::error::{RelayError, RelayResult};
@@ -110,8 +112,11 @@ impl DesktopRuntime {
             .map(|root| WorktreeSandbox::new(root, repo_data_dir.join("worktrees")));
 
         let mode = engine.runtime_mode().await;
-        let (network, events) =
+        let (mut network, events) =
             Network::start(mode, &repo_data_dir, &engine, sandbox.clone()).await?;
+        let reconnect = network
+            .start_auto_reconnect(&engine)
+            .map(|(generation, events)| (network.local.clone(), generation, events));
 
         let origin = network.executor_node().id().to_string();
         if let Some(sb) = &sandbox {
@@ -133,6 +138,11 @@ impl DesktopRuntime {
             sandbox.clone(),
             Some(network.executor_node().clone()),
         ));
+        if let Some(root) = repo_root.as_deref()
+            && let Err(error) = crate::recent_workspaces::record_recent_workspace(&base_data_dir, root)
+        {
+            tracing::warn!(%error, "Unable to record recent workspace");
+        }
         let (shutdown, _) = watch::channel(false);
         let runtime = Arc::new(Self {
             engine,
@@ -148,6 +158,10 @@ impl DesktopRuntime {
             shutdown,
         });
         runtime.listen(events, mode);
+        runtime.start_task_log_forwarder();
+        if let Some((node, generation, reconnect_events)) = reconnect {
+            runtime.listen_reconnects(node, generation, reconnect_events);
+        }
         runtime.start_peer_sync();
         runtime.start_git_head_watcher();
         Ok(runtime)
@@ -194,6 +208,26 @@ impl DesktopRuntime {
         let path = self.base_data_dir.join("workspace.json");
         std::fs::write(path, serde_json::to_string_pretty(&prefs)?)?;
         Ok(())
+    }
+
+    pub(crate) fn list_recent_workspaces(
+        &self,
+    ) -> RelayResult<Vec<crate::recent_workspaces::RecentWorkspaceEntry>> {
+        crate::recent_workspaces::list_recent_workspaces(&self.base_data_dir)
+    }
+
+    pub(crate) fn record_recent_workspace(
+        &self,
+        repo_root: &Path,
+    ) -> RelayResult<Vec<crate::recent_workspaces::RecentWorkspaceEntry>> {
+        crate::recent_workspaces::record_recent_workspace(&self.base_data_dir, repo_root)
+    }
+
+    pub(crate) fn remove_recent_workspace(
+        &self,
+        repo_path: &Path,
+    ) -> RelayResult<Vec<crate::recent_workspaces::RecentWorkspaceEntry>> {
+        crate::recent_workspaces::remove_recent_workspace(&self.base_data_dir, repo_path)
     }
 
     pub(crate) async fn llm_settings_view(&self) -> LlmSettingsView {
@@ -283,7 +317,7 @@ impl DesktopRuntime {
             if current.mode == mode {
                 return Ok(mode);
             }
-            let (next, events) = Network::start(
+            let (mut next, events) = Network::start(
                 mode,
                 &runtime.repo_data_dir,
                 &runtime.engine,
@@ -294,9 +328,15 @@ impl DesktopRuntime {
                 next.shutdown().await;
                 return Err(error);
             }
+            let reconnect = next
+                .start_auto_reconnect(&runtime.engine)
+                .map(|(generation, events)| (next.local.clone(), generation, events));
             runtime.mcp.set_node(next.executor_node().clone());
             let previous = guard.replace(next);
             runtime.listen(events, mode);
+            if let Some((node, generation, reconnect_events)) = reconnect {
+                runtime.listen_reconnects(node, generation, reconnect_events);
+            }
             if let Some(previous) = previous {
                 previous.shutdown().await;
             }
@@ -327,11 +367,18 @@ impl DesktopRuntime {
         Ok(ticket)
     }
 
-    pub(crate) async fn connect_ticket(&self, ticket_json: &str) -> RelayResult<PeerStatus> {
+    pub(crate) async fn connect_ticket(
+        self: &Arc<Self>,
+        ticket_json: &str,
+    ) -> RelayResult<PeerStatus> {
         if self.engine.repo_root().is_none() {
             return Err(RelayError::Git("Open the same Git repository on both devices before pairing.".into()));
         }
         let address = parse_pairing_ticket(ticket_json)?;
+        let remote_id = address.id.to_string();
+        if self.engine.is_peer_revoked(&remote_id).await? {
+            return Err(RelayError::PeerRevoked(remote_id));
+        }
         let mut guard = self.network.lock().await;
         let network = guard
             .as_mut()
@@ -347,13 +394,7 @@ impl DesktopRuntime {
             ));
         }
 
-        let local_id = network.local.id().to_string();
-        if let Err(error) = network.local.ping_peer(address.clone(), &local_id).await {
-            if let Some(previous) = &network.remote {
-                network.local.set_remote_peer(previous.clone());
-            }
-            return Err(error);
-        }
+        self.manual_ping_peer(network, address.clone()).await?;
         if network.remote.as_ref().map(|peer| peer.id) != Some(address.id) {
             network.last_pushed_commit = None;
         }
@@ -362,10 +403,135 @@ impl DesktopRuntime {
 
         if network.mode == RuntimeMode::Client {
             self.refresh_from_host(network).await?;
-        } else {
-            network.local.flush_outbox(address).await?;
         }
         Ok(network.local.peer_status())
+    }
+
+    pub(crate) async fn list_trusted_peers(&self) -> RelayResult<Vec<TrustedPeerRecord>> {
+        self.engine.list_trusted_peers().await
+    }
+
+    pub(crate) async fn rename_trusted_peer(
+        &self,
+        node_id: &str,
+        label: &str,
+    ) -> RelayResult<TrustedPeerRecord> {
+        let updated = self.engine.rename_trusted_peer(node_id, label).await?;
+        emit_state(
+            &self.app,
+            "trusted_peers_changed",
+            format!("Renamed device {}", updated.label),
+        );
+        Ok(updated)
+    }
+
+    pub(crate) async fn reconnect_trusted_peer(
+        self: &Arc<Self>,
+        node_id: &str,
+    ) -> RelayResult<PeerStatus> {
+        let peer = self
+            .engine
+            .get_trusted_peer(node_id)
+            .await?
+            .ok_or_else(|| RelayError::PeerNotFound(node_id.to_owned()))?;
+        if peer.is_revoked() {
+            return Err(RelayError::PeerRevoked(node_id.to_owned()));
+        }
+        let address = parse_pairing_ticket(&peer.ticket_or_addrs)?;
+        if address.id.to_string() != peer.node_id {
+            return Err(RelayError::Transport("Saved address belongs to a different device".into()));
+        }
+        let mut guard = self.network.lock().await;
+        let network = guard
+            .as_mut()
+            .ok_or_else(|| RelayError::Transport("Runtime is shutting down".into()))?;
+        if network.mode == RuntimeMode::LocalDualSandbox {
+            return Err(RelayError::Transport(
+                "Switch to Client or Host mode to pair with another machine".into(),
+            ));
+        }
+        if address.id == network.local.id() {
+            return Err(RelayError::Transport(
+                "This ticket belongs to the local node".into(),
+            ));
+        }
+
+        self.manual_ping_peer(network, address.clone()).await?;
+        if network.remote.as_ref().map(|active| active.id) != Some(address.id) {
+            network.last_pushed_commit = None;
+        }
+        network.remote = Some(address.clone());
+        emit_state(&self.app, "peer_paired", format!("Reconnected to {}", peer.label));
+
+        if network.mode == RuntimeMode::Client {
+            self.refresh_from_host(network).await?;
+        }
+        Ok(network.local.peer_status())
+    }
+
+    async fn manual_ping_peer(
+        self: &Arc<Self>,
+        network: &mut Network,
+        address: iroh::EndpointAddr,
+    ) -> RelayResult<()> {
+        if let Err((error, restarted)) = network
+            .manual_ping_peer(&self.engine, address, None)
+            .await
+        {
+            if let Some((generation, reconnect_events)) = restarted {
+                if *self.shutdown.borrow() {
+                    network.cancel_auto_reconnect();
+                } else {
+                    self.listen_reconnects(network.local.clone(), generation, reconnect_events);
+                }
+            }
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    pub(crate) async fn revoke_trusted_peer(
+        &self,
+        node_id: &str,
+    ) -> RelayResult<TrustedPeerRecord> {
+        let updated = self.engine.revoke_trusted_peer(node_id).await?;
+        self.disconnect_trusted_peer_if_active(node_id).await;
+        emit_state(
+            &self.app,
+            "trusted_peers_changed",
+            format!("Revoked device {}", updated.label),
+        );
+        emit_state(&self.app, "peer_status_changed", "Peer status changed");
+        Ok(updated)
+    }
+
+    pub(crate) async fn remove_trusted_peer(&self, node_id: &str) -> RelayResult<()> {
+        let removed = self.engine.remove_trusted_peer(node_id).await?;
+        if !removed {
+            return Err(RelayError::PeerNotFound(node_id.to_owned()));
+        }
+        self.disconnect_trusted_peer_if_active(node_id).await;
+        emit_state(
+            &self.app,
+            "trusted_peers_changed",
+            format!("Removed device {node_id}"),
+        );
+        emit_state(&self.app, "peer_status_changed", "Peer status changed");
+        Ok(())
+    }
+
+    async fn disconnect_trusted_peer_if_active(&self, node_id: &str) {
+        if let Ok(peer_id) = node_id.parse::<iroh::EndpointId>() {
+            let mut guard = self.network.lock().await;
+            if let Some(network) = guard.as_mut() {
+                network.local.disconnect_peer(peer_id);
+                if network.remote.as_ref().is_some_and(|addr| addr.id == peer_id) {
+                    network.remote = None;
+                    network.last_pushed_commit = None;
+                    network.cancel_auto_reconnect();
+                }
+            }
+        }
     }
 
     pub(crate) async fn submit(self: &Arc<Self>, mut spec: TaskSpec) -> RelayResult<TaskRecord> {
@@ -416,17 +582,55 @@ impl DesktopRuntime {
                         }
                         Err(RelayError::Transport(error)) => {
                             tracing::debug!(%error, "Queueing task for the disconnected host");
-                            self.engine.queue_peer_task(spec).await?
+                            self.engine.queue_peer_task(spec, network.remote.as_ref().map(|peer| peer.id.to_string())).await?
                         }
                         Err(error) => return Err(error),
                     }
                 } else {
-                    self.engine.queue_peer_task(spec).await?
+                    self.engine.queue_peer_task(spec, None).await?
                 }
             }
         };
         self.task_submitted(id, false);
         Ok(result)
+    }
+
+    pub(crate) async fn cancel_task(&self, task_id: TaskId) -> RelayResult<TaskRecord> {
+        let guard = self.network.lock().await;
+        let network = guard
+            .as_ref()
+            .ok_or_else(|| RelayError::Transport("Runtime is shutting down".into()))?;
+        let record = match network.mode {
+            RuntimeMode::LocalDualSandbox => {
+                let host = network.loopback_host.as_ref().expect("loopback host");
+                network
+                    .local
+                    .cancel_remote_task(host.addr(), task_id)
+                    .await?
+            }
+            RuntimeMode::Host => self.engine.cancel_task(task_id).await?,
+            RuntimeMode::Client => {
+                if let Some(address) = network.remote.clone() {
+                    let request = WireRequest::CancelTask { task_id };
+                    match network.local.send_rpc(address, request).await {
+                        Ok(response) => {
+                            let record = task_response(response)?;
+                            self.engine.mirror_peer_task(&record).await?;
+                            record
+                        }
+                        Err(RelayError::Transport(error)) => {
+                            tracing::debug!(%error, "Queueing task cancellation for the disconnected host");
+                            self.engine.queue_peer_cancel(task_id, network.remote.as_ref().map(|peer| peer.id.to_string())).await?
+                        }
+                        Err(error) => return Err(error),
+                    }
+                } else {
+                    self.engine.queue_peer_cancel(task_id, None).await?
+                }
+            }
+        };
+        emit_state(&self.app, "task_cancelled", format!("Task {task_id} cancelled"));
+        Ok(record)
     }
 
     pub(crate) async fn resolve_approval(
@@ -481,7 +685,7 @@ impl DesktopRuntime {
         }
         let record = if network.mode == RuntimeMode::Client {
             self.engine
-                .queue_peer_approval(task_id, patch_id.as_deref(), decision)
+                .queue_peer_approval(task_id, patch_id.as_deref(), decision, network.remote.as_ref().map(|peer| peer.id.to_string()))
                 .await?
         } else {
             self.engine
@@ -614,7 +818,12 @@ impl DesktopRuntime {
                 network.last_pushed_commit = Some(meta.base_commit_sha);
             }
         }
-        if self.engine.pending_outbox_count().await? > 0 {
+        if self
+            .engine
+            .pending_outbox_count_for_peer(Some(&host.id.to_string()))
+            .await?
+            > 0
+        {
             let delivered = network.local.flush_outbox(host.clone()).await?;
             if delivered > 0 {
                 emit_state(
@@ -647,6 +856,13 @@ impl DesktopRuntime {
                             let execute = mode != RuntimeMode::Client;
                             match event {
                                 RelayNodeEvent::TaskSubmitted(id) => runtime.task_submitted(id, execute),
+                                RelayNodeEvent::TaskCancelled(id) => {
+                                    emit_state(
+                                        &runtime.app,
+                                        "task_cancelled",
+                                        format!("Task {id} cancelled"),
+                                    );
+                                }
                                 RelayNodeEvent::ApprovalResolved(id, patch_id, decision) => {
                                     runtime.approval_resolved(id, patch_id, decision, execute);
                                 }
@@ -662,6 +878,66 @@ impl DesktopRuntime {
                 }
             });
         }
+    }
+
+    fn listen_reconnects(
+        self: &Arc<Self>,
+        node: Arc<relay_core::sync::RelayNode>,
+        generation: u64,
+        mut reconnects: ReconnectEvents,
+    ) {
+        let runtime = Arc::downgrade(self);
+        let mut shutdown_rx = self.shutdown.subscribe();
+        tauri::async_runtime::spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = shutdown_rx.changed() => {
+                        if *shutdown_rx.borrow() {
+                            break;
+                        }
+                    }
+                    maybe_reconnected = reconnects.recv() => {
+                        let Some(reconnected) = maybe_reconnected else {
+                            break;
+                        };
+                        let Some(runtime) = runtime.upgrade() else {
+                            break;
+                        };
+                        let mut guard = runtime.network.lock().await;
+                        let Some(network) = guard.as_mut() else {
+                            break;
+                        };
+                        if !network.can_accept_reconnect(&node, generation)
+                            || !matches!(
+                                runtime.engine.get_trusted_peer(&reconnected.record.node_id).await,
+                                Ok(Some(peer)) if !peer.is_revoked()
+                            )
+                        {
+                            continue;
+                        }
+                        network.cancel_auto_reconnect();
+                        if network.remote.as_ref().map(|peer| peer.id) != Some(reconnected.addr.id) {
+                            network.last_pushed_commit = None;
+                        }
+                        network.remote = Some(reconnected.addr.clone());
+                        emit_state(
+                            &runtime.app,
+                            "peer_paired",
+                            format!("Reconnected to {}", reconnected.record.label),
+                        );
+                        if network.mode == RuntimeMode::Client
+                            && let Err(error) = runtime.refresh_from_host(network).await
+                        {
+                            tracing::debug!(
+                                %error,
+                                "Unable to refresh host state after startup auto-reconnect"
+                            );
+                        }
+                        emit_state(&runtime.app, "peer_status_changed", "Peer status changed");
+                    }
+                }
+            }
+        });
     }
 
     fn task_submitted(self: &Arc<Self>, id: TaskId, execute: bool) {
@@ -690,6 +966,13 @@ impl DesktopRuntime {
                     Ok(HostTaskOutcome::AwaitingApproval) => {
                         emit_state(
                             &runtime.app, "task_updated", format!("Task {id} is ready for approval"),
+                        );
+                    }
+                    Ok(HostTaskOutcome::Cancelled) => {
+                        emit_state(
+                            &runtime.app,
+                            "task_cancelled",
+                            format!("Task {id} cancelled"),
                         );
                     }
                     Ok(HostTaskOutcome::Skipped) => {
@@ -747,6 +1030,44 @@ impl DesktopRuntime {
                 }
             });
         }
+    }
+
+    fn start_task_log_forwarder(self: &Arc<Self>) {
+        let mut rx = self.engine.subscribe_task_logs();
+        let app = self.app.clone();
+        let mut shutdown_rx = self.shutdown.subscribe();
+        tauri::async_runtime::spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = shutdown_rx.changed() => {
+                        if *shutdown_rx.borrow() {
+                            break;
+                        }
+                    }
+                    result = rx.recv() => {
+                        match result {
+                            Ok(chunk) => {
+                                let event = TaskLogStreamEvent {
+                                    task_id: chunk.task_id,
+                                    preset: chunk.preset,
+                                    stream: chunk.stream,
+                                    seq: chunk.seq,
+                                    text: chunk.text,
+                                    timestamp: chunk.timestamp,
+                                };
+                                if let Err(error) = event.emit(&app) {
+                                    tracing::warn!(%error, "Unable to emit task log stream event");
+                                }
+                            }
+                            Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                                tracing::debug!(skipped, "Task log stream forwarder lagged");
+                            }
+                            Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                        }
+                    }
+                }
+            }
+        });
     }
 
     fn start_peer_sync(self: &Arc<Self>) {
@@ -898,11 +1219,13 @@ fn inspect_workspace(repo_root: Option<&Path>) -> WorkspaceInfo {
             mcp_data_dir: None,
             is_git_repo: false,
             has_manifest: false,
+            package_manager: None,
             smoke_preset: String::new(),
             presets: Vec::new(),
         };
     };
     let is_git_repo = root.join(".git").exists();
+    let detected_pm = crate::recent_workspaces::detect_repo_package_manager(root);
     match load_manifest(root) {
         Ok(manifest) => {
             let presets = manifest
@@ -923,6 +1246,7 @@ fn inspect_workspace(repo_root: Option<&Path>) -> WorkspaceInfo {
                 mcp_data_dir: None,
                 is_git_repo,
                 has_manifest: true,
+                package_manager: manifest.project.package_manager.or(detected_pm),
                 smoke_preset: manifest.project.smoke_preset,
                 presets,
             }
@@ -939,6 +1263,7 @@ fn inspect_workspace(repo_root: Option<&Path>) -> WorkspaceInfo {
                 mcp_data_dir: None,
                 is_git_repo,
                 has_manifest: root.join("relay.toml").exists(),
+                package_manager: detected_pm,
                 smoke_preset: String::new(),
                 presets: Vec::new(),
             }

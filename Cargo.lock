@@ -4875,6 +4875,7 @@ dependencies = [
  "futures",
  "iroh",
  "iroh-blobs",
+ "libc",
  "petgraph",
  "reqwest",
  "rmcp",
@@ -4889,6 +4890,7 @@ dependencies = [
  "toml 1.2.2+spec-1.1.0",
  "tracing",
  "uuid",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -4923,9 +4925,11 @@ dependencies = [
  "tauri",
  "tauri-build",
  "tauri-specta",
+ "tempfile",
  "tokio",
  "tracing",
  "uuid",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

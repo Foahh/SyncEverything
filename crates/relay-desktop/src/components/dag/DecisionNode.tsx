@@ -27,9 +27,11 @@ export function DecisionNode({ data, selected }: NodeProps<RelayFlowNode>) {
         {node.label}
       </h4>
 
-      <p className="mt-1 line-clamp-2 text-xs leading-relaxed text-muted-foreground">
-        {node.payload.rationale}
-      </p>
+      {node.payload.rationale.trim().length > 0 && (
+        <p className="mt-1 line-clamp-2 text-xs leading-relaxed text-muted-foreground">
+          {node.payload.rationale}
+        </p>
+      )}
 
       <Handle
         type="target"

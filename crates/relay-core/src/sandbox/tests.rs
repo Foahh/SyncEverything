@@ -145,24 +145,37 @@ async fn rejects_disallowed_preset_params_and_overrides_allowed_flags() {
         .unwrap_err();
     assert!(matches!(error, RelayError::Internal(message) if message.contains("output")));
 
-    let mut altered = manifest.clone();
-    altered.presets.get_mut("train_grid").unwrap().args.clear();
-    let error = sandbox
-        .run_preset(worktree.worktree_path(), &altered, "train_grid", &BTreeMap::new())
-        .await
-        .unwrap_err();
-    assert!(matches!(error, RelayError::Internal(message) if message.contains("host relay.toml")));
-
-    let mut alternate_smoke = manifest.clone();
-    alternate_smoke.project.smoke_preset = "train_grid".into();
-    let error = sandbox.run_preflight(task_id, worktree.worktree_path(), worktree.branch_name(), &alternate_smoke)
-        .await.unwrap_err();
-    assert!(matches!(error, RelayError::Internal(message) if message.contains("smoke preset")));
-
     let overrides = BTreeMap::from([
         ("alpha".into(), "0.25".into()),
         ("windows".into(), "4,8".into()),
     ]);
+
+    // Host `relay.toml` is the single execution policy authority: passing a tampered or
+    // older manifest must execute Host's authoritative preset rather than failing or running
+    // untrusted commands.
+    let mut altered = manifest.clone();
+    altered.presets.get_mut("train_grid").unwrap().program = "nonexistent-hijack".into();
+    altered.presets.get_mut("train_grid").unwrap().args.clear();
+    let host_governed = sandbox
+        .run_preset(worktree.worktree_path(), &altered, "train_grid", &overrides)
+        .await
+        .unwrap();
+    assert!(host_governed.success, "{}", host_governed.raw_log);
+    assert_eq!(
+        host_governed.metrics_json,
+        Some(serde_json::json!({"windows": ["4,8"], "alpha": [0.25]}).into())
+    );
+
+    let mut alternate_smoke = manifest.clone();
+    alternate_smoke.project.smoke_preset = "train_grid".into();
+    let preflight = sandbox
+        .run_preflight(task_id, worktree.worktree_path(), worktree.branch_name(), &alternate_smoke)
+        .await
+        .unwrap();
+    // Host's `smoke` preset runs (and fails on undefined SMOKE_MESSAGE), proving `train_grid` was not substituted.
+    assert!(!preflight.smoke_passed);
+    assert!(preflight.stderr_tail.contains("NameError"));
+
     let output = sandbox
         .run_preset(worktree.worktree_path(), &manifest, "train_grid", &overrides)
         .await
@@ -212,7 +225,7 @@ async fn git_bundle_roundtrip_transfers_commits_between_repos() {
 }
 
 #[tokio::test]
-async fn worktree_preflight_and_file_edits_self_healing_preserves_clean_main_tree() {
+async fn worktree_preflight_and_code_diff_self_healing_preserves_clean_main_tree() {
     let temp = TempDir::new();
     let repo = temp.join("main");
     let base_commit = init_python_repo(&repo).await;
@@ -258,7 +271,7 @@ async fn worktree_preflight_and_file_edits_self_healing_preserves_clean_main_tre
             path,
             branch,
             &manifest,
-            PatchInput::FileEdits(&[FileEdit {
+            PatchInput::CodeDiff(&[FileEdit {
                 file_path: "src/app.py".into(),
                 old_text: Some("NON_EXISTENT_SYMBOL = 1".into()),
                 new_text: "SMOKE_MESSAGE = \"Smoke passed\"".into(),
@@ -276,7 +289,7 @@ async fn worktree_preflight_and_file_edits_self_healing_preserves_clean_main_tre
             path,
             branch,
             &manifest,
-            PatchInput::FileEdits(&[FileEdit {
+            PatchInput::CodeDiff(&[FileEdit {
                 file_path: "src/app.py".into(),
                 old_text: Some("parser.add_argument".into()),
                 new_text: "parser.add_arg".into(),
@@ -296,7 +309,7 @@ async fn worktree_preflight_and_file_edits_self_healing_preserves_clean_main_tre
                 path,
                 branch,
                 &manifest,
-                PatchInput::FileEdits(&[FileEdit {
+                PatchInput::CodeDiff(&[FileEdit {
                     file_path: blocked.into(),
                     old_text: None,
                     new_text: "blocked\n".into(),
@@ -320,7 +333,7 @@ async fn worktree_preflight_and_file_edits_self_healing_preserves_clean_main_tre
             path,
             branch,
             &manifest,
-            PatchInput::FileEdits(&[
+            PatchInput::CodeDiff(&[
                 FileEdit {
                     file_path: "src/app.py".into(),
                     old_text: Some("import json\n".into()),
@@ -367,12 +380,12 @@ async fn worktree_preflight_and_file_edits_self_healing_preserves_clean_main_tre
             path,
             branch,
             &manifest,
-            PatchInput::FileEdits(&edits),
+            PatchInput::CodeDiff(&edits),
             "Define the smoke message",
         )
         .await
         .unwrap();
-    assert_eq!(proposal.kind, PatchKind::FileEdits);
+    assert_eq!(proposal.kind, PatchKind::CodeDiff);
     assert!(proposal.smoke_verified, "{}", proposal.smoke_stdout_tail);
     assert!(proposal.smoke_stdout_tail.contains("Smoke passed"));
     assert!(proposal.diff_preview.contains("diff --git a/src/app.py b/src/app.py"));
@@ -478,23 +491,36 @@ async fn compares_environment_inputs_at_a_commit_with_the_host() {
     let absent = compute_env_fingerprint(&repo).unwrap();
     let empty = sandbox.check_env_diff("HEAD").await.unwrap();
     assert_eq!(empty.host_env_fingerprint, absent);
+    assert_eq!(empty.ecosystem, "generic");
+    assert_eq!(empty.package_manager, "generic");
     assert!(empty.in_sync);
-    assert_eq!(absent.len(), "uv:blake3:".len() + 16);
+    assert_eq!(absent.len(), "generic:blake3:".len() + 16);
+    assert!(absent.starts_with("generic:blake3:"));
+
     fs::write(repo.join("uv.lock"), "").unwrap();
-    assert_ne!(compute_env_fingerprint(&repo).unwrap(), absent);
+    let uv_lock_only = compute_env_fingerprint(&repo).unwrap();
+    assert!(uv_lock_only.starts_with("uv:blake3:"));
+    assert_eq!(uv_lock_only.len(), "uv:blake3:".len() + 16);
+    assert_ne!(uv_lock_only, absent);
     fs::remove_file(repo.join("uv.lock")).unwrap();
+
     fs::write(
         repo.join("pyproject.toml"),
         "[project]\ndependencies = [\"Some_Package[extra]>=2\", \"Scipy>=1.14\"]\n",
     )
     .unwrap();
     let head = create_initial_commit(&repo).await;
-    assert!(sandbox.check_env_diff("HEAD").await.unwrap().in_sync);
+    let synced = sandbox.check_env_diff("HEAD").await.unwrap();
+    assert!(synced.in_sync);
+    assert_eq!(synced.ecosystem, "python");
+    assert_eq!(synced.package_manager, "uv");
 
     fs::write(repo.join("pyproject.toml"), "[project]\ndependencies = []\n").unwrap();
     fs::write(repo.join("uv.lock"), "[[package]]\nname = \"some-package\"\n").unwrap();
     let report = sandbox.check_env_diff(&head).await.unwrap();
     assert_eq!(report.commit_sha, head);
+    assert_eq!(report.ecosystem, "python");
+    assert_eq!(report.package_manager, "uv");
     assert_eq!(report.host_env_fingerprint, compute_env_fingerprint(&repo).unwrap());
     assert!(!report.in_sync);
     assert_eq!(report.missing_packages, vec!["scipy"]);
@@ -667,10 +693,11 @@ fn generates_valid_default_manifests_for_detected_project_types() {
     )
     .unwrap();
     let (py_toml, py_kind) = generate_default_manifest(&py_dir).unwrap();
-    assert_eq!(py_kind, "python-uv");
+    assert_eq!(py_kind, "uv");
     let py_manifest: RelayManifest = toml::from_str(&py_toml).unwrap();
     assert_eq!(py_manifest.project.repo_id, "py-sample-app");
     assert_eq!(py_manifest.project.smoke_preset, "smoke");
+    assert_eq!(py_manifest.project.package_manager.as_deref(), Some("uv"));
     assert_eq!(py_manifest.presets["smoke"].program, "uv");
     assert_eq!(py_manifest.presets["test"].program, "uv");
 
@@ -678,9 +705,10 @@ fn generates_valid_default_manifests_for_detected_project_types() {
     fs::create_dir(&rs_dir).unwrap();
     fs::write(rs_dir.join("Cargo.toml"), "[package]\nname = \"demo\"\n").unwrap();
     let kind = write_default_manifest(&rs_dir).unwrap();
-    assert_eq!(kind, "rust-cargo");
+    assert_eq!(kind, "cargo");
     let rs_manifest = load_manifest(&rs_dir).unwrap();
     assert_eq!(rs_manifest.project.smoke_preset, "check");
+    assert_eq!(rs_manifest.project.package_manager.as_deref(), Some("cargo"));
     assert_eq!(rs_manifest.presets["check"].program, "cargo");
     assert_eq!(rs_manifest.presets["test"].program, "cargo");
     assert_eq!(rs_manifest.presets["check"].timeout_secs, 900);
@@ -696,8 +724,9 @@ fn generates_valid_default_manifests_for_detected_project_types() {
     .unwrap();
     fs::write(js_bun_dir.join("bun.lock"), "").unwrap();
     let (bun_toml, bun_kind) = generate_default_manifest(&js_bun_dir).unwrap();
-    assert_eq!(bun_kind, "js-ts");
+    assert_eq!(bun_kind, "bun");
     let bun_manifest: RelayManifest = toml::from_str(&bun_toml).unwrap();
+    assert_eq!(bun_manifest.project.package_manager.as_deref(), Some("bun"));
     assert_eq!(bun_manifest.presets["smoke"].program, "bun");
     assert_eq!(bun_manifest.presets["smoke"].args, vec!["--version"]);
     assert_eq!(bun_manifest.presets["lint"].args, vec!["run", "lint"]);
@@ -708,6 +737,7 @@ fn generates_valid_default_manifests_for_detected_project_types() {
     let (gen_toml, gen_kind) = generate_default_manifest(&generic_dir).unwrap();
     assert_eq!(gen_kind, "generic");
     let gen_manifest: RelayManifest = toml::from_str(&gen_toml).unwrap();
+    assert_eq!(gen_manifest.project.package_manager.as_deref(), Some("generic"));
     assert_eq!(gen_manifest.presets["smoke"].program, "git");
 }
 
@@ -768,4 +798,491 @@ async fn first_dispatch_can_use_a_starter_manifest_before_it_is_committed() {
     }, None).await.unwrap();
     assert_eq!(engine.get_task(id).await.unwrap().unwrap().state, TaskState::Completed);
     assert_eq!(git(&repo, &["status", "--short"]).await, "?? relay.toml");
+}
+
+#[tokio::test]
+async fn run_preset_streaming_emits_incremental_stdout_and_stderr_with_identical_hash() {
+    use crate::contracts::{TaskLogChunk, TaskLogStreamKind};
+    use std::sync::Arc;
+    use tokio::sync::mpsc;
+
+    let temp = TempDir::new();
+    let repo = temp.join("stream-repo");
+    init_repo(&repo).await;
+    fs::create_dir(repo.join("src")).unwrap();
+    fs::write(
+        repo.join("src/stream.py"),
+        r#"import json, sys, time
+print("stdout line 1", flush=True)
+print("stderr line 1", file=sys.stderr, flush=True)
+time.sleep(0.15)
+print("stdout line 2", flush=True)
+print(json.dumps({"loss": 0.125}), flush=True)
+print("stderr line 2", file=sys.stderr, flush=True)
+"#,
+    )
+    .unwrap();
+    fs::write(repo.join("pyproject.toml"), PYPROJECT).unwrap();
+    fs::write(
+        repo.join("relay.toml"),
+        r#"[project]
+repo_id = "stream-test"
+name = "Stream Test"
+smoke_preset = "stream_ok"
+
+[presets.stream_ok]
+description = "Emit incremental stdout and stderr"
+program = "uv"
+args = ["run", "--quiet", "--offline", "python", "src/stream.py"]
+timeout_secs = 30
+"#,
+    )
+    .unwrap();
+    fs::write(repo.join(".gitignore"), ".venv/\n__pycache__/\n").unwrap();
+    let sha = create_initial_commit(&repo).await;
+
+    let sandbox = WorktreeSandbox::new(&repo, temp.join("worktrees"));
+    let manifest = load_manifest(&repo).unwrap();
+    let task_id = Uuid::now_v7();
+    let worktree = sandbox.prepare_worktree(task_id, &sha).await.unwrap();
+
+    let (tx, mut rx) = mpsc::unbounded_channel::<TaskLogChunk>();
+    let sandbox_clone = sandbox.clone();
+    let worktree_path = worktree.worktree_path().to_owned();
+    let manifest_clone = manifest.clone();
+    let run_handle = tokio::spawn(async move {
+        sandbox_clone
+            .run_preset_streaming(
+                &worktree_path,
+                &manifest_clone,
+                "stream_ok",
+                &BTreeMap::new(),
+                PresetRunOptions {
+                    task_id: Some(task_id),
+                    on_log_chunk: Some(Arc::new(move |chunk| {
+                        let _ = tx.send(chunk);
+                    })),
+                    cancel_token: None,
+                    seq_counter: None,
+                },
+            )
+            .await
+    });
+
+    // Verify we receive live chunks BEFORE the child process exits.
+    let first_chunk = tokio::time::timeout(std::time::Duration::from_secs(10), rx.recv())
+        .await
+        .expect("timed out waiting for first live chunk")
+        .expect("log channel closed prematurely");
+    assert_eq!(first_chunk.task_id, task_id.to_string());
+    assert_eq!(first_chunk.preset, "stream_ok");
+
+    let streamed_output = run_handle.await.unwrap().unwrap();
+    assert!(streamed_output.success, "{}", streamed_output.raw_log);
+    assert!(!streamed_output.timed_out);
+    assert!(!streamed_output.cancelled);
+
+    let mut chunks = vec![first_chunk];
+    while let Ok(chunk) = rx.try_recv() {
+        chunks.push(chunk);
+    }
+    for window in chunks.windows(2) {
+        assert!(
+            window[0].seq < window[1].seq,
+            "expected strictly increasing seq: {:?}",
+            chunks
+        );
+    }
+
+    let mut combined_stdout = String::new();
+    let mut combined_stderr = String::new();
+    for chunk in &chunks {
+        match chunk.stream {
+            TaskLogStreamKind::Stdout => combined_stdout.push_str(&chunk.text),
+            TaskLogStreamKind::Stderr => combined_stderr.push_str(&chunk.text),
+        }
+    }
+    assert!(combined_stdout.contains("stdout line 1"));
+    assert!(combined_stdout.contains("stdout line 2"));
+    assert!(combined_stderr.contains("stderr line 1"));
+    assert!(combined_stderr.contains("stderr line 2"));
+    assert_eq!(combined_stdout, streamed_output.stdout);
+    assert_eq!(combined_stderr, streamed_output.stderr);
+
+    // Compare against non-streaming `run_preset` for identical raw_log and BLAKE3 hash.
+    let baseline = sandbox
+        .run_preset(worktree.worktree_path(), &manifest, "stream_ok", &BTreeMap::new())
+        .await
+        .unwrap();
+    assert_eq!(streamed_output.raw_log, baseline.raw_log);
+    assert_eq!(streamed_output.log_blob_hash, baseline.log_blob_hash);
+    assert_eq!(
+        streamed_output.metrics_json,
+        Some(serde_json::json!({"loss": 0.125}).into())
+    );
+    worktree.cleanup().await.unwrap();
+}
+
+#[tokio::test]
+async fn run_preset_streaming_distinguishes_timeout_from_cancellation() {
+    use crate::contracts::TaskLogChunk;
+    use crate::engine::TaskCancellationToken;
+    use std::sync::Arc;
+    use tokio::sync::mpsc;
+
+    let temp = TempDir::new();
+    let repo = temp.join("cancel-timeout-repo");
+    init_repo(&repo).await;
+    fs::create_dir(repo.join("src")).unwrap();
+    fs::write(
+        repo.join("src/slow.py"),
+        r#"import sys, time
+print("partial stdout before sleep", flush=True)
+print("partial stderr before sleep", file=sys.stderr, flush=True)
+time.sleep(30)
+print("should never finish", flush=True)
+"#,
+    )
+    .unwrap();
+    fs::write(repo.join("pyproject.toml"), PYPROJECT).unwrap();
+    fs::write(
+        repo.join("relay.toml"),
+        r#"[project]
+repo_id = "cancel-timeout"
+name = "Cancel & Timeout Test"
+smoke_preset = "slow_cancel"
+
+[presets.slow_cancel]
+description = "Long-running preset for cancellation test"
+program = "uv"
+args = ["run", "--offline", "python", "src/slow.py"]
+timeout_secs = 30
+
+[presets.slow_timeout]
+description = "Short-timeout preset"
+program = "uv"
+args = ["run", "--offline", "python", "src/slow.py"]
+timeout_secs = 1
+"#,
+    )
+    .unwrap();
+    fs::write(repo.join(".gitignore"), ".venv/\n__pycache__/\n").unwrap();
+    let sha = create_initial_commit(&repo).await;
+
+    let sandbox = WorktreeSandbox::new(&repo, temp.join("worktrees"));
+    let manifest = load_manifest(&repo).unwrap();
+    let task_id = Uuid::now_v7();
+    let worktree = sandbox.prepare_worktree(task_id, &sha).await.unwrap();
+
+    // 1) Cancellation kills promptly and preserves partial stdout/stderr.
+    let (cancel_tx, cancel_token) = TaskCancellationToken::new();
+    let (chunk_tx, mut chunk_rx) = mpsc::unbounded_channel::<TaskLogChunk>();
+    let sb = sandbox.clone();
+    let wt_path = worktree.worktree_path().to_owned();
+    let mf = manifest.clone();
+    let started = std::time::Instant::now();
+    let cancel_run = tokio::spawn(async move {
+        sb.run_preset_streaming(
+            &wt_path,
+            &mf,
+            "slow_cancel",
+            &BTreeMap::new(),
+            PresetRunOptions {
+                task_id: Some(task_id),
+                on_log_chunk: Some(Arc::new(move |chunk| {
+                    let _ = chunk_tx.send(chunk);
+                })),
+                cancel_token: Some(cancel_token),
+                seq_counter: None,
+            },
+        )
+        .await
+    });
+
+    // Wait until partial output is observed from the running child, then cancel.
+    let mut saw_partial = false;
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(15);
+    while tokio::time::Instant::now() < deadline {
+        if let Ok(Some(chunk)) =
+            tokio::time::timeout(std::time::Duration::from_secs(5), chunk_rx.recv()).await
+            && chunk.text.contains("partial stdout before sleep")
+        {
+            saw_partial = true;
+            break;
+        }
+    }
+    assert!(saw_partial, "expected partial stdout chunk before cancelling");
+    let _ = cancel_tx.send(true);
+
+    let cancelled_out = tokio::time::timeout(std::time::Duration::from_secs(10), cancel_run)
+        .await
+        .expect("cancelled preset did not terminate promptly")
+        .unwrap()
+        .unwrap();
+    assert!(started.elapsed() < std::time::Duration::from_secs(15));
+    assert!(cancelled_out.cancelled);
+    assert!(!cancelled_out.timed_out);
+    assert!(!cancelled_out.success);
+    assert!(cancelled_out.raw_log.contains("partial stdout before sleep"));
+    assert!(!cancelled_out.raw_log.contains("should never finish"));
+    assert_eq!(
+        cancelled_out.log_blob_hash,
+        format!(
+            "blake3:{}",
+            blake3::hash(cancelled_out.raw_log.as_bytes()).to_hex()
+        )
+    );
+
+    // 2) Timeout marks timed_out=true and cancelled=false.
+    let timed_out = sandbox
+        .run_preset_streaming(
+            worktree.worktree_path(),
+            &manifest,
+            "slow_timeout",
+            &BTreeMap::new(),
+            PresetRunOptions::default(),
+        )
+        .await
+        .unwrap();
+    assert!(timed_out.timed_out);
+    assert!(!timed_out.cancelled);
+    assert!(!timed_out.success);
+    assert!(timed_out.stderr.contains("timed out after 1 seconds"));
+
+    worktree.cleanup().await.unwrap();
+}
+
+#[tokio::test]
+async fn env_templates_and_parent_dir_extensions_allowed_while_secrets_blocked() {
+    let temp = TempDir::new();
+    let repo = temp.join("env-paths");
+    init_repo(&repo).await;
+    fs::create_dir_all(repo.join("migrations.db")).unwrap();
+    fs::create_dir_all(repo.join("certs.pem")).unwrap();
+    fs::create_dir_all(repo.join("api.key")).unwrap();
+
+    for template in [
+        ".env.example",
+        ".env.sample",
+        ".env.template",
+        ".env.dist",
+        ".env.schema",
+    ] {
+        fs::write(repo.join(template), "APP_MODE=demo\n").unwrap();
+    }
+    for secret in [".env", ".env.local", ".env.production", ".env.staging"] {
+        fs::write(repo.join(secret), "API_SECRET=top-secret\n").unwrap();
+    }
+    fs::write(repo.join("migrations.db/001.sql"), "SELECT 1;\n").unwrap();
+    fs::write(repo.join("certs.pem/readme.txt"), "Cert docs\n").unwrap();
+    fs::write(repo.join("api.key/handler.py"), "raise ValueError('bad')\n").unwrap();
+    fs::write(repo.join("state.db"), "not-text\n").unwrap();
+    fs::write(repo.join("state.db-wal"), "wal\n").unwrap();
+    fs::write(repo.join("state.db-shm"), "shm\n").unwrap();
+    fs::write(repo.join("server.pem"), "-----BEGIN KEY-----\n").unwrap();
+    fs::write(repo.join("private.key"), "secret-key\n").unwrap();
+
+    let sandbox = WorktreeSandbox::new(&repo, temp.join("worktrees"));
+
+    // Allowed non-secret templates and files under parent directories with `.db`/`.pem`/`.key` names.
+    for allowed in [
+        ".env.example",
+        ".env.sample",
+        ".env.template",
+        ".env.dist",
+        ".env.schema",
+        "migrations.db/001.sql",
+        "certs.pem/readme.txt",
+        "api.key/handler.py",
+    ] {
+        let text = sandbox.read_repo_file(allowed, 4096).await.unwrap();
+        assert!(!text.is_empty(), "expected readable file '{allowed}'");
+    }
+
+    // Blocked secret env files and final-component `.db`/`.db-wal`/`.db-shm`/`.pem`/`.key` files.
+    for blocked in [
+        ".env",
+        ".env.local",
+        ".env.production",
+        ".env.staging",
+        "state.db",
+        "state.db-wal",
+        "state.db-shm",
+        "server.pem",
+        "private.key",
+    ] {
+        assert!(
+            sandbox.read_repo_file(blocked, 4096).await.is_err(),
+            "expected protected file '{blocked}' to be blocked"
+        );
+    }
+
+    // Error snippet extraction follows the exact same allow/block rules.
+    let stderr = ".env.example:1:1\n.env.local:1:1\nmigrations.db/001.sql:1:1\napi.key/handler.py:1:1\nprivate.key:1:1\nstate.db:1:1\n";
+    let snippets = extract_error_snippets(&repo, stderr);
+    let snippet_paths: Vec<&str> = snippets.iter().map(|s| s.file_path.as_str()).collect();
+    assert_eq!(
+        snippet_paths,
+        vec![".env.example", "migrations.db/001.sql", "api.key/handler.py"]
+    );
+}
+
+#[tokio::test]
+async fn host_relay_toml_authorizes_historical_commits_and_blocks_code_diff_edits() {
+    use crate::contracts::{ApproveAndExecuteArgs, ProposeWorktreePatchArgs, RunPreflightArgs, TaskSpec, TaskState};
+    use crate::mcp::RelayMcpServer;
+    use std::sync::Arc;
+
+    let temp = TempDir::new();
+    let repo = temp.join("hist-policy");
+    let first_sha = init_python_repo(&repo).await;
+
+    // Commit 2 updates `relay.toml` with cosmetic edits (new description, timeout_secs, explicit package_manager = "uv").
+    let updated_manifest = r#"
+[project]
+repo_id = "forecast-bench"
+name = "Forecasting Benchmark"
+smoke_preset = "smoke"
+package_manager = "uv"
+
+[presets.smoke]
+description = "Updated smoke check description"
+program = "uv"
+args = ["run", "python", "src/app.py", "--smoke"]
+timeout_secs = 60
+allowed_params = ["window"]
+
+[presets.train_grid]
+description = "Updated grid description"
+program = "uv"
+args = ["run", "python", "src/app.py", "--windows", "7,14,28", "--alpha=0.5"]
+timeout_secs = 90
+allowed_params = ["windows", "alpha"]
+"#;
+    fs::write(repo.join("relay.toml"), updated_manifest).unwrap();
+    git(&repo, &["add", "relay.toml"]).await;
+    git(
+        &repo,
+        &[
+            "-c",
+            "user.name=Relay Test",
+            "-c",
+            "user.email=relay-test@example.invalid",
+            "commit",
+            "-m",
+            "Update relay.toml metadata and explicit package_manager",
+        ],
+    )
+    .await;
+
+    let sandbox = WorktreeSandbox::new(&repo, temp.join("worktrees"));
+    let engine = Arc::new(RelayEngine::in_memory("forecast-bench", Some(repo.clone())).await.unwrap());
+    let server = RelayMcpServer::new(engine.clone(), Some(sandbox.clone()), None);
+
+    // Run a task pinned to the historical first commit where relay.toml differed.
+    let task_id = Uuid::now_v7();
+    engine
+        .submit_task(TaskSpec {
+            task_id,
+            repo_id: "forecast-bench".into(),
+            base_commit_sha: first_sha.clone(),
+            command_preset: "train_grid".into(),
+            params: BTreeMap::from([("alpha".into(), "0.25".into())]),
+            require_approval: false,
+            requested_by_device: "cli".into(),
+            user_note: Some("Historical run".into()),
+        })
+        .await
+        .unwrap();
+
+    // Preflight runs cleanly against historical commit without spurious host-mismatch errors.
+    let preflight = server
+        .handle_run_preflight(RunPreflightArgs {
+            task_id: task_id.to_string(),
+        })
+        .await
+        .unwrap();
+    assert!(!preflight.smoke_passed);
+
+    // Untrusted code_diff edits targeting `relay.toml` (any casing/prefix) are strictly blocked.
+    for target in ["relay.toml", "./relay.toml", "Relay.toml"] {
+        let err = server
+            .handle_propose_patch(ProposeWorktreePatchArgs {
+                task_id: task_id.to_string(),
+                patch_kind: "code_diff".into(),
+                summary: "Attempt to tamper with relay.toml".into(),
+                dependency_spec: None,
+                edits: Some(vec![FileEdit {
+                    file_path: target.into(),
+                    old_text: None,
+                    new_text: "[project]\nrepo_id = \"pwn\"\n".into(),
+                }]),
+            })
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("relay.toml") && err.to_string().contains("blocked"),
+            "expected relay.toml block for '{target}', got: {err}"
+        );
+    }
+
+    // Legitimate code_diff patch + full execution succeed cleanly on the historical commit.
+    let patch = server
+        .handle_propose_patch(ProposeWorktreePatchArgs {
+            task_id: task_id.to_string(),
+            patch_kind: "code_diff".into(),
+            summary: "Define SMOKE_MESSAGE".into(),
+            dependency_spec: None,
+            edits: Some(vec![FileEdit {
+                file_path: "src/app.py".into(),
+                old_text: Some("import argparse\nimport json\n".into()),
+                new_text: "import argparse\nimport json\n\nSMOKE_MESSAGE = \"ok\"\n".into(),
+            }]),
+        })
+        .await
+        .unwrap();
+    assert!(patch.smoke_verified);
+
+    server
+        .handle_approve_and_execute(
+            ApproveAndExecuteArgs {
+                task_id: task_id.to_string(),
+                patch_id: Some(patch.patch_id),
+                approved_via_ui: Some(true),
+            },
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(engine.get_task(task_id).await.unwrap().unwrap().state, TaskState::Completed);
+}
+
+#[tokio::test]
+async fn env_diff_inherits_uncommitted_host_package_manager_override_in_polyglot_repo() {
+    let temp = TempDir::new();
+    let repo = temp.join("polyglot-uncommitted");
+    init_repo(&repo).await;
+    fs::write(
+        repo.join("pyproject.toml"),
+        "[project]\nname = \"py-side\"\ndependencies = [\"scipy>=1.14\"]\n",
+    )
+    .unwrap();
+    fs::write(
+        repo.join("Cargo.toml"),
+        "[package]\nname = \"rs-side\"\nversion = \"0.1.0\"\n\n[dependencies]\nserde = \"1.0\"\n",
+    )
+    .unwrap();
+    let head = create_initial_commit(&repo).await;
+
+    // Create an uncommitted relay.toml overriding package_manager to `cargo` (without committing it).
+    write_manifest_for_repo_with_options(&repo, Some("cargo"), false).unwrap();
+
+    let sandbox = WorktreeSandbox::new(&repo, temp.join("worktrees"));
+    let report = sandbox.check_env_diff(&head).await.unwrap();
+    assert!(report.in_sync, "expected zero false drift, got notes: {:?}", report.notes);
+    assert_eq!(report.package_manager, "cargo");
+    assert_eq!(report.ecosystem, "rust");
+    assert!(report.missing_packages.is_empty(), "{:?}", report.missing_packages);
+    assert!(report.notes.is_empty(), "{:?}", report.notes);
+    assert_eq!(report.repo_env_fingerprint, report.host_env_fingerprint);
 }

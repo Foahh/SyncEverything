@@ -207,13 +207,7 @@ function DispatchTaskForm({
         </Alert>
       )}
       <DialogFooter>
-        <Button
-          type="button"
-          variant="outline"
-          size="lg"
-          disabled={isSubmitting}
-          onClick={onCancel}
-        >
+        <Button type="button" variant="outline" size="lg" onClick={onCancel}>
           <span className="relay-text-trim leading-none">{t("modals.task.cancel")}</span>
         </Button>
         <Button type="submit" size="lg" disabled={isSubmitting}>
@@ -239,12 +233,7 @@ export function DispatchTaskModal({
   const commitBadge = headCommitSha ? headCommitSha.slice(0, 7) : "HEAD";
 
   return (
-    <Dialog
-      open={isOpen}
-      onOpenChange={(open) => {
-        if (!isSubmitting) onOpenChange(open);
-      }}
-    >
+    <Dialog open={isOpen} onOpenChange={onOpenChange}>
       <DialogContent className="sm:max-w-lg">
         <DialogHeader>
           <div className="flex items-center gap-2.5">

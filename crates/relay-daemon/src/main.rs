@@ -4,13 +4,17 @@ use relay_core::agent::{
     ContextStrategy, InferenceTier, LlmClient, LlmEndpointConfig, compose_context, load_llm_config,
     run_host_task_pipeline,
 };
-use relay_core::contracts::{RuntimeMode, TaskSpec};
+use relay_core::contracts::{RelayManifest, RuntimeMode, TaskSpec};
 use relay_core::engine::RelayEngine;
 use relay_core::mcp::RelayMcpServer;
 use relay_core::sandbox::{
-    HeadSyncOutcome, WorktreeSandbox, load_manifest, sync_git_head_explicitly, sync_git_head_into_engine,
+    HeadSyncOutcome, WorktreeSandbox, generate_manifest_for_repo, load_manifest,
+    sync_git_head_explicitly, sync_git_head_into_engine, write_manifest_for_repo_with_options,
 };
-use relay_core::sync::{NetworkProfile, RelayNode, RelayNodeConfig, RelayNodeEvent};
+use relay_core::sync::{
+    AutoReconnectConfig, NetworkProfile, RelayNode, RelayNodeConfig, RelayNodeEvent,
+    spawn_auto_reconnect,
+};
 use rmcp::ServiceExt;
 use rmcp::transport::streamable_http_server::{
     StreamableHttpServerConfig, StreamableHttpService, session::local::LocalSessionManager,
@@ -102,9 +106,21 @@ enum Commands {
     },
     /// Start isolated Host and Client nodes and check the loopback route.
     SandboxDual,
+    /// Detect project ecosystem and generate a starter `relay.toml` manifest.
+    Init {
+        /// Explicit package manager override (uv, cargo, bun, pnpm, yarn, npm, generic).
+        #[arg(long)]
+        package_manager: Option<String>,
+        /// Overwrite an existing `relay.toml` atomically.
+        #[arg(long)]
+        force: bool,
+        /// Print the detection summary and generated `relay.toml` without writing to disk.
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// Probe the configured Ollama or OpenAI-compatible Cloud LLM endpoint.
     LlmCheck,
-    /// Check required external runtimes (git, uv), repository relay.toml, data dir, and optional LLM endpoint.
+    /// Check Git, the workspace package manager, relay.toml, the data directory, and optional LLM.
     Doctor {
         /// Output machine-readable JSON instead of human-readable status lines.
         #[arg(long)]
@@ -133,7 +149,7 @@ enum Commands {
         #[arg(long)]
         base_commit: Option<String>,
     },
-    /// Deterministically compose model context for Track 5 ablation (full_transcript / flat_summary / dag_bundle).
+    /// Deterministically compose model context for evaluation ablations (full_transcript / flat_summary / dag_bundle).
     ComposeContext {
         /// Context strategy to emit (ignored when --all-strategies is set).
         #[arg(long, value_enum, default_value_t = ContextStrategyArg::DagBundle)]
@@ -242,6 +258,20 @@ async fn main() -> Result<()> {
         .with_writer(std::io::stderr)
         .init();
 
+    if let Commands::Init {
+        package_manager,
+        force,
+        dry_run,
+    } = &cli.command
+    {
+        return run_init(
+            cli.repo_root.as_deref(),
+            package_manager.as_deref(),
+            *force,
+            *dry_run,
+        );
+    }
+
     if matches!(cli.command, Commands::LlmCheck) {
         let cfg = resolve_llm_config(&cli)?;
         let client = LlmClient::new(cfg, Duration::from_secs(15))?;
@@ -302,6 +332,28 @@ async fn main() -> Result<()> {
                 pairing_window_secs
             });
             node.open_pairing_window(window);
+            if let Err(error) = node.preload_trusted_peer_addrs().await {
+                warn!(%error, "Unable to preload trusted peer addresses");
+            }
+            let (reconnect_handle, mut reconnect_rx) = spawn_auto_reconnect(
+                node.clone(),
+                engine.clone(),
+                AutoReconnectConfig {
+                    sender_device: node.id().to_string(),
+                    ..Default::default()
+                },
+            );
+            let reconnect_node = node.clone();
+            let reconnect_task = tokio::spawn(async move {
+                while let Some(reconnected) = reconnect_rx.recv().await {
+                    reconnect_node.set_remote_peer(reconnected.addr);
+                    info!(
+                        node_id = %reconnected.record.node_id,
+                        label = %reconnected.record.label,
+                        "Reconnected to trusted peer"
+                    );
+                }
+            });
 
             if let Some(sb) = &sandbox {
                 match sync_git_head_into_engine(&engine, sb, node.id().to_string()).await {
@@ -348,6 +400,8 @@ async fn main() -> Result<()> {
             });
 
             let http_result = serve_mcp_http(listener, server).await;
+            reconnect_handle.cancel();
+            reconnect_task.abort();
             events_task.abort();
             if let Some(task) = git_task {
                 task.abort();
@@ -382,7 +436,7 @@ async fn main() -> Result<()> {
             }
         }
         Commands::SandboxDual => sandbox_dual(&repo, &cli.data_dir).await?,
-        Commands::LlmCheck | Commands::Doctor { .. } => unreachable!(),
+        Commands::Init { .. } | Commands::LlmCheck | Commands::Doctor { .. } => unreachable!(),
         Commands::SyncHead => {
             let (engine, sandbox) = repo.open(&cli.data_dir).await?;
             let sb = sandbox.context("repository must contain both .git and relay.toml")?;
@@ -480,15 +534,6 @@ async fn run_doctor(cli: &Cli, as_json: bool, skip_llm: bool) -> Result<()> {
         "detail": git_check.1,
     }));
 
-    let uv_check = probe_binary("uv", &["--version"]).await;
-    required_ok &= uv_check.0;
-    checks.push(json!({
-        "name": "uv",
-        "required": true,
-        "status": if uv_check.0 { "ok" } else { "fail" },
-        "detail": uv_check.1,
-    }));
-
     let data_dir_ok = std::fs::create_dir_all(&cli.data_dir).is_ok();
     required_ok &= data_dir_ok;
     checks.push(json!({
@@ -510,15 +555,45 @@ async fn run_doctor(cli: &Cli, as_json: bool, skip_llm: bool) -> Result<()> {
                 Ok(manifest) => {
                     let has_smoke = manifest.presets.contains_key(&manifest.project.smoke_preset);
                     if has_git && has_smoke {
-                        (
-                            "ok",
-                            format!(
-                                "repo_id='{}', presets={} (smoke='{}')",
-                                manifest.project.repo_id,
-                                manifest.presets.len(),
-                                manifest.project.smoke_preset,
-                            ),
-                        )
+                        match relay_core::sandbox::resolve_adapter(&root, manifest.project.package_manager.as_deref()) {
+                            Ok(adapter) => {
+                                let (required_bins, advisory_bin) =
+                                    collect_doctor_binary_checks(&manifest, adapter.name());
+                                for binary in required_bins {
+                                    let (ok, detail) = probe_binary(&binary, &["--version"]).await;
+                                    required_ok &= ok;
+                                    checks.push(json!({
+                                        "name": binary,
+                                        "required": true,
+                                        "status": if ok { "ok" } else { "fail" },
+                                        "detail": detail,
+                                    }));
+                                }
+                                if let Some(binary) = advisory_bin {
+                                    let (ok, detail) = probe_binary(&binary, &["--version"]).await;
+                                    checks.push(json!({
+                                        "name": binary,
+                                        "required": false,
+                                        "status": if ok { "ok" } else { "warn" },
+                                        "detail": detail,
+                                    }));
+                                }
+                                (
+                                    "ok",
+                                    format!(
+                                        "repo_id='{}', presets={} (smoke='{}', manager='{}')",
+                                        manifest.project.repo_id,
+                                        manifest.presets.len(),
+                                        manifest.project.smoke_preset,
+                                        adapter.name(),
+                                    ),
+                                )
+                            }
+                            Err(error) => {
+                                required_ok &= !explicit_repo;
+                                (if explicit_repo { "fail" } else { "warn" }, error.to_string())
+                            }
+                        }
                     } else if !has_git {
                         if explicit_repo {
                             required_ok = false;
@@ -597,7 +672,7 @@ async fn run_doctor(cli: &Cli, as_json: bool, skip_llm: bool) -> Result<()> {
             "{}",
             serde_json::to_string_pretty(&json!({
                 "ok": required_ok,
-                "runtime_architecture": "2 Rust binaries (relay-desktop, relay-daemon) + external runtimes (git, uv, optional Ollama/Cloud LLM)",
+                "runtime_architecture": "Relay daemon and desktop with Git, the workspace package manager, and optional local or cloud inference",
                 "checks": checks,
             }))?
         );
@@ -615,13 +690,75 @@ async fn run_doctor(cli: &Cli, as_json: bool, skip_llm: bool) -> Result<()> {
     Ok(())
 }
 
+/// Compute which binaries `relay-daemon doctor` requires (`required: true`) vs reports
+/// as advisory (`required: false`, warning if missing).
+///
+/// Always requires every unique `program` referenced by `[presets]` (excluding `git`, which
+/// is probed separately) plus `project.package_manager` when explicitly configured in `relay.toml`.
+/// An auto-detected-only package manager binary not used by any preset is advisory-only.
+fn collect_doctor_binary_checks(
+    manifest: &RelayManifest,
+    resolved_adapter: &str,
+) -> (Vec<String>, Option<String>) {
+    let mut required = std::collections::BTreeSet::new();
+    for preset in manifest.presets.values() {
+        let program = preset.program.trim();
+        if !program.is_empty() && !program.eq_ignore_ascii_case("git") {
+            required.insert(program.to_owned());
+        }
+    }
+    let has_explicit_pm = manifest
+        .project
+        .package_manager
+        .as_deref()
+        .is_some_and(|pm| !pm.trim().is_empty());
+    let mut advisory = None;
+    if resolved_adapter != "generic" && !resolved_adapter.eq_ignore_ascii_case("git") {
+        let already_required = required
+            .iter()
+            .any(|bin| bin.eq_ignore_ascii_case(resolved_adapter));
+        if has_explicit_pm {
+            if !already_required {
+                required.insert(resolved_adapter.to_owned());
+            }
+        } else if !already_required {
+            advisory = Some(resolved_adapter.to_owned());
+        }
+    }
+    (required.into_iter().collect(), advisory)
+}
+
 async fn probe_binary(program: &str, args: &[&str]) -> (bool, String) {
-    match Command::new(program)
-        .args(args)
-        .stdin(Stdio::null())
-        .output()
-        .await
-    {
+    let executable = PathBuf::from(program);
+    #[cfg(windows)]
+    let launcher = match std::env::var_os("PATH") {
+        Some(path) => match relay_core::sandbox::pm::security::resolve_windows_package_launcher(
+            program,
+            &args.iter().map(|arg| (*arg).to_owned()).collect::<Vec<_>>(),
+            &path,
+        ) {
+            Ok(resolved) => resolved,
+            Err(error) => return (false, error.to_string()),
+        },
+        None => None,
+    };
+    #[cfg(windows)]
+    let mut command = match launcher {
+        Some(resolved) => {
+            let mut cmd = Command::new(resolved.program);
+            cmd.args(resolved.prefix_args);
+            cmd
+        }
+        None => Command::new(executable),
+    };
+    #[cfg(not(windows))]
+    let mut command = Command::new(executable);
+    command.args(args).stdin(Stdio::null()).kill_on_drop(true);
+    let result = tokio::time::timeout(Duration::from_secs(5), command.output()).await;
+    let Ok(result) = result else {
+        return (false, "version check timed out".into());
+    };
+    match result {
         Ok(output) if output.status.success() => {
             let line = String::from_utf8_lossy(&output.stdout)
                 .lines()
@@ -669,6 +806,9 @@ fn spawn_host_event_loop(
                             Err(error) => warn!(%task_id, %error, "Host task pipeline failed"),
                         }
                     });
+                }
+                RelayNodeEvent::TaskCancelled(task_id) => {
+                    info!(%task_id, "Task cancellation requested via peer RPC");
                 }
                 RelayNodeEvent::ApprovalResolved(task_id, _, decision) => {
                     if sandbox.is_none() {
@@ -788,4 +928,215 @@ async fn sandbox_dual(repo: &Repository, data_dir: &Path) -> Result<()> {
     host_result?;
     client_result?;
     Ok(())
+}
+
+fn run_init(
+    repo_root: Option<&Path>,
+    package_manager: Option<&str>,
+    force: bool,
+    dry_run: bool,
+) -> Result<()> {
+    let raw_root = match repo_root {
+        Some(path) => path.to_path_buf(),
+        None => std::env::current_dir().context("resolve current working directory")?,
+    };
+    let target_root = std::path::absolute(&raw_root)
+        .with_context(|| format!("resolve repository root {}", raw_root.display()))?;
+    anyhow::ensure!(
+        target_root.is_dir(),
+        "repository path is not a directory: {}",
+        target_root.display()
+    );
+
+    let manifest_path = target_root.join("relay.toml");
+    let existed_before = manifest_path.exists();
+
+    let generated = if dry_run {
+        generate_manifest_for_repo(&target_root, package_manager)?
+    } else {
+        write_manifest_for_repo_with_options(&target_root, package_manager, force).map_err(
+            |error| {
+                let message = error.to_string();
+                if !force && message.contains("relay.toml already exists") {
+                    anyhow::anyhow!(
+                        "{message} at {} (pass --force to overwrite)",
+                        manifest_path.display()
+                    )
+                } else {
+                    anyhow::Error::from(error)
+                }
+            },
+        )?
+    };
+
+    let manifest: RelayManifest = toml::from_str(&generated.toml_content)
+        .context("parse generated starter relay.toml")?;
+    let mut preset_names = Vec::with_capacity(manifest.presets.len());
+    if manifest.presets.contains_key(&generated.smoke_preset) {
+        preset_names.push(generated.smoke_preset.as_str());
+    }
+    for name in manifest.presets.keys() {
+        if name != &generated.smoke_preset {
+            preset_names.push(name.as_str());
+        }
+    }
+
+    let source_label = if package_manager.is_some() {
+        "selected"
+    } else {
+        "detected"
+    };
+    let action = if dry_run {
+        if existed_before {
+            format!(
+                "dry-run preview (not written; {} already exists — pass --force to overwrite)",
+                manifest_path.display()
+            )
+        } else {
+            format!(
+                "dry-run preview (not written; target: {})",
+                manifest_path.display()
+            )
+        }
+    } else if existed_before {
+        format!("overwrote {}", manifest_path.display())
+    } else {
+        format!("wrote {}", manifest_path.display())
+    };
+
+    println!("SyncEverything Init — Manifest Summary");
+    println!("  Repository:      {}", target_root.display());
+    println!("  Repo ID:         {}", manifest.project.repo_id);
+    println!("  Project Name:    {}", manifest.project.name);
+    println!(
+        "  Package Manager: {} ({source_label}, ecosystem: {})",
+        generated.package_manager, generated.ecosystem
+    );
+    println!("  Smoke Preset:    {}", generated.smoke_preset);
+    println!("  Presets:         {}", preset_names.join(", "));
+    println!("  Status:          {action}");
+
+    if dry_run {
+        println!();
+        println!("--- relay.toml (dry-run preview) ---");
+        print!("{}", generated.toml_content);
+    }
+
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cli_parses_repo_root_both_before_and_after_init_subcommand() {
+        let before = Cli::try_parse_from([
+            "relay-daemon",
+            "--repo-root",
+            "/tmp/sample-repo",
+            "init",
+            "--package-manager",
+            "cargo",
+            "--force",
+            "--dry-run",
+        ])
+        .expect("parse global --repo-root before init");
+        assert_eq!(before.repo_root, Some(PathBuf::from("/tmp/sample-repo")));
+        match before.command {
+            Commands::Init {
+                package_manager,
+                force,
+                dry_run,
+            } => {
+                assert_eq!(package_manager.as_deref(), Some("cargo"));
+                assert!(force);
+                assert!(dry_run);
+            }
+            other => panic!("expected Init command, got {other:?}"),
+        }
+
+        let after = Cli::try_parse_from([
+            "relay-daemon",
+            "init",
+            "--repo-root",
+            "/tmp/sample-repo",
+            "--dry-run",
+        ])
+        .expect("parse global --repo-root after init");
+        assert_eq!(after.repo_root, Some(PathBuf::from("/tmp/sample-repo")));
+        match after.command {
+            Commands::Init {
+                package_manager,
+                force,
+                dry_run,
+            } => {
+                assert!(package_manager.is_none());
+                assert!(!force);
+                assert!(dry_run);
+            }
+            other => panic!("expected Init command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn doctor_binary_plan_requires_presets_and_explicit_pm_but_warns_for_autodetected_only() {
+        let polyglot_implicit: RelayManifest = toml::from_str(
+            r#"
+[project]
+repo_id = "poly"
+name = "Polyglot"
+smoke_preset = "check"
+
+[presets.check]
+description = "Cargo check"
+program = "cargo"
+args = ["check"]
+timeout_secs = 60
+"#,
+        )
+        .unwrap();
+        let (req, adv) = collect_doctor_binary_checks(&polyglot_implicit, "uv");
+        assert_eq!(req, vec!["cargo".to_owned()]);
+        assert_eq!(adv.as_deref(), Some("uv"));
+
+        let explicit_pm: RelayManifest = toml::from_str(
+            r#"
+[project]
+repo_id = "explicit"
+name = "Explicit"
+package_manager = "cargo"
+smoke_preset = "smoke"
+
+[presets.smoke]
+description = "Git status"
+program = "git"
+args = ["status"]
+timeout_secs = 10
+"#,
+        )
+        .unwrap();
+        let (req, adv) = collect_doctor_binary_checks(&explicit_pm, "cargo");
+        assert_eq!(req, vec!["cargo".to_owned()]);
+        assert_eq!(adv, None);
+
+        let autodetected_used_by_preset: RelayManifest = toml::from_str(
+            r#"
+[project]
+repo_id = "py"
+name = "Python"
+smoke_preset = "smoke"
+
+[presets.smoke]
+description = "Smoke via uv"
+program = "uv"
+args = ["run", "python", "--version"]
+timeout_secs = 30
+"#,
+        )
+        .unwrap();
+        let (req, adv) = collect_doctor_binary_checks(&autodetected_used_by_preset, "uv");
+        assert_eq!(req, vec!["uv".to_owned()]);
+        assert_eq!(adv, None);
+    }
 }

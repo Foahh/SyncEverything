@@ -13,14 +13,36 @@ import {
   type LlmProbeResult,
   type LlmSettingsUpdate_Deserialize,
   type LlmSettingsView_Serialize,
+  type PeerRole,
   type PeerStatus_Serialize,
+  type ProjectMcpConfigConfirmation_Deserialize,
+  type ProjectMcpConfigPreview_Serialize,
+  type ProjectMcpConfigRequest_Deserialize,
+  type ProjectMcpConfigWriteResult,
+  type RecentWorkspaceEntry_Serialize,
   type RelayStateChangedEvent,
   type RuntimeMode,
   type StalePropagationReport,
+  type TaskLogSnapshot,
+  type TaskLogStreamEvent,
   type TaskRecord_Serialize,
   type TaskSpec_Deserialize,
+  type TrustedPeerRecord_Serialize,
   type WorkspaceInfo_Serialize,
 } from "../bindings";
+import {
+  buildRelayMcpServerEntry,
+  DEFAULT_MCP_HTTP_URL,
+  mergeProjectMcpConfigJson,
+  validateMcpHttpUrl,
+} from "./mcpConfig";
+import { isTaskCancellable } from "./taskLogStream";
+import {
+  MAX_RECENT_WORKSPACES,
+  detectPreviewPackageManager,
+  normalizeWorkspacePathKey,
+  sortAndCapRecentWorkspaces,
+} from "./workspaceSwitcher";
 
 export interface ApprovalInput {
   taskId: string;
@@ -73,8 +95,11 @@ interface MockWorkspaceState {
   llm: LlmSettingsView_Serialize;
   dag: DagSnapshot_Serialize;
   tasks: TaskRecord_Serialize[];
+  taskLogs: Record<string, TaskLogSnapshot>;
   handoffs: HandoffSummary[];
   chatMessages: AgentChatMessage_Serialize[];
+  projectMcpFiles: Record<string, string>;
+  trustedPeers: TrustedPeerRecord_Serialize[];
 }
 
 function createInitialMockState(): MockWorkspaceState {
@@ -97,6 +122,7 @@ function createInitialMockState(): MockWorkspaceState {
       mcp_data_dir: null,
       is_git_repo: false,
       has_manifest: false,
+      package_manager: null,
       smoke_preset: "",
       presets: [],
     },
@@ -121,9 +147,47 @@ function createInitialMockState(): MockWorkspaceState {
       captured_at: now,
     },
     tasks: [],
+    taskLogs: {},
     handoffs: [],
     chatMessages: [],
+    projectMcpFiles: {},
+    trustedPeers: [],
   };
+}
+
+function sortTrustedPeers(peers: TrustedPeerRecord_Serialize[]): TrustedPeerRecord_Serialize[] {
+  return [...peers].sort((a, b) => {
+    const revokedOrder = Number(a.revoked_at !== null) - Number(b.revoked_at !== null);
+    if (revokedOrder !== 0) return revokedOrder;
+    const seenOrder = b.last_seen_at.localeCompare(a.last_seen_at);
+    if (seenOrder !== 0) return seenOrder;
+    return a.node_id.localeCompare(b.node_id);
+  });
+}
+
+function parseMockTicketNodeId(ticketJson: string): string {
+  const parsed = JSON.parse(ticketJson) as {
+    id?: string;
+    addr?: { id?: string };
+    pairing_ticket?: string | { id?: string };
+  };
+  if (typeof parsed.id === "string" && parsed.id.trim()) {
+    return parsed.id.trim();
+  }
+  if (parsed.addr && typeof parsed.addr.id === "string" && parsed.addr.id.trim()) {
+    return parsed.addr.id.trim();
+  }
+  if (typeof parsed.pairing_ticket === "string") {
+    const nested = JSON.parse(parsed.pairing_ticket) as { id?: string };
+    if (typeof nested.id === "string" && nested.id.trim()) return nested.id.trim();
+  } else if (
+    parsed.pairing_ticket &&
+    typeof parsed.pairing_ticket.id === "string" &&
+    parsed.pairing_ticket.id.trim()
+  ) {
+    return parsed.pairing_ticket.id.trim();
+  }
+  return "paired-peer";
 }
 
 function previewDagSnapshot(
@@ -157,11 +221,49 @@ function previewDagSnapshot(
 
 let mockState: MockWorkspaceState = createInitialMockState();
 const previewWorkspaces = new Map<string, MockWorkspaceState>();
+let previewRecentWorkspaces: RecentWorkspaceEntry_Serialize[] = [];
+let lastPreviewOpenedMs = 0;
 const mockChatListeners = new Set<(event: AgentChatStreamEvent_Serialize) => void>();
+const mockTaskLogListeners = new Set<(event: TaskLogStreamEvent) => void>();
 let activeMockChatAbort: { cancelled: boolean } | null = null;
+
+function nextPreviewTimestamp(): string {
+  lastPreviewOpenedMs = Math.max(Date.now(), lastPreviewOpenedMs + 1);
+  return new Date(lastPreviewOpenedMs).toISOString();
+}
+
+function recordPreviewRecentWorkspace(workspace: WorkspaceInfo_Serialize): void {
+  if (!workspace.repo_root) return;
+  const entry: RecentWorkspaceEntry_Serialize = {
+    path: workspace.repo_root,
+    repo_id: workspace.repo_id,
+    name: workspace.name || workspace.repo_id,
+    package_manager: workspace.package_manager,
+    last_opened_at: nextPreviewTimestamp(),
+    exists: true,
+    has_manifest: workspace.has_manifest,
+  };
+  previewRecentWorkspaces = sortAndCapRecentWorkspaces(
+    [entry, ...previewRecentWorkspaces],
+    MAX_RECENT_WORKSPACES,
+  );
+}
 
 function emitMockChatEvent(event: AgentChatStreamEvent_Serialize): void {
   for (const listener of mockChatListeners) {
+    listener(event);
+  }
+}
+
+export function emitPreviewTaskLogEvent(event: TaskLogStreamEvent): void {
+  const existing = mockState.taskLogs[event.task_id];
+  const content = (existing?.content ?? "") + event.text;
+  mockState.taskLogs[event.task_id] = {
+    task_id: event.task_id,
+    log_blob_hash: existing?.log_blob_hash ?? `preview-${event.task_id.slice(0, 8)}`,
+    content,
+  };
+  for (const listener of mockTaskLogListeners) {
     listener(event);
   }
 }
@@ -280,6 +382,8 @@ async function runMockCopilotTurn(
         JSON.stringify(
           {
             commit_sha: dag.head_commit_sha ?? "HEAD",
+            ecosystem: "generic",
+            package_manager: "generic",
             in_sync: true,
             missing_packages: [],
           },
@@ -354,6 +458,8 @@ export function resetBrowserPreviewState(): void {
   }
   mockState = createInitialMockState();
   previewWorkspaces.clear();
+  previewRecentWorkspaces = [];
+  lastPreviewOpenedMs = 0;
 }
 
 export const relayApi = {
@@ -382,22 +488,55 @@ export const relayApi = {
     if (isTauriRuntime()) {
       return commands.openWorkspaceRepo(repoPath);
     }
+    return this.switchWorkspace(repoPath);
+  },
+
+  async listRecentWorkspaces(): Promise<RecentWorkspaceEntry_Serialize[]> {
+    if (isTauriRuntime()) {
+      return commands.listRecentWorkspaces();
+    }
+    return structuredClone(
+      sortAndCapRecentWorkspaces(previewRecentWorkspaces, MAX_RECENT_WORKSPACES),
+    );
+  },
+
+  async switchWorkspace(repoPath: string): Promise<WorkspaceInfo_Serialize> {
+    if (isTauriRuntime()) {
+      return commands.switchWorkspace(repoPath);
+    }
     const trimmed = repoPath.trim();
     if (!trimmed) {
       throw new Error("Repository path cannot be empty.");
     }
-    if (mockState.workspace.repo_root === trimmed) return structuredClone(mockState.workspace);
+    const key = normalizeWorkspacePathKey(trimmed);
+    const existingRecent = previewRecentWorkspaces.find(
+      (entry) => normalizeWorkspacePathKey(entry.path) === key,
+    );
+    if (existingRecent && !existingRecent.exists) {
+      throw new Error(`Folder does not exist: ${trimmed}`);
+    }
+    if (
+      mockState.workspace.repo_root &&
+      normalizeWorkspacePathKey(mockState.workspace.repo_root) === key
+    ) {
+      recordPreviewRecentWorkspace(mockState.workspace);
+      return structuredClone(mockState.workspace);
+    }
     if (activeMockChatAbort) {
       activeMockChatAbort.cancelled = true;
       activeMockChatAbort = null;
     }
-    if (mockState.workspace.repo_root)
-      previewWorkspaces.set(mockState.workspace.repo_root, mockState);
-    const saved = previewWorkspaces.get(trimmed);
+    if (mockState.workspace.repo_root) {
+      previewWorkspaces.set(normalizeWorkspacePathKey(mockState.workspace.repo_root), mockState);
+    }
+    const saved = previewWorkspaces.get(key);
     const llm = mockState.llm;
     mockState = saved ?? createInitialMockState();
     mockState.llm = llm;
-    if (saved) return structuredClone(mockState.workspace);
+    if (saved) {
+      recordPreviewRecentWorkspace(mockState.workspace);
+      return structuredClone(mockState.workspace);
+    }
     const slug = trimmed.split(/[\\/]/).filter(Boolean).pop() ?? "workspace";
     mockState.workspace = {
       repo_id: slug,
@@ -406,24 +545,44 @@ export const relayApi = {
       mcp_data_dir: null,
       is_git_repo: true,
       has_manifest: false,
+      package_manager: detectPreviewPackageManager(trimmed),
       smoke_preset: "",
       presets: [],
     };
     mockState.dag.repo_id = slug;
+    recordPreviewRecentWorkspace(mockState.workspace);
     return structuredClone(mockState.workspace);
   },
 
-  async initWorkspaceManifest(repoPath?: string | null): Promise<WorkspaceInfo_Serialize> {
+  async removeRecentWorkspace(repoPath: string): Promise<RecentWorkspaceEntry_Serialize[]> {
     if (isTauriRuntime()) {
-      return commands.initWorkspaceManifest(repoPath ?? null);
+      return commands.removeRecentWorkspace(repoPath);
+    }
+    const key = normalizeWorkspacePathKey(repoPath);
+    previewRecentWorkspaces = previewRecentWorkspaces.filter(
+      (entry) => normalizeWorkspacePathKey(entry.path) !== key,
+    );
+    return structuredClone(previewRecentWorkspaces);
+  },
+
+  async initWorkspaceManifest(
+    repoPath?: string | null,
+    packageManager?: string | null,
+  ): Promise<WorkspaceInfo_Serialize> {
+    if (isTauriRuntime()) {
+      return commands.initWorkspaceManifest(repoPath ?? null, packageManager ?? null);
     }
     const effectivePath = (repoPath ?? mockState.workspace.repo_root ?? "").trim();
     if (!effectivePath) {
       throw new Error("Open a local Git repository first.");
     }
-    await relayApi.openWorkspaceRepo(effectivePath);
+    await relayApi.switchWorkspace(effectivePath);
     if (mockState.workspace.has_manifest) throw new Error("relay.toml already exists.");
     const slug = effectivePath.split(/[\\/]/).filter(Boolean).pop() ?? "workspace";
+    const resolvedPm =
+      packageManager?.trim() ||
+      mockState.workspace.package_manager ||
+      detectPreviewPackageManager(effectivePath);
     mockState.workspace = {
       repo_id: slug,
       name: slug,
@@ -431,6 +590,7 @@ export const relayApi = {
       mcp_data_dir: null,
       is_git_repo: true,
       has_manifest: true,
+      package_manager: resolvedPm,
       smoke_preset: "check",
       presets: [
         {
@@ -442,6 +602,7 @@ export const relayApi = {
         },
       ],
     };
+    recordPreviewRecentWorkspace(mockState.workspace);
     return structuredClone(mockState.workspace);
   },
 
@@ -553,6 +714,34 @@ export const relayApi = {
     };
     mockState.tasks = [record, ...mockState.tasks];
     return structuredClone(record);
+  },
+
+  async cancelTask(taskId: string): Promise<TaskRecord_Serialize> {
+    if (isTauriRuntime()) {
+      return commands.cancelTask(taskId);
+    }
+    const task = mockState.tasks.find((t) => t.spec.task_id === taskId);
+    if (!task) {
+      throw new Error(`task not found: ${taskId}`);
+    }
+    if (!isTaskCancellable(task.state)) {
+      throw new Error("This task can no longer be cancelled.");
+    }
+    task.state = "cancelled";
+    task.preflight_summary = mockState.taskLogs[taskId]?.content
+      ? "Cancelled by user (partial log saved)"
+      : "Cancelled by user";
+    task.error_message = null;
+    task.updated_at = new Date().toISOString();
+    return structuredClone(task);
+  },
+
+  async getTaskLog(taskId: string): Promise<TaskLogSnapshot | null> {
+    if (isTauriRuntime()) {
+      return commands.getTaskLog(taskId);
+    }
+    const log = mockState.taskLogs[taskId];
+    return log ? structuredClone(log) : null;
   },
 
   async resolvePatchApproval({
@@ -724,12 +913,114 @@ export const relayApi = {
     if (isTauriRuntime()) {
       return commands.connectPeerTicket(ticketJson);
     }
-    const parsed = JSON.parse(ticketJson) as { id?: string };
-    mockState.status.remote_node_id = parsed.id ?? "paired-peer";
+    const nodeId = parseMockTicketNodeId(ticketJson);
+    const existing = mockState.trustedPeers.find((peer) => peer.node_id === nodeId);
+    if (existing?.revoked_at !== null && existing !== undefined) {
+      throw new Error(`peer has been revoked: ${nodeId}`);
+    }
+    const now = new Date().toISOString();
+    const role: PeerRole = mockState.status.mode === "host" ? "client" : "host";
+    if (existing) {
+      existing.ticket_or_addrs = ticketJson.trim();
+      existing.last_seen_at = now;
+    } else {
+      const prefix = role === "host" ? "Workstation" : "Laptop";
+      mockState.trustedPeers.push({
+        node_id: nodeId,
+        label: `${prefix} ${nodeId.slice(0, 8)}`,
+        role,
+        ticket_or_addrs: ticketJson.trim(),
+        paired_at: now,
+        last_seen_at: now,
+        revoked_at: null,
+      });
+    }
+    mockState.status.remote_node_id = nodeId;
     mockState.status.connected = true;
     mockState.status.transport_path = "direct_lan";
     mockState.status.rtt_ms = 2;
     return structuredClone(mockState.status);
+  },
+
+  async listTrustedPeers(): Promise<TrustedPeerRecord_Serialize[]> {
+    if (isTauriRuntime()) {
+      return commands.listTrustedPeers();
+    }
+    return structuredClone(sortTrustedPeers(mockState.trustedPeers));
+  },
+
+  async renameTrustedPeer(nodeId: string, label: string): Promise<TrustedPeerRecord_Serialize> {
+    if (isTauriRuntime()) {
+      return commands.renameTrustedPeer(nodeId, label);
+    }
+    const trimmed = label.trim();
+    if (!trimmed) {
+      throw new Error("device label cannot be empty");
+    }
+    const peer = mockState.trustedPeers.find((item) => item.node_id === nodeId);
+    if (!peer) {
+      throw new Error(`trusted peer not found: ${nodeId}`);
+    }
+    peer.label = trimmed;
+    return structuredClone(peer);
+  },
+
+  async reconnectTrustedPeer(nodeId: string): Promise<PeerStatus_Serialize> {
+    if (isTauriRuntime()) {
+      return commands.reconnectTrustedPeer(nodeId);
+    }
+    const peer = mockState.trustedPeers.find((item) => item.node_id === nodeId);
+    if (!peer) {
+      throw new Error(`trusted peer not found: ${nodeId}`);
+    }
+    if (peer.revoked_at !== null) {
+      throw new Error(`peer has been revoked: ${nodeId}`);
+    }
+    if (mockState.status.mode === "local_dual_sandbox") {
+      throw new Error("Switch to Client or Host mode to pair with another machine");
+    }
+    peer.last_seen_at = new Date().toISOString();
+    mockState.status.remote_node_id = peer.node_id;
+    mockState.status.connected = true;
+    mockState.status.transport_path = "direct_lan";
+    mockState.status.rtt_ms = 2;
+    return structuredClone(mockState.status);
+  },
+
+  async revokeTrustedPeer(nodeId: string): Promise<TrustedPeerRecord_Serialize> {
+    if (isTauriRuntime()) {
+      return commands.revokeTrustedPeer(nodeId);
+    }
+    const peer = mockState.trustedPeers.find((item) => item.node_id === nodeId);
+    if (!peer) {
+      throw new Error(`trusted peer not found: ${nodeId}`);
+    }
+    peer.revoked_at = peer.revoked_at ?? new Date().toISOString();
+    if (mockState.status.remote_node_id === nodeId) {
+      mockState.status.remote_node_id = null;
+      mockState.status.connected = false;
+      mockState.status.transport_path = "offline";
+      mockState.status.rtt_ms = null;
+    }
+    return structuredClone(peer);
+  },
+
+  async removeTrustedPeer(nodeId: string): Promise<void> {
+    if (isTauriRuntime()) {
+      await commands.removeTrustedPeer(nodeId);
+      return;
+    }
+    const idx = mockState.trustedPeers.findIndex((item) => item.node_id === nodeId);
+    if (idx < 0) {
+      throw new Error(`trusted peer not found: ${nodeId}`);
+    }
+    mockState.trustedPeers.splice(idx, 1);
+    if (mockState.status.remote_node_id === nodeId) {
+      mockState.status.remote_node_id = null;
+      mockState.status.connected = false;
+      mockState.status.transport_path = "offline";
+      mockState.status.rtt_ms = null;
+    }
   },
 
   async listChatMessages(limit = 100): Promise<AgentChatMessage_Serialize[]> {
@@ -802,6 +1093,82 @@ export const relayApi = {
     mockState.chatMessages = [];
   },
 
+  async previewProjectMcpConfig(
+    request: ProjectMcpConfigRequest_Deserialize,
+  ): Promise<ProjectMcpConfigPreview_Serialize> {
+    if (isTauriRuntime()) {
+      return commands.previewProjectMcpConfig(request);
+    }
+    const repoRoot = mockState.workspace.repo_root?.trim();
+    if (!repoRoot) {
+      throw new Error("Open a local Git repository first.");
+    }
+    if (request.transport === "streamable_http") {
+      const checked = validateMcpHttpUrl(request.http_url ?? DEFAULT_MCP_HTTP_URL);
+      if (!checked.ok) throw new Error(checked.error);
+    }
+    const clientId = request.client === "claude_code" ? "claude" : "cursor";
+    const relativePath = request.client === "claude_code" ? ".mcp.json" : ".cursor/mcp.json";
+    const relayEntry = buildRelayMcpServerEntry(clientId, mockState.workspace, {
+      transport: request.transport,
+      httpUrl: request.http_url ?? DEFAULT_MCP_HTTP_URL,
+    });
+    if (!relayEntry) {
+      throw new Error("Unable to construct MCP server configuration.");
+    }
+    const existingContent = Object.hasOwn(mockState.projectMcpFiles, relativePath)
+      ? mockState.projectMcpFiles[relativePath]
+      : null;
+    const merged = mergeProjectMcpConfigJson(existingContent, relayEntry, relativePath);
+    const sep = repoRoot.includes("\\") ? "\\" : "/";
+    const normalizedRoot = repoRoot.replace(/[\\/]+$/, "");
+    const targetPath = `${normalizedRoot}${sep}${relativePath.replaceAll("/", sep)}`;
+    return {
+      client: request.client,
+      transport: request.transport,
+      relative_path: relativePath,
+      target_path: targetPath,
+      file_exists: existingContent !== null,
+      status: merged.status,
+      existing_content: existingContent,
+      merged_content: merged.mergedContent,
+      preserved_server_names: merged.preservedServerNames,
+    };
+  },
+
+  async writeProjectMcpConfig(
+    request: ProjectMcpConfigRequest_Deserialize,
+    confirmation: ProjectMcpConfigConfirmation_Deserialize,
+  ): Promise<ProjectMcpConfigWriteResult> {
+    if (isTauriRuntime()) {
+      return commands.writeProjectMcpConfig(request, confirmation);
+    }
+    const preview = await relayApi.previewProjectMcpConfig(request);
+    if (
+      preview.target_path !== confirmation.target_path ||
+      preview.existing_content !== (confirmation.existing_content ?? null) ||
+      preview.merged_content !== confirmation.merged_content
+    ) {
+      throw new Error(
+        "The project MCP configuration has changed. Refresh the preview before writing.",
+      );
+    }
+    const writtenContent =
+      preview.status === "unchanged"
+        ? (preview.existing_content ?? preview.merged_content)
+        : preview.merged_content;
+    mockState.projectMcpFiles[preview.relative_path] = writtenContent;
+    return {
+      client: preview.client,
+      transport: preview.transport,
+      relative_path: preview.relative_path,
+      target_path: preview.target_path,
+      created: !preview.file_exists,
+      status: preview.status,
+      written_content: writtenContent,
+    };
+  },
+
   async subscribeAgentChatEvents(
     onEvent: (payload: AgentChatStreamEvent_Serialize) => void,
   ): Promise<() => void> {
@@ -811,6 +1178,18 @@ export const relayApi = {
     mockChatListeners.add(onEvent);
     return () => {
       mockChatListeners.delete(onEvent);
+    };
+  },
+
+  async subscribeTaskLogEvents(
+    onEvent: (payload: TaskLogStreamEvent) => void,
+  ): Promise<() => void> {
+    if (isTauriRuntime()) {
+      return events.taskLogStreamEvent.listen((ev) => onEvent(ev.payload));
+    }
+    mockTaskLogListeners.add(onEvent);
+    return () => {
+      mockTaskLogListeners.delete(onEvent);
     };
   },
 

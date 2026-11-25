@@ -8,13 +8,14 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { Field, FieldGroup, FieldLabel } from "@/components/ui/field";
+import { Field, FieldError, FieldGroup, FieldLabel } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { AlertCircle, StickyNote } from "lucide-react";
 import { useForm } from "react-hook-form";
 import { useTranslation } from "react-i18next";
 import { formatErrorMessage } from "../../lib/formatError";
+import { isValidNoteLabel, parseNoteConstraints } from "../../lib/noteForm";
 
 export interface RecordDecisionFormValues {
   label: string;
@@ -45,7 +46,7 @@ export function RecordDecisionModal({
     handleSubmit,
     reset,
     setError,
-    formState: { isValid, errors },
+    formState: { errors },
   } = useForm<RecordDecisionFormValues>({
     mode: "onChange",
     defaultValues: {
@@ -56,10 +57,7 @@ export function RecordDecisionModal({
   });
 
   const onSubmit = handleSubmit(async (data) => {
-    const constraints = data.constraintsRaw
-      .split(",")
-      .map((s) => s.trim())
-      .filter(Boolean);
+    const constraints = parseNoteConstraints(data.constraintsRaw);
     try {
       await onSubmitDecision({
         label: data.label.trim(),
@@ -74,12 +72,7 @@ export function RecordDecisionModal({
   });
 
   return (
-    <Dialog
-      open={isOpen}
-      onOpenChange={(open) => {
-        if (!isSubmitting) onOpenChange(open);
-      }}
-    >
+    <Dialog open={isOpen} onOpenChange={onOpenChange}>
       <DialogContent className="sm:max-w-lg">
         <DialogHeader>
           <div className="flex items-center gap-2.5">
@@ -93,7 +86,7 @@ export function RecordDecisionModal({
           </div>
         </DialogHeader>
 
-        <form onSubmit={onSubmit} className="flex flex-col gap-4">
+        <form onSubmit={onSubmit} className="flex flex-col gap-4" noValidate>
           <FieldGroup>
             <Field data-invalid={!!errors.label}>
               <FieldLabel htmlFor="note-label">
@@ -104,21 +97,20 @@ export function RecordDecisionModal({
                 id="note-label"
                 aria-invalid={!!errors.label}
                 placeholder={t("modals.note.titlePlaceholder")}
-                {...register("label", { validate: (value) => value.trim().length >= 2 })}
+                {...register("label", {
+                  validate: (value) => isValidNoteLabel(value) || t("modals.note.titleRequired"),
+                })}
               />
+              <FieldError errors={[errors.label]} />
             </Field>
 
-            <Field data-invalid={!!errors.rationale}>
-              <FieldLabel htmlFor="note-why">
-                {t("modals.note.whyLabel")}
-                <span className="text-destructive">*</span>
-              </FieldLabel>
+            <Field>
+              <FieldLabel htmlFor="note-why">{t("modals.note.whyLabel")}</FieldLabel>
               <Textarea
                 id="note-why"
                 rows={3}
-                aria-invalid={!!errors.rationale}
                 placeholder={t("modals.note.whyPlaceholder")}
-                {...register("rationale", { validate: (value) => value.trim().length >= 3 })}
+                {...register("rationale")}
               />
             </Field>
 
@@ -142,16 +134,10 @@ export function RecordDecisionModal({
             </Alert>
           )}
           <DialogFooter>
-            <Button
-              type="button"
-              variant="outline"
-              size="lg"
-              disabled={isSubmitting}
-              onClick={() => onOpenChange(false)}
-            >
+            <Button type="button" variant="outline" size="lg" onClick={() => onOpenChange(false)}>
               <span className="relay-text-trim leading-none">{t("modals.note.cancel")}</span>
             </Button>
-            <Button type="submit" size="lg" disabled={!isValid || isSubmitting}>
+            <Button type="submit" size="lg" disabled={isSubmitting}>
               <span className="relay-text-trim leading-none">{t("modals.note.submit")}</span>
             </Button>
           </DialogFooter>

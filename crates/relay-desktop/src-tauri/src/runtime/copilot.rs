@@ -28,6 +28,7 @@ use uuid::Uuid;
 const MAX_COPILOT_TURNS: usize = 8;
 const MAX_IDENTICAL_CALLS: u32 = 3;
 const HISTORY_WINDOW: u32 = 16;
+const AGENT_ORIGIN_LABEL: &str = "SyncEverything Agent";
 
 pub(super) struct ChatTurn {
     cancel: Arc<AtomicBool>,
@@ -37,7 +38,9 @@ pub(super) struct ChatTurn {
 
 // The lifecycle lock serializes send/clear/cancel. The worker never takes that lock.
 async fn finish_previous_turn(active: &mut Option<ChatTurn>) -> bool {
-    let Some(turn) = active.as_mut() else { return false };
+    let Some(turn) = active.as_mut() else {
+        return false;
+    };
     let was_running = !turn.worker.is_finished();
     turn.cancel.store(true, Ordering::Relaxed);
     if let Some(stop) = turn.stop_stream.take() {
@@ -149,9 +152,15 @@ impl DesktopRuntime {
         let turn_id = Uuid::now_v7().to_string();
         let initial = assistant_msg.clone();
         let worker = tokio::spawn(async move {
-            runtime.run_copilot_turn(turn_id, assistant_msg, worker_cancel, stopped).await;
+            runtime
+                .run_copilot_turn(turn_id, assistant_msg, worker_cancel, stopped)
+                .await;
         });
-        *active = Some(ChatTurn { cancel, stop_stream: Some(stop_stream), worker });
+        *active = Some(ChatTurn {
+            cancel,
+            stop_stream: Some(stop_stream),
+            worker,
+        });
 
         Ok(initial)
     }
@@ -178,12 +187,8 @@ impl DesktopRuntime {
         let llm = match LlmClient::new(llm_config, Duration::from_secs(90)) {
             Ok(client) => client,
             Err(error) => {
-                self.finish_turn_with_error(
-                    &turn_id,
-                    &mut assistant_msg,
-                    error.to_string(),
-                )
-                .await;
+                self.finish_turn_with_error(&turn_id, &mut assistant_msg, error.to_string())
+                    .await;
                 return;
             }
         };
@@ -207,19 +212,18 @@ impl DesktopRuntime {
             let app_handle = self.app.clone();
             let turn_id_cb = turn_id.clone();
             let message_id_cb = message_id.clone();
-            let request = llm
-                .stream_chat_with_tools(&messages, &tools, &cancel, |delta| {
-                    let event = AgentChatStreamEvent {
-                        turn_id: turn_id_cb.clone(),
-                        message_id: message_id_cb.clone(),
-                        kind: "token_delta".into(),
-                        delta: Some(delta.to_owned()),
-                        trace: None,
-                        approval: None,
-                        error: None,
-                    };
-                    let _ = event.emit(&app_handle);
-                });
+            let request = llm.stream_chat_with_tools(&messages, &tools, &cancel, |delta| {
+                let event = AgentChatStreamEvent {
+                    turn_id: turn_id_cb.clone(),
+                    message_id: message_id_cb.clone(),
+                    kind: "token_delta".into(),
+                    delta: Some(delta.to_owned()),
+                    trace: None,
+                    approval: None,
+                    error: None,
+                };
+                let _ = event.emit(&app_handle);
+            });
             let streamed = tokio::select! {
                 biased;
                 _ = &mut stopped => break,
@@ -232,12 +236,8 @@ impl DesktopRuntime {
                     break;
                 }
                 Err(error) => {
-                    self.finish_turn_with_error(
-                        &turn_id,
-                        &mut assistant_msg,
-                        error.to_string(),
-                    )
-                    .await;
+                    self.finish_turn_with_error(&turn_id, &mut assistant_msg, error.to_string())
+                        .await;
                     return;
                 }
             };
@@ -360,8 +360,11 @@ impl DesktopRuntime {
                     assistant_msg.approval = Some(card.clone());
                     if let Err(error) = self.engine.upsert_chat_message(&assistant_msg).await {
                         self.finish_turn_with_error(
-                            &turn_id, &mut assistant_msg, error.to_string(),
-                        ).await;
+                            &turn_id,
+                            &mut assistant_msg,
+                            error.to_string(),
+                        )
+                        .await;
                         return;
                     }
                     self.emit_chat_event(AgentChatStreamEvent {
@@ -381,10 +384,12 @@ impl DesktopRuntime {
             let _ = self.engine.upsert_chat_message(&assistant_msg).await;
 
             if stop_for_approval {
+                assistant_msg.content = approval_turn_content(&assistant_msg.content);
                 break 'turns;
             }
             if turn_index + 1 == MAX_COPILOT_TURNS && !cancel.load(Ordering::Relaxed) {
-                assistant_msg.error = Some("The model reached the tool-call limit before finishing.".into());
+                assistant_msg.error =
+                    Some("The model reached the tool-call limit before finishing.".into());
             }
         }
 
@@ -482,10 +487,7 @@ impl DesktopRuntime {
             "content": workspace_ctx,
         })];
 
-        let history = self
-            .engine
-            .list_chat_messages(HISTORY_WINDOW + 2)
-            .await?;
+        let history = self.engine.list_chat_messages(HISTORY_WINDOW + 2).await?;
         for msg in history {
             if msg.id == exclude_message_id || msg.content.trim().is_empty() {
                 continue;
@@ -528,7 +530,8 @@ impl DesktopRuntime {
                 Ok(args) => result_json(self.mcp.handle_get_dag_snapshot(args).await),
                 Err(error) => err_outcome(format!("Invalid arguments: {error}")),
             },
-            "read_evidence_log" => match serde_json::from_value::<ReadEvidenceLogArgs>(parsed_args) {
+            "read_evidence_log" => match serde_json::from_value::<ReadEvidenceLogArgs>(parsed_args)
+            {
                 Ok(args) => result_json(self.mcp.handle_read_evidence_log(args).await),
                 Err(error) => err_outcome(format!("Invalid arguments: {error}")),
             },
@@ -567,9 +570,7 @@ impl DesktopRuntime {
                     Err(error) => return err_outcome(format!("Invalid arguments: {error}")),
                 };
                 args.approved_via_ui = Some(false);
-                match self.mcp.handle_approve_and_execute(args, None)
-                    .await
-                {
+                match self.mcp.handle_approve_and_execute(args, None).await {
                     Ok(resp @ ApprovalExecutionResponse::ApprovalRequired { .. }) => {
                         let card = match &resp {
                             ApprovalExecutionResponse::ApprovalRequired {
@@ -637,12 +638,7 @@ impl DesktopRuntime {
                     ));
                 }
             }
-        } else if !self
-            .workspace
-            .presets
-            .iter()
-            .any(|p| p.name == args.preset)
-        {
+        } else if !self.workspace.presets.iter().any(|p| p.name == args.preset) {
             return err_outcome(format!("Unknown preset '{}'", args.preset));
         }
 
@@ -653,7 +649,9 @@ impl DesktopRuntime {
                 .unwrap_or_else(|_| "HEAD".to_owned())
         } else {
             match self.engine.dag_snapshot(true).await {
-                Ok(snapshot) => snapshot.head_commit_sha.unwrap_or_else(|| "HEAD".to_owned()),
+                Ok(snapshot) => snapshot
+                    .head_commit_sha
+                    .unwrap_or_else(|| "HEAD".to_owned()),
                 Err(error) => return err_outcome(error.to_string()),
             }
         };
@@ -665,7 +663,7 @@ impl DesktopRuntime {
             command_preset: args.preset,
             params: args.params,
             require_approval: args.require_approval.unwrap_or(true),
-            requested_by_device: "relay-copilot".into(),
+            requested_by_device: AGENT_ORIGIN_LABEL.into(),
             user_note: args.user_note,
         };
         let submitted = match self.submit(spec).await {
@@ -682,10 +680,12 @@ impl DesktopRuntime {
                 if cancel.load(Ordering::Relaxed) {
                     break;
                 }
-                if awaiting_clean_run_approval(&latest) || !matches!(
-                    latest.state,
-                    TaskState::Queued | TaskState::PreflightRunning
-                ) {
+                if awaiting_clean_run_approval(&latest)
+                    || !matches!(
+                        latest.state,
+                        TaskState::Queued | TaskState::PreflightRunning
+                    )
+                {
                     break;
                 }
                 sleep(Duration::from_millis(250)).await;
@@ -696,13 +696,16 @@ impl DesktopRuntime {
         }
 
         let approval_card = if latest.state == TaskState::SelfHealingProposed {
-            latest.active_proposal.as_ref().map(|proposal| AgentApprovalCard {
-                task_id: latest.spec.task_id.to_string(),
-                patch_id: Some(proposal.patch_id.clone()),
-                summary: proposal.summary.clone(),
-                diff_preview: proposal.diff_preview.clone(),
-                resolved: None,
-            })
+            latest
+                .active_proposal
+                .as_ref()
+                .map(|proposal| AgentApprovalCard {
+                    task_id: latest.spec.task_id.to_string(),
+                    patch_id: Some(proposal.patch_id.clone()),
+                    summary: proposal.summary.clone(),
+                    diff_preview: proposal.diff_preview.clone(),
+                    resolved: None,
+                })
         } else if awaiting_clean_run_approval(&latest) {
             Some(AgentApprovalCard {
                 task_id: latest.spec.task_id.to_string(),
@@ -726,7 +729,9 @@ impl DesktopRuntime {
     async fn tool_record_decision(&self, parsed_args: Value) -> ToolExecOutcome {
         let args: RecordDecisionToolArgs = match serde_json::from_value(parsed_args) {
             Ok(args) => args,
-            Err(error) => return err_outcome(format!("Invalid record_decision arguments: {error}")),
+            Err(error) => {
+                return err_outcome(format!("Invalid record_decision arguments: {error}"));
+            }
         };
         let label = args.label.trim().to_owned();
         let rationale = args.rationale.trim().to_owned();
@@ -749,7 +754,7 @@ impl DesktopRuntime {
                 constraints: args.constraints,
             },
             freshness: Freshness::Fresh,
-            device_origin: "relay-copilot".into(),
+            device_origin: AGENT_ORIGIN_LABEL.into(),
             created_at: now,
             updated_at: now,
         };
@@ -855,13 +860,28 @@ fn err_outcome(message: String) -> ToolExecOutcome {
     }
 }
 
+fn approval_turn_content(content: &str) -> String {
+    if content.trim().is_empty() {
+        String::new()
+    } else {
+        content.to_owned()
+    }
+}
+
 fn provider_tool_output(tool: &str, raw: &str) -> String {
     if raw.chars().nth(8000).is_none() {
         return raw.to_owned();
     }
     let mut result = json!({ "truncated": true, "preview": truncate_preview(raw, 7200) });
-    if tool == "get_dag_snapshot" && let Ok(snapshot) = serde_json::from_str::<Value>(raw) {
-        for key in ["head_commit_sha", "fresh_evidence_count", "stale_evidence_count", "metric_authority_note"] {
+    if tool == "get_dag_snapshot"
+        && let Ok(snapshot) = serde_json::from_str::<Value>(raw)
+    {
+        for key in [
+            "head_commit_sha",
+            "fresh_evidence_count",
+            "stale_evidence_count",
+            "metric_authority_note",
+        ] {
             result[key] = snapshot[key].clone();
         }
     }
@@ -875,5 +895,21 @@ fn truncate_preview(raw: &str, max_chars: usize) -> String {
         format!("{taken}…")
     } else {
         taken
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn agent_origin_label_and_empty_approval_content_are_clean() {
+        assert_eq!(AGENT_ORIGIN_LABEL, "SyncEverything Agent");
+        assert_eq!(approval_turn_content(""), "");
+        assert_eq!(approval_turn_content("   \n\t "), "");
+        assert_eq!(
+            approval_turn_content("Patch verified against smoke check."),
+            "Patch verified against smoke check."
+        );
     }
 }

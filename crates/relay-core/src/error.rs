@@ -8,8 +8,17 @@ pub enum RelayError {
     #[error("task not found: {0}")]
     TaskNotFound(String),
 
+    #[error("task {0} was cancelled")]
+    TaskCancelled(String),
+
     #[error("proposal not found: {0}")]
     ProposalNotFound(String),
+
+    #[error("trusted peer not found: {0}")]
+    PeerNotFound(String),
+
+    #[error("peer has been revoked: {0}")]
+    PeerRevoked(String),
 
     #[error("log blob {hash} for evidence {node_id} is missing")]
     MissingEvidenceLog { node_id: String, hash: String },
@@ -37,8 +46,8 @@ pub enum RelayError {
     #[error("git command failed: {0}")]
     Git(String),
 
-    #[error("uv command failed: {0}")]
-    Uv(String),
+    #[error("package manager ({manager}) error: {message}")]
+    PackageManager { manager: String, message: String },
 
     #[error("transport error: {0}")]
     Transport(String),

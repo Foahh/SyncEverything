@@ -1,10 +1,14 @@
+use super::pm;
 use super::{
-    WorktreeSandbox, git_command, git_output, load_manifest, resolve_preset,
+    WorktreeSandbox, git_command, git_output, is_blocked_env_name,
+    is_blocked_secret_file_extension, load_manifest, resolve_preset,
     validate_confined_path_components, validate_confined_relative_path, working_diff,
 };
 use crate::contracts::{
     CommandPreset, FileEdit, JsonValue, PatchKind, PatchProposal, RelayManifest, TaskId,
+    TaskLogChunk, TaskLogStreamKind,
 };
+use crate::engine::TaskCancellationToken;
 use crate::error::{RelayError, RelayResult};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
@@ -12,15 +16,36 @@ use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 use std::io;
 use std::path::{Component, Path, PathBuf};
-use std::process::Stdio;
+use std::process::{Output, Stdio};
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
-use tokio::io::AsyncReadExt;
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, BufReader};
 use tokio::process::Command;
+use tokio::sync::mpsc;
 use uuid::Uuid;
+
+pub use super::pm::uv::detect_missing_python_module;
 
 const SMOKE_TAIL_LINES: usize = 30;
 const ERROR_SNIPPET_RADIUS: u32 = 10;
 const MAX_ERROR_SNIPPETS: usize = 3;
+const STREAM_BATCH_WINDOW: Duration = Duration::from_millis(40);
+const STREAM_BATCH_MAX_BYTES: usize = 4096;
+const STREAM_BATCH_MAX_LINES: usize = 32;
+const STREAM_DRAIN_TIMEOUT: Duration = Duration::from_millis(750);
+const STREAM_EXITED_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
+const CHILD_KILL_WAIT_TIMEOUT: Duration = Duration::from_secs(2);
+
+pub type TaskLogCallback = Arc<dyn Fn(TaskLogChunk) + Send + Sync>;
+
+#[derive(Clone, Default)]
+pub struct PresetRunOptions {
+    pub task_id: Option<TaskId>,
+    pub on_log_chunk: Option<TaskLogCallback>,
+    pub cancel_token: Option<TaskCancellationToken>,
+    pub seq_counter: Option<Arc<AtomicU32>>,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ErrorSourceSnippet {
@@ -31,15 +56,15 @@ pub struct ErrorSourceSnippet {
 
 #[derive(Debug, Clone, Copy)]
 pub enum PatchInput<'a> {
-    UvSpec(&'a str),
-    FileEdits(&'a [FileEdit]),
+    DependencySpec(&'a str),
+    CodeDiff(&'a [FileEdit]),
 }
 
 impl PatchInput<'_> {
     pub fn kind(&self) -> PatchKind {
         match self {
-            Self::UvSpec(_) => PatchKind::UvSpec,
-            Self::FileEdits(_) => PatchKind::FileEdits,
+            Self::DependencySpec(_) => PatchKind::DependencySpec,
+            Self::CodeDiff(_) => PatchKind::CodeDiff,
         }
     }
 }
@@ -51,6 +76,8 @@ pub struct PresetRunOutput {
     pub raw_log: String,
     pub exit_code: Option<i32>,
     pub success: bool,
+    pub timed_out: bool,
+    pub cancelled: bool,
     pub duration_ms: u64,
     pub log_blob_hash: String,
     pub metrics_json: Option<JsonValue>,
@@ -63,6 +90,8 @@ pub struct PreflightReport {
     pub worktree_branch: String,
     pub smoke_passed: bool,
     pub exit_code: Option<i32>,
+    pub timed_out: bool,
+    pub cancelled: bool,
     pub stdout_tail: String,
     pub stderr_tail: String,
     pub detected_missing_module: Option<String>,
@@ -70,14 +99,12 @@ pub struct PreflightReport {
     pub raw_log: String,
 }
 
-impl WorktreeSandbox {
-    fn authorized_smoke_preset<'a>(&self, manifest: &'a RelayManifest) -> RelayResult<&'a str> {
-        if load_manifest(self.repo_root())?.project.smoke_preset != manifest.project.smoke_preset {
-            return Err(RelayError::Internal("smoke preset differs from the host relay.toml".into()));
-        }
-        Ok(&manifest.project.smoke_preset)
-    }
+pub(crate) enum PatchVerification {
+    Finished(PatchProposal, String),
+    Cancelled(String),
+}
 
+impl WorktreeSandbox {
     fn shared_cargo_target_dir(&self) -> RelayResult<PathBuf> {
         Ok(std::path::absolute(&self.worktrees_base)?.join("cargo-target"))
     }
@@ -89,29 +116,69 @@ impl WorktreeSandbox {
         preset_name: &str,
         params: &BTreeMap<String, String>,
     ) -> RelayResult<PresetRunOutput> {
-        let preset = resolve_preset(manifest, preset_name)?;
+        self.run_preset_streaming(
+            worktree_path,
+            manifest,
+            preset_name,
+            params,
+            PresetRunOptions::default(),
+        )
+        .await
+    }
+
+    pub async fn run_preset_streaming(
+        &self,
+        worktree_path: &Path,
+        _manifest: &RelayManifest,
+        preset_name: &str,
+        params: &BTreeMap<String, String>,
+        options: PresetRunOptions,
+    ) -> RelayResult<PresetRunOutput> {
+        // Always resolve and authorize presets from the Host checkout's `relay.toml` so
+        // historical `--base-commit` runs and cosmetic edits work without allowing worktree
+        // commits or candidate patches to alter Host commands.
+        let host_manifest = load_manifest(self.repo_root())?;
+        let preset = resolve_preset(&host_manifest, preset_name)?;
         let args = preset_args(preset, params)?;
 
-        // Authorize the command using the host checkout, even if a candidate patch edits relay.toml.
-        let host_manifest = load_manifest(self.repo_root())?;
-        if resolve_preset(&host_manifest, preset_name)? != preset {
-            return Err(RelayError::Internal(format!(
-                "preset '{preset_name}' differs from the host relay.toml"
-            )));
+        let start = Instant::now();
+        if options
+            .cancel_token
+            .as_ref()
+            .is_some_and(TaskCancellationToken::is_cancelled)
+        {
+            return Ok(build_preset_output(
+                Vec::new(),
+                Vec::new(),
+                None,
+                false,
+                false,
+                true,
+                start.elapsed(),
+            ));
         }
 
-        let start = Instant::now();
         let worktree_path = std::path::absolute(worktree_path)?;
         let program = Path::new(&preset.program);
         #[cfg(windows)]
         let launcher = match std::env::var_os("PATH") {
-            Some(path) => resolve_windows_package_launcher(&preset.program, &args, &path)?,
+            Some(path) => {
+                pm::security::resolve_windows_package_launcher(&preset.program, &args, &path)?
+            }
             None => None,
         };
         #[cfg(windows)]
-        let program = launcher.as_deref().unwrap_or(program);
+        let program = launcher
+            .as_ref()
+            .map_or(program, |resolved| resolved.program.as_path());
         let cargo_target_dir = self.shared_cargo_target_dir()?;
         let mut command = worktree_command(program, &worktree_path, Some(&cargo_target_dir));
+        #[cfg(windows)]
+        if let Some(resolved) = &launcher {
+            command.args(&resolved.prefix_args);
+        }
+        #[cfg(unix)]
+        command.process_group(0);
         let is_uv = Path::new(&preset.program)
             .file_stem()
             .and_then(|stem| stem.to_str())
@@ -127,66 +194,145 @@ impl WorktreeSandbox {
             .stderr(Stdio::piped())
             .kill_on_drop(true)
             .spawn()?;
-        let mut stdout_pipe = child
+        let process_tree = ProcessTree::capture(&child);
+        let stdout_pipe = child
             .stdout
             .take()
             .ok_or_else(|| RelayError::Internal("preset stdout was not captured".into()))?;
-        let mut stderr_pipe = child
+        let stderr_pipe = child
             .stderr
             .take()
             .ok_or_else(|| RelayError::Internal("preset stderr was not captured".into()))?;
-        let mut stdout_bytes = Vec::new();
-        let mut stderr_bytes = Vec::new();
+
+        let stdout_bytes = Arc::new(StdMutex::new(Vec::<u8>::new()));
+        let stderr_bytes = Arc::new(StdMutex::new(Vec::<u8>::new()));
+
+        let seq_counter = options
+            .seq_counter
+            .unwrap_or_else(|| Arc::new(AtomicU32::new(0)));
+        let task_id_text = options
+            .task_id
+            .map_or_else(String::new, |id| id.to_string());
+        let preset_label = preset_name.to_owned();
+
+        let (line_tx, emitter_task) = match options.on_log_chunk.clone() {
+            Some(callback) => {
+                let (tx, rx) = mpsc::unbounded_channel::<(TaskLogStreamKind, String)>();
+                let emitter = tokio::spawn(run_log_emitter(
+                    rx,
+                    task_id_text.clone(),
+                    preset_label.clone(),
+                    seq_counter.clone(),
+                    callback,
+                ));
+                (Some(tx), Some(emitter))
+            }
+            None => (None, None),
+        };
+
+        let mut stdout_task = tokio::spawn(read_stream_incremental(
+            stdout_pipe,
+            TaskLogStreamKind::Stdout,
+            stdout_bytes.clone(),
+            line_tx.clone(),
+        ));
+        let mut stderr_task = tokio::spawn(read_stream_incremental(
+            stderr_pipe,
+            TaskLogStreamKind::Stderr,
+            stderr_bytes.clone(),
+            line_tx.clone(),
+        ));
+        drop(line_tx);
+
+        enum WaitOutcome {
+            Exited(io::Result<std::process::ExitStatus>),
+            TimedOut,
+            Cancelled,
+        }
+
         let timeout = Duration::from_secs(preset.timeout_secs.into());
-        let completed = tokio::time::timeout(timeout, async {
-            tokio::try_join!(
-                child.wait(),
-                stdout_pipe.read_to_end(&mut stdout_bytes),
-                stderr_pipe.read_to_end(&mut stderr_bytes),
-            )
-        })
-        .await;
-        let (exit_code, success) = match completed {
-            Ok(result) => {
-                let (status, _, _) = result?;
-                (status.code(), status.success())
-            }
-            Err(_) => {
-                let _ = child.start_kill();
-                if !stderr_bytes.is_empty() && !stderr_bytes.ends_with(b"\n") {
-                    stderr_bytes.push(b'\n');
+        let timeout_sleep = tokio::time::sleep(timeout);
+        tokio::pin!(timeout_sleep);
+
+        let mut cancel_token = options.cancel_token;
+        let cancel_wait = wait_for_cancellation(&mut cancel_token);
+        tokio::pin!(cancel_wait);
+
+        let wait_outcome = tokio::select! {
+            biased;
+            () = &mut cancel_wait => WaitOutcome::Cancelled,
+            status = child.wait() => WaitOutcome::Exited(status),
+            () = &mut timeout_sleep => WaitOutcome::TimedOut,
+        };
+
+        let (exit_code, success, timed_out, cancelled) = match wait_outcome {
+            WaitOutcome::Exited(status_result) => {
+                let status = status_result?;
+                drain_reader_tasks(
+                    &mut stdout_task,
+                    &mut stderr_task,
+                    STREAM_EXITED_DRAIN_TIMEOUT,
+                )
+                .await?;
+                if let Some(emitter) = emitter_task {
+                    let _ = tokio::time::timeout(STREAM_EXITED_DRAIN_TIMEOUT, emitter).await;
                 }
-                stderr_bytes.extend_from_slice(
-                    format!(
-                        "preset '{preset_name}' timed out after {} seconds\n",
-                        preset.timeout_secs
-                    )
-                    .as_bytes(),
+                (status.code(), status.success(), false, false)
+            }
+            WaitOutcome::Cancelled => {
+                kill_child_tree(&mut child, &process_tree).await;
+                let _ =
+                    drain_reader_tasks(&mut stdout_task, &mut stderr_task, STREAM_DRAIN_TIMEOUT)
+                        .await;
+                if let Some(emitter) = emitter_task {
+                    let _ = tokio::time::timeout(STREAM_DRAIN_TIMEOUT, emitter).await;
+                }
+                (None, false, false, true)
+            }
+            WaitOutcome::TimedOut => {
+                kill_child_tree(&mut child, &process_tree).await;
+                let _ =
+                    drain_reader_tasks(&mut stdout_task, &mut stderr_task, STREAM_DRAIN_TIMEOUT)
+                        .await;
+                if let Some(emitter) = emitter_task {
+                    let _ = tokio::time::timeout(STREAM_DRAIN_TIMEOUT, emitter).await;
+                }
+                let timeout_msg = format!(
+                    "preset '{preset_name}' timed out after {} seconds\n",
+                    preset.timeout_secs
                 );
-                (None, false)
+                {
+                    let mut stderr = stderr_bytes.lock().expect("stderr buffer poisoned");
+                    if !stderr.is_empty() && !stderr.ends_with(b"\n") {
+                        stderr.push(b'\n');
+                    }
+                    stderr.extend_from_slice(timeout_msg.as_bytes());
+                }
+                if let Some(callback) = options.on_log_chunk {
+                    callback(TaskLogChunk {
+                        task_id: task_id_text,
+                        preset: preset_label,
+                        stream: TaskLogStreamKind::Stderr,
+                        seq: seq_counter.fetch_add(1, Ordering::Relaxed),
+                        text: timeout_msg,
+                        timestamp: Utc::now(),
+                    });
+                }
+                (None, false, true, false)
             }
         };
-        let duration_ms = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
-        let stdout = String::from_utf8_lossy(&stdout_bytes).into_owned();
-        let stderr = String::from_utf8_lossy(&stderr_bytes).into_owned();
-        let separator = if !stdout.is_empty() && !stdout.ends_with('\n') && !stderr.is_empty() {
-            "\n"
-        } else {
-            ""
-        };
-        let raw_log = format!("{stdout}{separator}{stderr}");
-        let log_blob_hash = format!("blake3:{}", blake3::hash(raw_log.as_bytes()).to_hex());
-        let metrics_json = extract_metrics_json(&stdout);
-        Ok(PresetRunOutput {
-            stdout,
-            stderr,
-            raw_log,
+
+        let stdout_buf = std::mem::take(&mut *stdout_bytes.lock().expect("stdout buffer poisoned"));
+        let stderr_buf = std::mem::take(&mut *stderr_bytes.lock().expect("stderr buffer poisoned"));
+        Ok(build_preset_output(
+            stdout_buf,
+            stderr_buf,
             exit_code,
             success,
-            duration_ms,
-            log_blob_hash,
-            metrics_json,
-        })
+            timed_out,
+            cancelled,
+            start.elapsed(),
+        ))
     }
 
     pub async fn run_preflight(
@@ -196,17 +342,47 @@ impl WorktreeSandbox {
         worktree_branch: &str,
         manifest: &RelayManifest,
     ) -> RelayResult<PreflightReport> {
+        self.run_preflight_with_options(
+            task_id,
+            worktree_path,
+            worktree_branch,
+            manifest,
+            PresetRunOptions {
+                task_id: Some(task_id),
+                ..PresetRunOptions::default()
+            },
+        )
+        .await
+    }
+
+    pub async fn run_preflight_with_options(
+        &self,
+        task_id: TaskId,
+        worktree_path: &Path,
+        worktree_branch: &str,
+        _manifest: &RelayManifest,
+        mut options: PresetRunOptions,
+    ) -> RelayResult<PreflightReport> {
         self.validate_task_worktree(task_id, worktree_path, worktree_branch)
             .await?;
+        if options.task_id.is_none() {
+            options.task_id = Some(task_id);
+        }
+        let host_manifest = load_manifest(self.repo_root())?;
         let output = self
-            .run_preset(
+            .run_preset_streaming(
                 worktree_path,
-                manifest,
-                self.authorized_smoke_preset(manifest)?,
+                &host_manifest,
+                &host_manifest.project.smoke_preset,
                 &BTreeMap::new(),
+                options,
             )
             .await?;
-        let error_snippets = if output.success {
+        let adapter = pm::resolve_adapter(
+            worktree_path,
+            host_manifest.project.package_manager.as_deref(),
+        )?;
+        let error_snippets = if output.success || output.cancelled {
             Vec::new()
         } else {
             let root = worktree_path.to_owned();
@@ -221,9 +397,11 @@ impl WorktreeSandbox {
             worktree_branch: worktree_branch.into(),
             smoke_passed: output.success,
             exit_code: output.exit_code,
+            timed_out: output.timed_out,
+            cancelled: output.cancelled,
             stdout_tail: tail_lines(&output.stdout),
             stderr_tail: tail_lines(&output.stderr),
-            detected_missing_module: detect_missing_python_module(&output.stderr),
+            detected_missing_module: adapter.detect_missing_dependency(&output.stderr),
             error_snippets,
             raw_log: output.raw_log,
         })
@@ -235,52 +413,84 @@ impl WorktreeSandbox {
         task_id: TaskId,
         worktree_path: &Path,
         worktree_branch: &str,
-        manifest: &RelayManifest,
+        _manifest: &RelayManifest,
         patch: PatchInput<'_>,
         summary: &str,
     ) -> RelayResult<PatchProposal> {
-        self.apply_patch_for_review(
-            task_id,
-            worktree_path,
-            worktree_branch,
-            manifest,
-            patch,
-            summary,
-        )
-        .await
-        .map(|(proposal, _)| proposal)
+        match self
+            .apply_and_verify_patch_with_options(
+                task_id,
+                worktree_path,
+                worktree_branch,
+                patch,
+                summary,
+                PresetRunOptions {
+                    task_id: Some(task_id),
+                    ..PresetRunOptions::default()
+                },
+            )
+            .await?
+            .0
+        {
+            PatchVerification::Finished(proposal, _) => Ok(proposal),
+            PatchVerification::Cancelled(_) => Err(RelayError::TaskCancelled(task_id.to_string())),
+        }
     }
 
-    pub(crate) async fn apply_patch_for_review(
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn apply_and_verify_patch_with_options(
         &self,
         task_id: TaskId,
         worktree_path: &Path,
         worktree_branch: &str,
-        manifest: &RelayManifest,
         patch: PatchInput<'_>,
         summary: &str,
-    ) -> RelayResult<(PatchProposal, WorktreeCheckpoint)> {
+        mut options: PresetRunOptions,
+    ) -> RelayResult<(PatchVerification, WorktreeCheckpoint)> {
         self.validate_task_worktree(task_id, worktree_path, worktree_branch)
             .await?;
+        if options.task_id.is_none() {
+            options.task_id = Some(task_id);
+        }
         let worktree_path = std::path::absolute(worktree_path)?;
-        let smoke_preset = self.authorized_smoke_preset(manifest)?;
+        let host_manifest = load_manifest(self.repo_root())?;
+        let smoke_preset = host_manifest.project.smoke_preset.as_str();
+        let adapter = pm::resolve_adapter(
+            &worktree_path,
+            host_manifest.project.package_manager.as_deref(),
+        )?;
         let kind = patch.kind();
         let diff_before = working_diff(&worktree_path).await?;
         let staged = match patch {
-            PatchInput::FileEdits(edits) => prepare_file_edits(&worktree_path, edits).await?,
-            PatchInput::UvSpec(_) => BTreeMap::new(),
+            PatchInput::CodeDiff(edits) => prepare_file_edits(&worktree_path, edits).await?,
+            PatchInput::DependencySpec(_) => BTreeMap::new(),
         };
         let paths = match patch {
-            PatchInput::FileEdits(_) => staged.keys().cloned().collect(),
-            PatchInput::UvSpec(_) => {
-                vec![PathBuf::from("pyproject.toml"), PathBuf::from("uv.lock")]
-            }
+            PatchInput::CodeDiff(_) => staged.keys().cloned().collect(),
+            PatchInput::DependencySpec(_) => adapter
+                .manifest_and_lock_files()
+                .into_iter()
+                .map(PathBuf::from)
+                .collect(),
         };
         let checkpoint = WorktreeCheckpoint::capture(&worktree_path, paths).await?;
-        let result = async {
+        let verification = async {
             match patch {
-                PatchInput::UvSpec(spec) => add_uv_dependency(&worktree_path, spec).await?,
-                PatchInput::FileEdits(_) => write_file_edits(&worktree_path, &staged).await?,
+                PatchInput::DependencySpec(spec) => {
+                    let timeout_secs = resolve_preset(&host_manifest, smoke_preset)?.timeout_secs;
+                    adapter
+                        .add_dependency(
+                            &worktree_path,
+                            spec,
+                            pm::DependencyRunOptions {
+                                task_id: Some(task_id),
+                                timeout: Duration::from_secs(timeout_secs.into()),
+                                cancel_token: options.cancel_token.clone(),
+                            },
+                        )
+                        .await?;
+                }
+                PatchInput::CodeDiff(_) => write_file_edits(&worktree_path, &staged).await?,
             }
             let diff_preview = working_diff(&worktree_path).await?;
             if diff_preview.is_empty() || diff_preview == diff_before {
@@ -289,16 +499,33 @@ impl WorktreeSandbox {
                 ));
             }
             let smoke = self
-                .run_preset(&worktree_path, manifest, smoke_preset, &BTreeMap::new())
+                .run_preset_streaming(
+                    &worktree_path,
+                    &host_manifest,
+                    smoke_preset,
+                    &BTreeMap::new(),
+                    options,
+                )
                 .await?;
-            // Smoke may update tracked files, including the lockfile.
+            if smoke.cancelled {
+                return Ok(PatchVerification::Cancelled(smoke.raw_log));
+            }
+            // Smoke can reconcile or create a lockfile. Approval covers the final diff.
+            if smoke.success {
+                pm::security::stage_intent_to_add(
+                    adapter.name(),
+                    &worktree_path,
+                    adapter.lockfile_paths(),
+                )
+                .await?;
+            }
             let diff_preview = working_diff(&worktree_path).await?;
             if smoke.success && (diff_preview.is_empty() || diff_preview == diff_before) {
                 return Err(RelayError::Internal(
                     "patch produced no lasting worktree diff".into(),
                 ));
             }
-            Ok(PatchProposal {
+            let proposal = PatchProposal {
                 patch_id: Uuid::now_v7().to_string(),
                 task_id,
                 kind,
@@ -308,104 +535,436 @@ impl WorktreeSandbox {
                 smoke_verified: smoke.success,
                 smoke_stdout_tail: tail_lines(&smoke.raw_log),
                 created_at: Utc::now(),
-            })
+            };
+            Ok(PatchVerification::Finished(proposal, smoke.raw_log))
         }
         .await;
-        if !matches!(&result, Ok(proposal) if proposal.smoke_verified) {
+        if !matches!(&verification, Ok(PatchVerification::Finished(proposal, _)) if proposal.smoke_verified)
+        {
             checkpoint
                 .restore(&worktree_path)
                 .await
                 .map_err(|restore| {
-                    let reason = result
+                    let reason = verification
                         .as_ref()
                         .err()
                         .map(ToString::to_string)
-                        .unwrap_or_else(|| "patch failed smoke verification".into());
+                        .unwrap_or_else(|| "patch did not pass smoke verification".into());
                     RelayError::Internal(format!(
                         "{reason}; could not restore the task worktree: {restore}"
                     ))
                 })?;
         }
-        result.map(|proposal| (proposal, checkpoint))
+        verification.map(|result| (result, checkpoint))
     }
 }
 
-#[cfg(windows)]
-fn is_safe_cmd_arg(arg: &str) -> bool {
-    !arg.is_empty()
-        && arg.bytes().all(|byte| {
-            byte.is_ascii_alphanumeric()
-                || matches!(byte, b'-' | b'_' | b'.' | b':' | b'/' | b'@' | b'+' | b'=')
-        })
+fn build_preset_output(
+    stdout_bytes: Vec<u8>,
+    stderr_bytes: Vec<u8>,
+    exit_code: Option<i32>,
+    success: bool,
+    timed_out: bool,
+    cancelled: bool,
+    elapsed: Duration,
+) -> PresetRunOutput {
+    let duration_ms = u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX);
+    let stdout = String::from_utf8_lossy(&stdout_bytes).into_owned();
+    let stderr = String::from_utf8_lossy(&stderr_bytes).into_owned();
+    let separator = if !stdout.is_empty() && !stdout.ends_with('\n') && !stderr.is_empty() {
+        "\n"
+    } else {
+        ""
+    };
+    let raw_log = format!("{stdout}{separator}{stderr}");
+    let log_blob_hash = format!("blake3:{}", blake3::hash(raw_log.as_bytes()).to_hex());
+    let metrics_json = extract_metrics_json(&stdout);
+    PresetRunOutput {
+        stdout,
+        stderr,
+        raw_log,
+        exit_code,
+        success,
+        timed_out,
+        cancelled,
+        duration_ms,
+        log_blob_hash,
+        metrics_json,
+    }
 }
 
-#[cfg(windows)]
-fn resolve_windows_package_launcher(
-    program: &str,
-    args: &[String],
-    search_path: &std::ffi::OsStr,
-) -> RelayResult<Option<std::path::PathBuf>> {
-    // Standard Windows npm/pnpm/yarn installs often expose only a .cmd shim.
-    // Prefer a native .exe if available; otherwise allow .cmd only when every
-    // resolved argument belongs to a strict cmd.exe-inert character allowlist.
-    if !matches!(program, "npm" | "pnpm" | "yarn") {
-        return Ok(None);
-    }
-    let mut cmd_candidate = None;
-    for dir in std::env::split_paths(search_path).filter(|dir| dir.is_absolute()) {
-        let exe = dir.join(format!("{program}.exe"));
-        if exe.is_file() {
-            return Ok(Some(exe));
+async fn read_stream_incremental<R: AsyncRead + Unpin>(
+    pipe: R,
+    stream: TaskLogStreamKind,
+    sink_bytes: Arc<StdMutex<Vec<u8>>>,
+    line_tx: Option<mpsc::UnboundedSender<(TaskLogStreamKind, String)>>,
+) -> io::Result<()> {
+    let mut reader = BufReader::new(pipe);
+    let mut buf = Vec::with_capacity(1024);
+    loop {
+        buf.clear();
+        let read = reader.read_until(b'\n', &mut buf).await?;
+        if read == 0 {
+            break;
         }
-        if cmd_candidate.is_none() {
-            let cmd = dir.join(format!("{program}.cmd"));
-            if cmd.is_file() {
-                cmd_candidate = Some(cmd);
+        {
+            let mut guard = sink_bytes.lock().expect("stream buffer poisoned");
+            guard.extend_from_slice(&buf);
+        }
+        if let Some(tx) = &line_tx {
+            let text = String::from_utf8_lossy(&buf).into_owned();
+            let _ = tx.send((stream, text));
+        }
+    }
+    Ok(())
+}
+
+async fn run_log_emitter(
+    mut rx: mpsc::UnboundedReceiver<(TaskLogStreamKind, String)>,
+    task_id: String,
+    preset: String,
+    seq_counter: Arc<AtomicU32>,
+    callback: TaskLogCallback,
+) {
+    struct PendingBatch {
+        stream: TaskLogStreamKind,
+        text: String,
+        lines: usize,
+    }
+
+    let mut pending: Option<PendingBatch> = None;
+    let mut last_emit: Option<(Instant, TaskLogStreamKind)> = None;
+
+    let emit_chunk = |stream: TaskLogStreamKind,
+                      text: String,
+                      last_emit: &mut Option<(Instant, TaskLogStreamKind)>| {
+        if text.is_empty() {
+            return;
+        }
+        callback(TaskLogChunk {
+            task_id: task_id.clone(),
+            preset: preset.clone(),
+            stream,
+            seq: seq_counter.fetch_add(1, Ordering::Relaxed),
+            text,
+            timestamp: Utc::now(),
+        });
+        *last_emit = Some((Instant::now(), stream));
+    };
+
+    loop {
+        let next = if pending.is_some() {
+            let deadline = last_emit
+                .map(|(at, _)| at + STREAM_BATCH_WINDOW)
+                .unwrap_or_else(|| Instant::now() + STREAM_BATCH_WINDOW);
+            let wait = deadline.saturating_duration_since(Instant::now());
+            tokio::select! {
+                item = rx.recv() => Some(item),
+                () = tokio::time::sleep(wait) => None,
+            }
+        } else {
+            Some(rx.recv().await)
+        };
+
+        match next {
+            None => {
+                if let Some(batch) = pending.take() {
+                    emit_chunk(batch.stream, batch.text, &mut last_emit);
+                }
+            }
+            Some(None) => {
+                if let Some(batch) = pending.take() {
+                    emit_chunk(batch.stream, batch.text, &mut last_emit);
+                }
+                break;
+            }
+            Some(Some((stream, text))) => {
+                if let Some(mut batch) = pending.take() {
+                    if batch.stream != stream {
+                        emit_chunk(batch.stream, batch.text, &mut last_emit);
+                        emit_chunk(stream, text, &mut last_emit);
+                    } else {
+                        batch.text.push_str(&text);
+                        batch.lines += 1;
+                        if batch.text.len() >= STREAM_BATCH_MAX_BYTES
+                            || batch.lines >= STREAM_BATCH_MAX_LINES
+                        {
+                            emit_chunk(batch.stream, batch.text, &mut last_emit);
+                        } else {
+                            pending = Some(batch);
+                        }
+                    }
+                } else {
+                    let emit_immediately = match last_emit {
+                        None => true,
+                        Some((at, prev_stream)) => {
+                            prev_stream != stream || at.elapsed() >= STREAM_BATCH_WINDOW
+                        }
+                    };
+                    if emit_immediately {
+                        emit_chunk(stream, text, &mut last_emit);
+                    } else {
+                        pending = Some(PendingBatch {
+                            stream,
+                            text,
+                            lines: 1,
+                        });
+                    }
+                }
             }
         }
     }
-    let Some(cmd) = cmd_candidate else {
-        return Ok(None);
-    };
-    if let Some(unsafe_arg) = args.iter().find(|arg| !is_safe_cmd_arg(arg)) {
-        return Err(RelayError::Internal(format!(
-            "argument '{unsafe_arg}' contains characters not allowed for Windows .cmd launcher '{program}'"
-        )));
+}
+
+async fn drain_reader_tasks(
+    stdout_task: &mut tokio::task::JoinHandle<io::Result<()>>,
+    stderr_task: &mut tokio::task::JoinHandle<io::Result<()>>,
+    timeout: Duration,
+) -> RelayResult<()> {
+    match tokio::time::timeout(timeout, async {
+        let (out_res, err_res) = tokio::join!(&mut *stdout_task, &mut *stderr_task);
+        if let Ok(Err(err)) = out_res {
+            return Err(RelayError::Io(err));
+        }
+        if let Ok(Err(err)) = err_res {
+            return Err(RelayError::Io(err));
+        }
+        Ok(())
+    })
+    .await
+    {
+        Ok(res) => res,
+        Err(_) => {
+            stdout_task.abort();
+            stderr_task.abort();
+            Ok(())
+        }
     }
-    Ok(Some(cmd))
+}
+
+struct ProcessTree {
+    #[cfg(windows)]
+    job: Option<std::os::windows::io::OwnedHandle>,
+}
+
+impl ProcessTree {
+    fn capture(_child: &tokio::process::Child) -> Self {
+        Self {
+            #[cfg(windows)]
+            job: attach_process_job(_child).ok(),
+        }
+    }
+}
+
+#[cfg(windows)]
+fn attach_process_job(
+    child: &tokio::process::Child,
+) -> io::Result<std::os::windows::io::OwnedHandle> {
+    use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
+    use windows_sys::Win32::System::JobObjects::{
+        AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+        JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
+        SetInformationJobObject,
+    };
+
+    let child = child
+        .raw_handle()
+        .ok_or_else(|| io::Error::other("the child process already exited"))?;
+    // An anonymous job needs neither security attributes nor a name.
+    let job = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
+    if job.is_null() {
+        return Err(io::Error::last_os_error());
+    }
+    // CreateJobObjectW returned a new handle owned by this function.
+    let job = unsafe { OwnedHandle::from_raw_handle(job) };
+    let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+    limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+    // The handle and the matching structures remain valid for both calls.
+    if unsafe {
+        SetInformationJobObject(
+            job.as_raw_handle(),
+            JobObjectExtendedLimitInformation,
+            std::ptr::from_ref(&limits).cast(),
+            std::mem::size_of_val(&limits) as u32,
+        ) == 0
+            || AssignProcessToJobObject(job.as_raw_handle(), child) == 0
+    } {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(job)
+}
+
+#[cfg(windows)]
+async fn terminate_process_job(job: &std::os::windows::io::OwnedHandle) -> bool {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::System::JobObjects::{
+        JOBOBJECT_BASIC_ACCOUNTING_INFORMATION, JobObjectBasicAccountingInformation,
+        QueryInformationJobObject, TerminateJobObject,
+    };
+
+    // The caller owns the job handle for the duration of termination.
+    if unsafe { TerminateJobObject(job.as_raw_handle(), 1) } == 0 {
+        return false;
+    }
+    tokio::time::timeout(CHILD_KILL_WAIT_TIMEOUT, async {
+        loop {
+            let mut accounting = JOBOBJECT_BASIC_ACCOUNTING_INFORMATION::default();
+            // The output buffer has the structure and size required by this information class.
+            let result = unsafe {
+                QueryInformationJobObject(
+                    job.as_raw_handle(),
+                    JobObjectBasicAccountingInformation,
+                    std::ptr::from_mut(&mut accounting).cast(),
+                    std::mem::size_of_val(&accounting) as u32,
+                    std::ptr::null_mut(),
+                )
+            };
+            if result == 0 {
+                return false;
+            }
+            if accounting.ActiveProcesses == 0 {
+                return true;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .unwrap_or(false)
+}
+
+async fn kill_child_tree(child: &mut tokio::process::Child, _process_tree: &ProcessTree) {
+    #[cfg(unix)]
+    if let Some(pid) = child.id().and_then(|pid| libc::pid_t::try_from(pid).ok()) {
+        // Each supervised child starts in its own process group. Its unreaped PID
+        // identifies that group, and a negative PID signals its members.
+        unsafe { libc::kill(-pid, libc::SIGKILL) };
+    }
+    #[cfg(windows)]
+    {
+        let job_terminated = match &_process_tree.job {
+            Some(job) => terminate_process_job(job).await,
+            None => false,
+        };
+        if !job_terminated && let Some(pid) = child.id() {
+            let mut kill_cmd = Command::new("taskkill");
+            kill_cmd
+                .args(["/PID", &pid.to_string(), "/T", "/F"])
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .kill_on_drop(true);
+            let _ = tokio::time::timeout(CHILD_KILL_WAIT_TIMEOUT, kill_cmd.status()).await;
+        }
+    }
+    let _ = child.start_kill();
+    let _ = tokio::time::timeout(CHILD_KILL_WAIT_TIMEOUT, child.wait()).await;
+}
+
+async fn wait_for_cancellation(token: &mut Option<TaskCancellationToken>) {
+    match token {
+        Some(token) => token.cancelled().await,
+        None => std::future::pending::<()>().await,
+    }
+}
+
+pub(super) async fn run_dependency_command(
+    mut command: Command,
+    manager: &str,
+    mut options: pm::DependencyRunOptions,
+) -> RelayResult<Output> {
+    let cancelled_error = || {
+        RelayError::TaskCancelled(
+            options
+                .task_id
+                .map_or_else(String::new, |id| id.to_string()),
+        )
+    };
+    if options
+        .cancel_token
+        .as_ref()
+        .is_some_and(TaskCancellationToken::is_cancelled)
+    {
+        return Err(cancelled_error());
+    }
+    #[cfg(unix)]
+    command.process_group(0);
+    let mut child = command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()?;
+    let process_tree = ProcessTree::capture(&child);
+    let mut stdout = child
+        .stdout
+        .take()
+        .expect("configured dependency stdout pipe");
+    let mut stderr = child
+        .stderr
+        .take()
+        .expect("configured dependency stderr pipe");
+    let mut output = Vec::new();
+    let mut errors = Vec::new();
+    let result = tokio::select! {
+        biased;
+        () = wait_for_cancellation(&mut options.cancel_token) => Err(cancelled_error()),
+        result = tokio::time::timeout(options.timeout, async {
+            tokio::try_join!(stdout.read_to_end(&mut output), stderr.read_to_end(&mut errors))?;
+            child.wait().await
+        }) => match result {
+            Ok(result) => result.map_err(RelayError::from),
+            Err(_) => Err(pm::security::pm_error(manager, "dependency installation timed out")),
+        },
+    };
+    if result.is_err() {
+        kill_child_tree(&mut child, &process_tree).await;
+    }
+    Ok(Output {
+        status: result?,
+        stdout: output,
+        stderr: errors,
+    })
 }
 
 #[cfg(all(windows, test))]
 #[test]
 fn package_manager_shims_allow_safe_custom_scripts_and_reject_unsafe_chars() {
+    use pm::security::{WindowsLauncher, resolve_windows_package_launcher};
     let dir = tempfile::tempdir().unwrap();
 
     for (program, args) in [
         ("npm", vec!["run".into(), "test:unit".into()]),
+        ("npm", vec!["install".into(), "zod@~3.23.0".into()]),
         (
             "pnpm",
-            vec!["--filter".into(), "@app/web".into(), "run".into(), "check:ci".into()],
+            vec![
+                "--filter".into(),
+                "@app/web".into(),
+                "run".into(),
+                "check:ci".into(),
+            ],
         ),
         (
             "yarn",
-            vec!["run".into(), "test".into(), "--".into(), "--reporter=verbose".into()],
+            vec![
+                "run".into(),
+                "test".into(),
+                "--".into(),
+                "--reporter=verbose".into(),
+            ],
         ),
     ] {
         let other = dir.path().join(format!("{program}.cmd"));
         std::fs::write(&other, "").unwrap();
         assert_eq!(
             resolve_windows_package_launcher(program, &args, dir.path().as_os_str()).unwrap(),
-            Some(other)
+            Some(WindowsLauncher::direct(other))
         );
     }
 
     assert_eq!(
-        resolve_windows_package_launcher(
-            "python",
-            &["--version".into()],
-            dir.path().as_os_str()
-        )
-        .unwrap(),
+        resolve_windows_package_launcher("python", &["--version".into()], dir.path().as_os_str())
+            .unwrap(),
         None
     );
 
@@ -414,6 +973,9 @@ fn package_manager_shims_allow_safe_custom_scripts_and_reject_unsafe_chars() {
         "foo|dir",
         "%COMSPEC%",
         "foo^bar",
+        "foo!bar",
+        "foo>out",
+        "foo<in",
         "\"quoted\"",
         "two words",
         "line\nbreak",
@@ -432,6 +994,7 @@ fn package_manager_shims_allow_safe_custom_scripts_and_reject_unsafe_chars() {
 #[cfg(all(windows, test))]
 #[test]
 fn package_manager_launcher_prefers_exe_over_cmd() {
+    use pm::security::{WindowsLauncher, resolve_windows_package_launcher};
     let dir = tempfile::tempdir().unwrap();
     let exe = dir.path().join("npm.exe");
     let cmd = dir.path().join("npm.cmd");
@@ -445,10 +1008,49 @@ fn package_manager_launcher_prefers_exe_over_cmd() {
         dir.path().as_os_str(),
     )
     .unwrap();
-    assert_eq!(resolved, Some(exe));
+    assert_eq!(resolved, Some(WindowsLauncher::direct(exe)));
 }
 
-fn worktree_command(
+#[cfg(all(windows, test))]
+#[test]
+fn package_manager_launcher_bypasses_cmd_via_node_and_cli_script() {
+    use pm::security::{WindowsLauncher, resolve_windows_package_launcher};
+    let dir = tempfile::tempdir().unwrap();
+    let node_exe = dir.path().join("node.exe");
+    std::fs::write(&node_exe, "").unwrap();
+
+    let npm_cmd = dir.path().join("npm.cmd");
+    let npm_cli = dir.path().join("node_modules/npm/bin/npm-cli.js");
+    std::fs::create_dir_all(npm_cli.parent().unwrap()).unwrap();
+    std::fs::write(&npm_cmd, "").unwrap();
+    std::fs::write(&npm_cli, "").unwrap();
+
+    let pnpm_cmd = dir.path().join("pnpm.cmd");
+    let pnpm_cli = dir.path().join("node_modules/pnpm/bin/pnpm.cjs");
+    std::fs::create_dir_all(pnpm_cli.parent().unwrap()).unwrap();
+    std::fs::write(&pnpm_cmd, "").unwrap();
+    std::fs::write(&pnpm_cli, "").unwrap();
+
+    // Complex args (^, ~, spaces, [id], *) work safely because node.exe bypasses cmd.exe.
+    let rich_args = vec![
+        "install".into(),
+        "react@^18.3.0".into(),
+        "zod@~3.23.0".into(),
+        "--testNamePattern=auth flow".into(),
+        "src/[id]/page.test.ts".into(),
+        "./packages/*".into(),
+    ];
+    assert_eq!(
+        resolve_windows_package_launcher("npm", &rich_args, dir.path().as_os_str()).unwrap(),
+        Some(WindowsLauncher::with_script(node_exe.clone(), npm_cli))
+    );
+    assert_eq!(
+        resolve_windows_package_launcher("pnpm", &rich_args, dir.path().as_os_str()).unwrap(),
+        Some(WindowsLauncher::with_script(node_exe, pnpm_cli))
+    );
+}
+
+pub(crate) fn worktree_command(
     program: impl AsRef<std::ffi::OsStr>,
     worktree_path: &Path,
     cargo_target_dir: Option<&Path>,
@@ -456,10 +1058,16 @@ fn worktree_command(
     let program = program.as_ref();
     let mut command = Command::new(program);
     command.current_dir(worktree_path).stdin(Stdio::null());
-    for key in ["VIRTUAL_ENV", "CONDA_PREFIX", "UV_PROJECT", "UV_WORKING_DIRECTORY"] {
+    for key in [
+        "VIRTUAL_ENV",
+        "CONDA_PREFIX",
+        "UV_PROJECT",
+        "UV_WORKING_DIRECTORY",
+    ] {
         command.env_remove(key);
     }
     command.env("UV_PROJECT_ENVIRONMENT", worktree_path.join(".venv"));
+    command.env("PYTHONUNBUFFERED", "1");
     if Path::new(program)
         .file_stem()
         .and_then(|name| name.to_str())
@@ -485,18 +1093,27 @@ fn cargo_outputs_share_isolated_worktree_target_dir() {
     let shared_target = sandbox.shared_cargo_target_dir().unwrap();
     assert_eq!(
         shared_target,
-        std::path::absolute(&worktrees_base).unwrap().join("cargo-target")
+        std::path::absolute(&worktrees_base)
+            .unwrap()
+            .join("cargo-target")
     );
     assert_ne!(shared_target, repo_root.join("target"));
     assert_ne!(shared_target, checkout.join("target"));
     for program in ["cargo", "cargo.exe"] {
         let cmd = worktree_command(program, &checkout, Some(&shared_target));
-        assert!(cmd.as_std().get_envs().any(|(key, value)|
-            key == OsStr::new("CARGO_TARGET_DIR") && value == Some(shared_target.as_os_str())));
+        assert!(
+            cmd.as_std()
+                .get_envs()
+                .any(|(key, value)| key == OsStr::new("CARGO_TARGET_DIR")
+                    && value == Some(shared_target.as_os_str()))
+        );
     }
 }
 
-fn preset_args(preset: &CommandPreset, params: &BTreeMap<String, String>) -> RelayResult<Vec<String>> {
+fn preset_args(
+    preset: &CommandPreset,
+    params: &BTreeMap<String, String>,
+) -> RelayResult<Vec<String>> {
     for key in params.keys() {
         if !preset.allowed_params.contains(key) {
             return Err(RelayError::Internal(format!(
@@ -512,9 +1129,7 @@ fn preset_args(preset: &CommandPreset, params: &BTreeMap<String, String>) -> Rel
         if let Some(flag) = arg.strip_prefix("--") {
             let key = flag.split_once('=').map_or(flag, |(key, _)| key);
             if let Some(value) = params.get(key) {
-                if flag == key
-                    && defaults.peek().is_some_and(|next| !next.starts_with("--"))
-                {
+                if flag == key && defaults.peek().is_some_and(|next| !next.starts_with("--")) {
                     defaults.next();
                 }
                 if replaced.insert(key) {
@@ -531,40 +1146,6 @@ fn preset_args(preset: &CommandPreset, params: &BTreeMap<String, String>) -> Rel
         }
     }
     Ok(args)
-}
-
-async fn add_uv_dependency(worktree_path: &Path, spec: &str) -> RelayResult<()> {
-    for filename in ["pyproject.toml", "uv.lock"] {
-        match tokio::fs::symlink_metadata(worktree_path.join(filename)).await {
-            Ok(metadata) if !metadata.is_file() => {
-                return Err(RelayError::Uv(format!("{filename} must be a regular file")));
-            }
-            Ok(_) => {}
-            Err(error) if filename == "uv.lock" && error.kind() == io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error.into()),
-        }
-    }
-
-    let output = worktree_command("uv", worktree_path, None)
-        .args(["add", "--no-sync", "--", spec])
-        .stdin(Stdio::null())
-        .kill_on_drop(true)
-        .output()
-        .await?;
-    if !output.status.success() {
-        return Err(RelayError::Uv(
-            String::from_utf8_lossy(&output.stderr).trim().to_owned(),
-        ));
-    }
-    // A lockfile generated from scratch must also appear in the proposal.
-    git_output(git_command(worktree_path).args([
-        "add",
-        "--intent-to-add",
-        "--",
-        "uv.lock",
-    ]))
-    .await?;
-    Ok(())
 }
 
 /// Keep the baseline working tree and index private to this attempt. A preflight
@@ -696,7 +1277,7 @@ async fn prepare_file_edits(
 ) -> RelayResult<BTreeMap<PathBuf, StagedEditFile>> {
     if edits.is_empty() {
         return Err(RelayError::Internal(
-            "file_edits requires at least one edit entry".into(),
+            "code_diff requires at least one edit entry".into(),
         ));
     }
     let canonical_root = std::fs::canonicalize(worktree_path)?;
@@ -705,6 +1286,11 @@ async fn prepare_file_edits(
         let edit_num = idx + 1;
         let rel = validate_confined_relative_path(&edit.file_path)?;
         let display_path = rel_display_path(&rel);
+        if display_path.eq_ignore_ascii_case("relay.toml") {
+            return Err(RelayError::Internal(
+                "editing 'relay.toml' is blocked in code_diff patches because host relay.toml is the execution policy authority".into(),
+            ));
+        }
         if edit.old_text.as_deref() == Some("") {
             return Err(RelayError::Internal(format!(
                 "edit #{edit_num} for '{display_path}': old_text must not be empty; omit old_text to overwrite or create the file"
@@ -910,7 +1496,11 @@ fn apply_unique_replacement(
 }
 
 fn byte_offset_to_line(content: &str, byte_offset: usize) -> usize {
-    content[..byte_offset].bytes().filter(|&b| b == b'\n').count() + 1
+    content[..byte_offset]
+        .bytes()
+        .filter(|&b| b == b'\n')
+        .count()
+        + 1
 }
 
 #[cfg(test)]
@@ -1108,7 +1698,10 @@ fn parse_colon_file_line_refs(line: &str) -> Vec<(String, u32)> {
     let mut results = Vec::new();
     for raw_token in line.split_whitespace() {
         let token = raw_token.trim_matches(|c: char| {
-            matches!(c, '(' | ')' | '[' | ']' | '{' | '}' | ',' | ';' | '\'' | '"' | '`')
+            matches!(
+                c,
+                '(' | ')' | '[' | ']' | '{' | '}' | ',' | ';' | '\'' | '"' | '`'
+            )
         });
         if token.is_empty() || token.contains("://") {
             continue;
@@ -1150,7 +1743,10 @@ fn split_path_and_line(token: &str) -> Option<(&str, u32)> {
     };
 
     let path_len = min_colon
-        + parts[..path_end_parts].iter().map(|p| p.len()).sum::<usize>()
+        + parts[..path_end_parts]
+            .iter()
+            .map(|p| p.len())
+            .sum::<usize>()
         + path_end_parts.saturating_sub(1);
     let path = &token[..path_len];
     if path.is_empty() || (!path.contains('/') && !path.contains('\\') && !path.contains('.')) {
@@ -1204,11 +1800,20 @@ fn resolve_snippet_target(canonical_root: &Path, raw_path: &str) -> Option<(Stri
         std::fs::canonicalize(canonical_root.join(rel)).ok()?
     };
     let resolved = full.strip_prefix(canonical_root).ok()?;
+    let mut parts = Vec::new();
     for component in resolved.components() {
         let Component::Normal(part) = component else {
             return None;
         };
+        parts.push(part);
+    }
+    if parts.is_empty() {
+        return None;
+    }
+    let last_idx = parts.len() - 1;
+    for (idx, part) in parts.into_iter().enumerate() {
         let name = part.to_string_lossy().to_ascii_lowercase();
+        let is_last = idx == last_idx;
         if matches!(
             name.as_str(),
             ".git"
@@ -1218,12 +1823,8 @@ fn resolve_snippet_target(canonical_root: &Path, raw_path: &str) -> Option<(Stri
                 | ".relay-desktop"
                 | "node_modules"
                 | "__pycache__"
-        ) || name.starts_with(".env")
-            || name.ends_with(".db")
-            || name.ends_with(".db-wal")
-            || name.ends_with(".db-shm")
-            || name.ends_with(".pem")
-            || name.ends_with(".key")
+        ) || is_blocked_env_name(&name)
+            || (is_last && is_blocked_secret_file_extension(&name))
         {
             return None;
         }
@@ -1233,18 +1834,6 @@ fn resolve_snippet_target(canonical_root: &Path, raw_path: &str) -> Option<(Stri
     }
     let display = rel_display_path(resolved);
     (!display.is_empty()).then_some((display, full))
-}
-
-/// Extract the last missing-module diagnostic from a Python traceback.
-pub fn detect_missing_python_module(stderr: &str) -> Option<String> {
-    stderr.lines().rev().find_map(|line| {
-        let module = line
-            .trim_start()
-            .strip_prefix("ModuleNotFoundError: No module named '")?
-            .split_once('\'')?
-            .0;
-        (!module.is_empty()).then(|| module.to_owned())
-    })
 }
 
 pub fn extract_metrics_json(stdout: &str) -> Option<JsonValue> {

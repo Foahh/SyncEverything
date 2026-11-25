@@ -12,7 +12,15 @@ import {
 import { Field, FieldDescription, FieldGroup, FieldLabel, FieldTitle } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { buildMcpSnippet, type McpClientId } from "@/lib/mcpConfig";
+import {
+  buildMcpSnippet,
+  computeJsonLineDiff,
+  DEFAULT_MCP_HTTP_URL,
+  getMcpClientConfigPath,
+  toProjectMcpClient,
+  validateMcpHttpUrl,
+  type McpClientId,
+} from "@/lib/mcpConfig";
 import { cn } from "@/lib/utils";
 import {
   AlertCircle,
@@ -22,11 +30,15 @@ import {
   Cpu,
   Eye,
   EyeOff,
+  FileCode2,
   FilePlus2,
   FolderGit2,
   FolderOpen,
+  Globe,
   Info,
   RefreshCw,
+  RotateCcw,
+  ShieldCheck,
   SlidersHorizontal,
   Sparkles,
   Terminal,
@@ -38,16 +50,26 @@ import type {
   InferenceTier,
   LlmSettingsUpdate_Deserialize,
   LlmSettingsView_Serialize,
+  McpTransportMode,
+  ProjectMcpConfigPreview_Serialize,
+  ProjectMcpConfigRequest_Deserialize,
+  ProjectMcpFileStatus,
   WorkspaceInfo_Serialize,
 } from "../../bindings";
-import { formatErrorMessage } from "../../lib/formatError";
+import {
+  formatErrorMessage,
+  formatLlmProbeMessage,
+  isMcpPreviewChangedError,
+} from "../../lib/formatError";
 import {
   useInitWorkspaceManifest,
   useLlmSettings,
   useOpenWorkspaceRepo,
+  usePreviewProjectMcpConfig,
   useRefreshGitHead,
   useSaveLlmSettings,
   useWorkspaceInfo,
+  useWriteProjectMcpConfig,
 } from "../../lib/queries";
 import { isTauriRuntime, relayApi } from "../../lib/relayApi";
 
@@ -64,6 +86,12 @@ interface WorkspaceSettingsModalProps {
 interface FeedbackState {
   ok: boolean;
   text: string;
+}
+
+interface StatusBannerAction {
+  label: string;
+  onClick: () => void;
+  disabled?: boolean;
 }
 
 const TIER_DEFAULTS: Record<InferenceTier, { baseUrl: string; model: string }> = {
@@ -92,13 +120,46 @@ const REASONING_EFFORT_OPTIONS = [
   { value: "high", labelKey: "modals.workspace.reasoningEffortOption.high" },
 ] as const;
 
-const MCP_CLIENTS: Array<{ id: McpClientId; label: string; configPath: string }> = [
-  { id: "claude", label: "Claude Code", configPath: ".mcp.json / ~/.claude.json" },
-  { id: "cursor", label: "Cursor", configPath: ".cursor/mcp.json" },
-  { id: "codex", label: "Codex CLI", configPath: "~/.codex/config.toml" },
+const MCP_CLIENTS: Array<{
+  id: McpClientId;
+  label: string;
+  configPath: string;
+  writable: boolean;
+}> = [
+  {
+    id: "claude",
+    label: "Claude Code",
+    configPath: getMcpClientConfigPath("claude"),
+    writable: true,
+  },
+  {
+    id: "cursor",
+    label: "Cursor",
+    configPath: getMcpClientConfigPath("cursor"),
+    writable: true,
+  },
+  {
+    id: "codex",
+    label: "Codex CLI",
+    configPath: getMcpClientConfigPath("codex"),
+    writable: false,
+  },
 ];
 
-function StatusBanner({ feedback }: { feedback: FeedbackState | null }) {
+const MCP_STATUS_BADGE_CLASSES: Record<ProjectMcpFileStatus, string> = {
+  create_new: "bg-sky-500/12 text-sky-700 dark:bg-sky-500/20 dark:text-sky-300",
+  add_server: "bg-emerald-500/12 text-emerald-700 dark:bg-emerald-500/20 dark:text-emerald-300",
+  update_server: "bg-amber-500/12 text-amber-700 dark:bg-amber-500/20 dark:text-amber-300",
+  unchanged: "bg-muted text-muted-foreground",
+};
+
+function StatusBanner({
+  feedback,
+  action,
+}: {
+  feedback: FeedbackState | null;
+  action?: StatusBannerAction | null;
+}) {
   if (!feedback) return null;
   return (
     <Alert
@@ -117,9 +178,29 @@ function StatusBanner({ feedback }: { feedback: FeedbackState | null }) {
         <AlertCircle />
       )}
       <AlertDescription
-        className={feedback.ok ? "text-emerald-800 dark:text-emerald-200" : undefined}
+        className={cn(
+          "flex flex-col gap-2",
+          feedback.ok && "text-emerald-800 dark:text-emerald-200",
+        )}
       >
-        {feedback.text}
+        <span className="break-words">{feedback.text}</span>
+        {action && (
+          <div>
+            <Button
+              type="button"
+              variant="outline"
+              size="xs"
+              disabled={action.disabled}
+              onClick={action.onClick}
+            >
+              <RefreshCw
+                data-icon="inline-start"
+                className={action.disabled ? "animate-spin" : undefined}
+              />
+              <span className="relay-text-trim leading-none">{action.label}</span>
+            </Button>
+          </div>
+        )}
       </AlertDescription>
     </Alert>
   );
@@ -151,7 +232,10 @@ function RepositorySettingsTab({
         setRepoPath(selected);
       }
     } catch (err) {
-      setFeedback({ ok: false, text: formatErrorMessage(err, t, "Unable to open folder dialog.") });
+      setFeedback({
+        ok: false,
+        text: formatErrorMessage(err, t, t("modals.workspace.errors.pickFolder")),
+      });
     } finally {
       setIsPicking(false);
     }
@@ -168,7 +252,10 @@ function RepositorySettingsTab({
         setFeedback({ ok: true, text: t("modals.workspace.repoOpened") });
       },
       onError: (err) => {
-        setFeedback({ ok: false, text: formatErrorMessage(err, t, "Could not open repository.") });
+        setFeedback({
+          ok: false,
+          text: formatErrorMessage(err, t, t("modals.workspace.errors.openRepo")),
+        });
       },
     });
   };
@@ -182,7 +269,7 @@ function RepositorySettingsTab({
       onError: (err) => {
         setFeedback({
           ok: false,
-          text: formatErrorMessage(err, t, "Could not generate relay.toml."),
+          text: formatErrorMessage(err, t, t("modals.workspace.errors.generateManifest")),
         });
       },
     });
@@ -198,7 +285,10 @@ function RepositorySettingsTab({
         });
       },
       onError: (err) => {
-        setFeedback({ ok: false, text: formatErrorMessage(err, t, "Git sync failed.") });
+        setFeedback({
+          ok: false,
+          text: formatErrorMessage(err, t, t("modals.workspace.errors.syncGit")),
+        });
       },
     });
   };
@@ -227,20 +317,22 @@ function RepositorySettingsTab({
                 : t("modals.workspace.noRepoSelected")}
             </span>
           </div>
-          <Badge
-            variant={workspace?.is_git_repo ? "secondary" : "outline"}
-            className={
-              workspace?.is_git_repo
-                ? "bg-emerald-500/12 text-emerald-700 dark:bg-emerald-500/20 dark:text-emerald-300"
-                : undefined
-            }
-          >
-            <span className="relay-text-trim leading-none">
-              {workspace?.is_git_repo
-                ? t("modals.workspace.watchingGit")
-                : t("modals.workspace.notGitRepo")}
-            </span>
-          </Badge>
+          {workspace?.repo_root && (
+            <Badge
+              variant={workspace.is_git_repo ? "secondary" : "outline"}
+              className={
+                workspace.is_git_repo
+                  ? "bg-emerald-500/12 text-emerald-700 dark:bg-emerald-500/20 dark:text-emerald-300"
+                  : undefined
+              }
+            >
+              <span className="relay-text-trim leading-none">
+                {workspace.is_git_repo
+                  ? t("modals.workspace.watchingGit")
+                  : t("modals.workspace.notGitRepo")}
+              </span>
+            </Badge>
+          )}
         </div>
 
         {workspace?.repo_root && (
@@ -253,26 +345,28 @@ function RepositorySettingsTab({
           </div>
         )}
 
-        <div className="flex flex-col gap-1.5">
-          <span className="text-[11px] font-medium text-muted-foreground">
-            {t("modals.workspace.presetsDiscovered")}
-          </span>
-          {workspace && workspace.presets.length > 0 ? (
-            <div className="flex flex-wrap gap-1.5">
-              {workspace.presets.map((preset) => (
-                <Badge key={preset.name} variant="outline" className="font-mono-tech">
-                  <span lang="en" className="relay-text-trim leading-none">
-                    {preset.name}
-                  </span>
-                </Badge>
-              ))}
-            </div>
-          ) : (
-            <span className="text-[11px] text-muted-foreground">
-              {t("modals.workspace.noPresets")}
+        {workspace?.repo_root && workspace.has_manifest && (
+          <div className="flex flex-col gap-1.5">
+            <span className="text-[11px] font-medium text-muted-foreground">
+              {t("modals.workspace.presetsDiscovered")}
             </span>
-          )}
-        </div>
+            {workspace.presets.length > 0 ? (
+              <div className="flex flex-wrap gap-1.5">
+                {workspace.presets.map((preset) => (
+                  <Badge key={preset.name} variant="outline" className="font-mono-tech">
+                    <span lang="en" className="relay-text-trim leading-none">
+                      {preset.name}
+                    </span>
+                  </Badge>
+                ))}
+              </div>
+            ) : (
+              <span className="text-[11px] text-muted-foreground">
+                {t("modals.workspace.noPresets")}
+              </span>
+            )}
+          </div>
+        )}
 
         {needsManifest && (
           <div className="flex items-center justify-between gap-2 rounded-md border border-dashed border-primary/40 bg-background/80 px-2.5 py-2">
@@ -420,7 +514,10 @@ function LlmSettingsTab({ initial }: { initial: LlmSettingsView_Serialize }) {
         setFeedback({ ok: true, text: t("modals.workspace.savedSuccess") });
       },
       onError: (err) => {
-        setFeedback({ ok: false, text: formatErrorMessage(err, t) });
+        setFeedback({
+          ok: false,
+          text: formatErrorMessage(err, t, t("modals.workspace.errors.saveLlm")),
+        });
       },
     });
   };
@@ -430,9 +527,12 @@ function LlmSettingsTab({ initial }: { initial: LlmSettingsView_Serialize }) {
     setIsTesting(true);
     try {
       const probe = await relayApi.testLlmConnection(buildUpdate());
-      setFeedback({ ok: probe.ok, text: probe.message });
+      setFeedback({ ok: probe.ok, text: formatLlmProbeMessage(probe.message, t) });
     } catch (err) {
-      setFeedback({ ok: false, text: formatErrorMessage(err, t) });
+      setFeedback({
+        ok: false,
+        text: formatErrorMessage(err, t, t("modals.workspace.errors.testLlm")),
+      });
     } finally {
       setIsTesting(false);
     }
@@ -660,29 +760,150 @@ function LlmSettingsTab({ initial }: { initial: LlmSettingsView_Serialize }) {
 function McpConfigTab({ workspace }: { workspace?: WorkspaceInfo_Serialize }) {
   const { t } = useTranslation();
   const [client, setClient] = useState<McpClientId>("claude");
-  const [feedback, setFeedback] = useState<{ snippet: string; ok: boolean } | null>(null);
+  const [transport, setTransport] = useState<McpTransportMode>("stdio");
+  const [httpUrl, setHttpUrl] = useState(DEFAULT_MCP_HTTP_URL);
+  const [copyFeedback, setCopyFeedback] = useState<{ snippet: string; ok: boolean } | null>(null);
+  const [previewState, setPreviewState] = useState<{
+    key: string;
+    data: ProjectMcpConfigPreview_Serialize;
+  } | null>(null);
+  const [writeFeedback, setWriteFeedback] = useState<
+    (FeedbackState & { needsRefresh?: boolean }) | null
+  >(null);
+
+  const previewMutation = usePreviewProjectMcpConfig();
+  const writeMutation = useWriteProjectMcpConfig();
+  const isDesktop = isTauriRuntime();
 
   const selectedClient = MCP_CLIENTS.find((item) => item.id === client) ?? MCP_CLIENTS[0];
-  const snippet = buildMcpSnippet(client, workspace);
-  const copied = feedback?.snippet === snippet && feedback.ok;
+  const projectClient = toProjectMcpClient(client);
+  const httpValidation = validateMcpHttpUrl(httpUrl);
+  const snippet = buildMcpSnippet(client, workspace, {
+    transport,
+    httpUrl: transport === "streamable_http" ? httpUrl : null,
+  });
+  const copied = copyFeedback?.snippet === snippet && copyFeedback.ok;
+
+  const currentRequestKey = JSON.stringify([
+    workspace?.repo_root,
+    workspace?.repo_id,
+    workspace?.mcp_data_dir,
+    client,
+    transport,
+    transport === "streamable_http" ? httpUrl.trim() : null,
+  ]);
+  const activePreview =
+    previewState && previewState.key === currentRequestKey ? previewState.data : null;
+
+  const canPreviewProject =
+    projectClient !== null &&
+    Boolean(workspace?.repo_root) &&
+    (transport === "stdio" ? Boolean(workspace?.mcp_data_dir) : httpValidation.ok);
+
+  const diffLines =
+    activePreview && activePreview.existing_content !== null && activePreview.status !== "unchanged"
+      ? computeJsonLineDiff(activePreview.existing_content, activePreview.merged_content)
+      : null;
 
   useEffect(() => {
-    if (!feedback?.ok) return;
+    if (!copyFeedback?.ok) return;
     const id = window.setTimeout(() => {
-      setFeedback((current) => (current?.ok ? null : current));
+      setCopyFeedback((current) => (current?.ok ? null : current));
     }, 1800);
     return () => window.clearTimeout(id);
-  }, [feedback]);
+  }, [copyFeedback]);
+
+  const buildProjectRequest = (): ProjectMcpConfigRequest_Deserialize | null => {
+    if (!projectClient) return null;
+    return {
+      client: projectClient,
+      transport,
+      http_url: transport === "streamable_http" ? httpUrl.trim() : null,
+    };
+  };
 
   const handleCopy = async () => {
     if (!snippet) return;
     try {
       await navigator.clipboard.writeText(snippet);
-      setFeedback({ snippet, ok: true });
+      setCopyFeedback({ snippet, ok: true });
     } catch {
-      setFeedback({ snippet, ok: false });
+      setCopyFeedback({ snippet, ok: false });
     }
   };
+
+  const handlePreviewProject = () => {
+    const request = buildProjectRequest();
+    if (!request) return;
+    const requestKey = currentRequestKey;
+    setWriteFeedback(null);
+    previewMutation.mutate(request, {
+      onSuccess: (data) => {
+        setPreviewState({ key: requestKey, data });
+      },
+      onError: (err) => {
+        setPreviewState(null);
+        setWriteFeedback({
+          ok: false,
+          text: formatErrorMessage(err, t, t("modals.workspace.errors.previewMcp")),
+        });
+      },
+    });
+  };
+
+  const handleConfirmWrite = () => {
+    const request = buildProjectRequest();
+    if (!request || !activePreview) return;
+    const requestKey = currentRequestKey;
+    setWriteFeedback(null);
+    writeMutation.mutate(
+      {
+        request,
+        confirmation: {
+          target_path: activePreview.target_path,
+          existing_content: activePreview.existing_content,
+          merged_content: activePreview.merged_content,
+        },
+      },
+      {
+        onSuccess: (result) => {
+          setWriteFeedback({
+            ok: true,
+            text: result.created
+              ? t("modals.workspace.mcpWriteSuccessCreated", { path: result.relative_path })
+              : t("modals.workspace.mcpWriteSuccessUpdated", { path: result.relative_path }),
+          });
+          setPreviewState({
+            key: requestKey,
+            data: {
+              ...activePreview,
+              file_exists: true,
+              status: "unchanged",
+              existing_content: result.written_content,
+              merged_content: result.written_content,
+            },
+          });
+        },
+        onError: (err) => {
+          setPreviewState(null);
+          setWriteFeedback({
+            ok: false,
+            text: formatErrorMessage(err, t, t("modals.workspace.errors.writeMcp")),
+            needsRefresh: isMcpPreviewChangedError(err),
+          });
+        },
+      },
+    );
+  };
+
+  const httpValidationErrorText = httpValidation.ok
+    ? null
+    : t(`modals.workspace.mcpHttpUrlErrors.${httpValidation.code}`);
+
+  const snippetFallback =
+    transport === "streamable_http" && httpValidationErrorText
+      ? httpValidationErrorText
+      : t("modals.workspace.mcpOpenRepo");
 
   return (
     <div className="flex flex-col gap-3.5">
@@ -690,41 +911,156 @@ function McpConfigTab({ workspace }: { workspace?: WorkspaceInfo_Serialize }) {
         {t("modals.workspace.mcpDesc")}
       </p>
 
-      <div className="grid grid-cols-3 gap-2">
-        {MCP_CLIENTS.map((item) => {
-          const active = item.id === client;
-          return (
-            <button
-              key={item.id}
-              type="button"
-              onClick={() => setClient(item.id)}
-              aria-pressed={active}
-              className={cn(
-                "cursor-pointer rounded-lg border px-2.5 py-2 text-left transition-all",
-                active
-                  ? "border-primary bg-primary/8 ring-1 ring-primary/25"
-                  : "border-border bg-muted/40 hover:border-foreground/20",
-              )}
-            >
-              <div className="flex items-center gap-1.5 text-xs font-semibold text-foreground">
-                <Terminal className="size-3.5 shrink-0 text-primary" />
-                <span lang="en" className="relay-text-trim truncate leading-none">
-                  {item.label}
-                </span>
-              </div>
-              <div
-                lang="en"
-                className="font-mono-tech mt-1 truncate text-[10px] text-muted-foreground"
+      <div className="flex flex-col gap-1.5">
+        <span className="text-[11px] font-medium text-muted-foreground">
+          {t("modals.workspace.mcpClientLabel")}
+        </span>
+        <div className="grid grid-cols-3 gap-2">
+          {MCP_CLIENTS.map((item) => {
+            const active = item.id === client;
+            return (
+              <button
+                key={item.id}
+                type="button"
+                onClick={() => {
+                  setClient(item.id);
+                  setWriteFeedback(null);
+                }}
+                aria-pressed={active}
+                className={cn(
+                  "cursor-pointer rounded-lg border px-2.5 py-2 text-left transition-all",
+                  active
+                    ? "border-primary bg-primary/8 ring-1 ring-primary/25"
+                    : "border-border bg-muted/40 hover:border-foreground/20",
+                )}
               >
-                {item.configPath}
-              </div>
-            </button>
-          );
-        })}
+                <div className="flex items-center justify-between gap-1">
+                  <div className="flex min-w-0 items-center gap-1.5 text-xs font-semibold text-foreground">
+                    <Terminal className="size-3.5 shrink-0 text-primary" />
+                    <span lang="en" className="relay-text-trim truncate leading-none">
+                      {item.label}
+                    </span>
+                  </div>
+                </div>
+                <div
+                  lang="en"
+                  className="font-mono-tech mt-1 truncate text-[10px] text-muted-foreground"
+                >
+                  {item.configPath}
+                </div>
+                <div className="mt-1.5">
+                  <Badge variant={item.writable ? "secondary" : "outline"} className="text-[10px]">
+                    <span className="relay-text-trim leading-none">
+                      {item.writable
+                        ? t("modals.workspace.mcpProjectWriteBadge")
+                        : t("modals.workspace.mcpCopyOnlyBadge")}
+                    </span>
+                  </Badge>
+                </div>
+              </button>
+            );
+          })}
+        </div>
       </div>
 
       <div className="flex flex-col gap-1.5">
-        <div className="flex items-center justify-between text-[11px] text-muted-foreground">
+        <span className="text-[11px] font-medium text-muted-foreground">
+          {t("modals.workspace.mcpTransportLabel")}
+        </span>
+        <div className="grid grid-cols-2 gap-2">
+          {(
+            [
+              {
+                id: "stdio",
+                icon: Terminal,
+                titleKey: "modals.workspace.mcpTransportStdio",
+                descKey: "modals.workspace.mcpTransportStdioDesc",
+              },
+              {
+                id: "streamable_http",
+                icon: Globe,
+                titleKey: "modals.workspace.mcpTransportHttp",
+                descKey: "modals.workspace.mcpTransportHttpDesc",
+              },
+            ] as const
+          ).map((option) => {
+            const active = transport === option.id;
+            const Icon = option.icon;
+            return (
+              <button
+                key={option.id}
+                type="button"
+                aria-pressed={active}
+                onClick={() => {
+                  setTransport(option.id);
+                  setWriteFeedback(null);
+                }}
+                className={cn(
+                  "cursor-pointer rounded-lg border px-2.5 py-2 text-left transition-all",
+                  active
+                    ? "border-primary bg-primary/8 ring-1 ring-primary/25"
+                    : "border-border bg-muted/40 hover:border-foreground/20",
+                )}
+              >
+                <div className="flex items-center gap-1.5 text-xs font-semibold text-foreground">
+                  <Icon className="size-3.5 shrink-0 text-primary" />
+                  <span className="relay-text-trim leading-none">{t(option.titleKey)}</span>
+                </div>
+                <p className="mt-1 text-[10px] leading-snug text-muted-foreground">
+                  {t(option.descKey)}
+                </p>
+              </button>
+            );
+          })}
+        </div>
+      </div>
+
+      {transport === "streamable_http" && (
+        <Field>
+          <div className="flex items-center justify-between gap-2">
+            <FieldLabel htmlFor="mcp-http-url">{t("modals.workspace.mcpHttpUrlLabel")}</FieldLabel>
+            {httpUrl !== DEFAULT_MCP_HTTP_URL && (
+              <button
+                type="button"
+                onClick={() => {
+                  setHttpUrl(DEFAULT_MCP_HTTP_URL);
+                  setWriteFeedback(null);
+                }}
+                className="inline-flex cursor-pointer items-center gap-1 text-[11px] text-muted-foreground hover:text-foreground"
+              >
+                <RotateCcw className="size-3 shrink-0" />
+                <span className="relay-text-trim leading-none">
+                  {t("modals.workspace.mcpHttpUrlReset")}
+                </span>
+              </button>
+            )}
+          </div>
+          <Input
+            id="mcp-http-url"
+            name="mcp_http_url"
+            type="url"
+            value={httpUrl}
+            onChange={(e) => {
+              setHttpUrl(e.target.value);
+              setWriteFeedback(null);
+            }}
+            placeholder={DEFAULT_MCP_HTTP_URL}
+            aria-invalid={!httpValidation.ok}
+            autoCorrect="off"
+            autoCapitalize="none"
+            spellCheck={false}
+            className="font-mono-tech text-xs"
+          />
+          {httpValidationErrorText ? (
+            <p className="text-[11px] leading-snug text-destructive">{httpValidationErrorText}</p>
+          ) : (
+            <FieldDescription>{t("modals.workspace.mcpHttpUrlHint")}</FieldDescription>
+          )}
+        </Field>
+      )}
+
+      <div className="flex flex-col gap-1.5">
+        <div className="flex items-center justify-between gap-2 text-[11px] text-muted-foreground">
           <span>
             {t("modals.workspace.mcpFileLabel")}{" "}
             <span lang="en" className="font-mono-tech text-foreground">
@@ -734,30 +1070,207 @@ function McpConfigTab({ workspace }: { workspace?: WorkspaceInfo_Serialize }) {
         </div>
         <pre
           lang="en"
-          className="font-mono-tech max-h-48 overflow-auto rounded-md border border-border bg-muted/60 p-3 text-[11px] leading-relaxed text-foreground"
+          className="font-mono-tech max-h-40 overflow-auto rounded-md border border-border bg-muted/60 p-3 text-[11px] leading-relaxed text-foreground"
         >
-          {snippet ?? t("modals.workspace.mcpOpenRepo")}
+          {snippet ?? snippetFallback}
         </pre>
       </div>
 
-      {feedback?.snippet === snippet && !feedback.ok && (
+      {copyFeedback?.snippet === snippet && !copyFeedback.ok && (
         <StatusBanner feedback={{ ok: false, text: t("modals.workspace.mcpCopyFailed") }} />
       )}
-      <Button
-        type="button"
-        size="lg"
-        className="w-full"
-        disabled={!snippet}
-        onClick={() => void handleCopy()}
-      >
-        {copied ? <Check data-icon="inline-start" /> : <Copy data-icon="inline-start" />}
-        <span className="relay-text-trim leading-none">
-          {copied ? t("modals.workspace.mcpCopiedBtn") : t("modals.workspace.mcpCopyBtn")}
-        </span>
-      </Button>
+
+      <div className="flex items-center gap-2">
+        <Button
+          type="button"
+          variant={projectClient ? "outline" : "default"}
+          size="lg"
+          className={projectClient ? "shrink-0" : "w-full"}
+          disabled={!snippet}
+          onClick={() => void handleCopy()}
+        >
+          {copied ? <Check data-icon="inline-start" /> : <Copy data-icon="inline-start" />}
+          <span className="relay-text-trim leading-none">
+            {copied ? t("modals.workspace.mcpCopiedBtn") : t("modals.workspace.mcpCopyBtn")}
+          </span>
+        </Button>
+
+        {projectClient && (
+          <Button
+            type="button"
+            size="lg"
+            className="flex-1"
+            disabled={!canPreviewProject || previewMutation.isPending || writeMutation.isPending}
+            onClick={handlePreviewProject}
+          >
+            <FileCode2 data-icon="inline-start" />
+            <span className="relay-text-trim leading-none">
+              {previewMutation.isPending
+                ? t("modals.workspace.mcpPreviewLoading")
+                : activePreview
+                  ? t("modals.workspace.mcpRefreshPreviewBtn")
+                  : t("modals.workspace.mcpPreviewBtn")}
+            </span>
+          </Button>
+        )}
+      </div>
+
+      {!projectClient && (
+        <Alert className="border-border bg-muted/40">
+          <Info className="text-primary" />
+          <AlertDescription className="text-[11px] leading-relaxed text-muted-foreground">
+            {t("modals.workspace.mcpCodexCopyOnlyNotice")}
+          </AlertDescription>
+        </Alert>
+      )}
+
+      {projectClient && !workspace?.repo_root && (
+        <p className="text-[11px] leading-relaxed text-muted-foreground">
+          {t("modals.workspace.mcpOpenRepoToWrite")}
+        </p>
+      )}
+
+      {activePreview && projectClient && (
+        <div className="flex flex-col gap-2.5 rounded-lg border border-primary/30 bg-muted/40 p-3">
+          <div className="flex items-center justify-between gap-2">
+            <div className="flex items-center gap-1.5 text-xs font-semibold text-foreground">
+              <ShieldCheck className="size-4 shrink-0 text-primary" />
+              <span className="relay-text-trim leading-none">
+                {t("modals.workspace.mcpPreviewTitle")}
+              </span>
+            </div>
+            <Badge variant="secondary" className={MCP_STATUS_BADGE_CLASSES[activePreview.status]}>
+              <span className="relay-text-trim leading-none">
+                {t(`modals.workspace.mcpStatus.${activePreview.status}`)}
+              </span>
+            </Badge>
+          </div>
+
+          <div className="flex flex-col gap-1">
+            <span className="text-[10px] font-medium text-muted-foreground">
+              {t("modals.workspace.mcpPreviewTargetLabel")}
+            </span>
+            <div
+              lang="en"
+              className="font-mono-tech truncate rounded-md bg-background/80 px-2 py-1 text-[11px] text-foreground"
+              title={activePreview.target_path}
+            >
+              {activePreview.target_path}
+            </div>
+          </div>
+
+          {activePreview.preserved_server_names.length > 0 && (
+            <p className="text-[11px] leading-snug text-emerald-700 dark:text-emerald-300">
+              {t("modals.workspace.mcpPreviewPreserved", {
+                servers: activePreview.preserved_server_names.join(", "),
+              })}
+            </p>
+          )}
+
+          {diffLines && (
+            <div className="flex flex-col gap-1">
+              <span className="text-[10px] font-medium text-muted-foreground">
+                {t("modals.workspace.mcpPreviewDiffLabel")}
+              </span>
+              <pre
+                lang="en"
+                className="font-mono-tech max-h-36 overflow-auto rounded-md border border-border bg-background/90 p-2 text-[11px] leading-relaxed"
+              >
+                {diffLines.map((line, index) => (
+                  <div
+                    key={`${index}-${line.kind}`}
+                    className={cn(
+                      "px-1.5 whitespace-pre",
+                      line.kind === "added" &&
+                        "bg-emerald-500/12 text-emerald-800 dark:text-emerald-300",
+                      line.kind === "removed" && "bg-destructive/12 text-destructive",
+                      line.kind === "context" && "text-muted-foreground",
+                    )}
+                  >
+                    {line.kind === "added" ? "+ " : line.kind === "removed" ? "- " : "  "}
+                    {line.text}
+                  </div>
+                ))}
+              </pre>
+            </div>
+          )}
+
+          <div className="flex flex-col gap-1">
+            <span className="text-[10px] font-medium text-muted-foreground">
+              {t("modals.workspace.mcpPreviewMergedLabel")}
+            </span>
+            <pre
+              lang="en"
+              className="font-mono-tech max-h-44 overflow-auto rounded-md border border-border bg-background/90 p-2.5 text-[11px] leading-relaxed text-foreground"
+            >
+              {activePreview.merged_content}
+            </pre>
+          </div>
+
+          {!isDesktop && (
+            <p className="text-[11px] leading-snug text-muted-foreground">
+              {t("modals.workspace.mcpPreviewBrowserHint")}
+            </p>
+          )}
+
+          {activePreview.status === "unchanged" && (
+            <p className="text-[11px] leading-snug text-muted-foreground">
+              {t("modals.workspace.mcpWriteUnchangedHint")}
+            </p>
+          )}
+
+          <div className="flex items-center justify-end gap-2 pt-0.5">
+            <Button
+              type="button"
+              variant="outline"
+              size="default"
+              disabled={writeMutation.isPending}
+              onClick={() => setPreviewState(null)}
+            >
+              <span className="relay-text-trim leading-none">
+                {t("modals.workspace.mcpCancelPreviewBtn")}
+              </span>
+            </Button>
+            <Button
+              type="button"
+              size="default"
+              disabled={
+                writeMutation.isPending ||
+                previewMutation.isPending ||
+                activePreview.status === "unchanged"
+              }
+              onClick={handleConfirmWrite}
+            >
+              <ShieldCheck data-icon="inline-start" />
+              <span className="relay-text-trim leading-none">
+                {writeMutation.isPending
+                  ? t("modals.workspace.mcpWritingBtn")
+                  : t("modals.workspace.mcpConfirmWriteBtn")}
+              </span>
+            </Button>
+          </div>
+        </div>
+      )}
+
+      <StatusBanner
+        feedback={writeFeedback}
+        action={
+          writeFeedback?.needsRefresh && canPreviewProject
+            ? {
+                label: previewMutation.isPending
+                  ? t("modals.workspace.mcpPreviewLoading")
+                  : t("modals.workspace.mcpRefreshPreviewBtn"),
+                onClick: handlePreviewProject,
+                disabled: previewMutation.isPending || writeMutation.isPending,
+              }
+            : null
+        }
+      />
 
       <p className="text-[11px] leading-relaxed text-muted-foreground">
-        {t("modals.workspace.mcpHttpHint")}
+        {transport === "stdio"
+          ? t("modals.workspace.mcpStdioHint")
+          : t("modals.workspace.mcpHttpHint")}
       </p>
     </div>
   );
@@ -776,7 +1289,7 @@ export function WorkspaceSettingsModal({
 
   return (
     <Dialog open={isOpen} onOpenChange={onOpenChange}>
-      <DialogContent className="max-h-[calc(100dvh-2rem)] overflow-y-auto sm:max-w-lg">
+      <DialogContent className="max-h-[calc(100dvh-2rem)] overflow-y-auto sm:max-w-xl">
         <DialogHeader>
           <div className="flex items-center gap-2.5">
             <div className="flex size-8 shrink-0 items-center justify-center rounded-md bg-primary/10 text-primary">
