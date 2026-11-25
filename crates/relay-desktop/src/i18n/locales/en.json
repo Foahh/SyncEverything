@@ -160,7 +160,8 @@
       "record_decision": "Saved decision note",
       "read_repo_file": "Read repository file",
       "git_diff": "Checked uncommitted Git diff",
-      "runningPrefix": "Running {{name}}…"
+      "runningPrefix": "Running {{name}}…",
+      "failed": "Tool failed · {{name}}"
     }
   },
   "modals": {
@@ -264,13 +265,14 @@
       "apiKeyEnvLabel": "Or read key from environment variable (optional)",
       "apiKeyEnvPlaceholder": "e.g., DEEPSEEK_API_KEY or OPENAI_API_KEY",
       "reasoningEffortLabel": "Reasoning effort",
-      "reasoningEffortHint": "Local Ollama and Edge tiers default to Off (none) for faster tool calling unless overridden.",
+      "reasoningEffortHint": "Local Ollama and Edge default to Off. Cloud uses the provider’s setting.",
       "reasoningEffortOption": {
-        "default": "Auto",
+        "default": "Use tier default",
         "none": "Off",
         "low": "Low",
         "medium": "Medium",
-        "high": "High"
+        "high": "High",
+        "auto": "Let the provider choose"
       },
       "testBtn": "Test Connection",
       "testingBtn": "Testing…",
@@ -290,6 +292,7 @@
     "manifestAlreadyExists": "relay.toml already exists in this repository.",
     "openRepoFirst": "Open a local Git repository first.",
     "repoPathEmpty": "Enter a local repository folder path.",
-    "runtimeShuttingDown": "SyncEverything is shutting down. Please try again shortly."
+    "runtimeShuttingDown": "SyncEverything is shutting down. Please try again shortly.",
+    "copilotToolLimit": "The model reached the tool-call limit before finishing."
   }
 }

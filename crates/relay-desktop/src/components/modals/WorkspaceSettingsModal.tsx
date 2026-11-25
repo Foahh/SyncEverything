@@ -85,6 +85,7 @@ const TIER_ORDER: InferenceTier[] = ["host_local_ollama", "cloud_open_ai_compat"
 
 const REASONING_EFFORT_OPTIONS = [
   { value: "", labelKey: "modals.workspace.reasoningEffortOption.default" },
+  { value: "auto", labelKey: "modals.workspace.reasoningEffortOption.auto" },
   { value: "none", labelKey: "modals.workspace.reasoningEffortOption.none" },
   { value: "low", labelKey: "modals.workspace.reasoningEffortOption.low" },
   { value: "medium", labelKey: "modals.workspace.reasoningEffortOption.medium" },
@@ -561,31 +562,31 @@ function LlmSettingsTab({ initial }: { initial: LlmSettingsView_Serialize }) {
         </Field>
 
         <Field>
-          <FieldTitle>{t("modals.workspace.reasoningEffortLabel")}</FieldTitle>
-          <FieldDescription>{t("modals.workspace.reasoningEffortHint")}</FieldDescription>
-          <div className="grid grid-cols-5 gap-1.5">
-            {REASONING_EFFORT_OPTIONS.map((option) => {
-              const active = reasoningEffort === option.value;
-              return (
-                <button
-                  key={option.value || "default"}
-                  type="button"
-                  aria-pressed={active}
-                  onClick={() => setReasoningEffort(option.value)}
-                  className={cn(
-                    "cursor-pointer rounded-md border px-2 py-1.5 text-center text-[11px] font-medium transition-all",
-                    active
-                      ? "border-primary bg-primary/8 text-foreground ring-1 ring-primary/25"
-                      : "border-border bg-muted/40 text-muted-foreground hover:border-foreground/20 hover:text-foreground",
-                  )}
-                >
-                  <span className="relay-text-trim whitespace-nowrap leading-none">
-                    {t(option.labelKey)}
-                  </span>
-                </button>
-              );
-            })}
-          </div>
+          <FieldLabel id="llm-reasoning-label" htmlFor="llm-reasoning-effort">
+            {t("modals.workspace.reasoningEffortLabel")}
+          </FieldLabel>
+          <FieldDescription id="llm-reasoning-hint">
+            {t("modals.workspace.reasoningEffortHint")}
+          </FieldDescription>
+          <select
+            id="llm-reasoning-effort"
+            name="reasoning_effort"
+            aria-labelledby="llm-reasoning-label"
+            aria-describedby="llm-reasoning-hint"
+            value={reasoningEffort}
+            onChange={(event) => setReasoningEffort(event.target.value)}
+            className="h-8 w-full rounded-md border border-input bg-background px-2 text-sm focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/50"
+          >
+            {REASONING_EFFORT_OPTIONS.map((option) => (
+              <option key={option.value} value={option.value}>
+                {t(option.labelKey)}
+              </option>
+            ))}
+            {initial.reasoning_effort &&
+              !REASONING_EFFORT_OPTIONS.some(
+                (option) => option.value === initial.reasoning_effort,
+              ) && <option value={initial.reasoning_effort}>{initial.reasoning_effort}</option>}
+          </select>
         </Field>
 
         <Field>
@@ -746,7 +747,7 @@ export function WorkspaceSettingsModal({
 
   return (
     <Dialog open={isOpen} onOpenChange={onOpenChange}>
-      <DialogContent className="sm:max-w-lg">
+      <DialogContent className="max-h-[calc(100dvh-2rem)] overflow-y-auto sm:max-w-lg">
         <DialogHeader>
           <div className="flex items-center gap-2.5">
             <div className="flex size-8 shrink-0 items-center justify-center rounded-md bg-primary/10 text-primary">
@@ -787,12 +788,7 @@ export function WorkspaceSettingsModal({
           </TabsContent>
 
           <TabsContent value="llm">
-            {llmSettings && (
-              <LlmSettingsTab
-                key={`${llmSettings.base_url}|${llmSettings.model}|${llmSettings.has_api_key}|${llmSettings.reasoning_effort ?? ""}`}
-                initial={llmSettings}
-              />
-            )}
+            {llmSettings && <LlmSettingsTab initial={llmSettings} />}
           </TabsContent>
 
           <TabsContent value="mcp">

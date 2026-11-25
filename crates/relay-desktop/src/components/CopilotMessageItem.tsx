@@ -49,7 +49,10 @@ import type {
   AgentChatMessage_Serialize,
   AgentToolTrace_Serialize,
 } from "../bindings";
-import type { ApprovalInput } from "../lib/relayApi";
+import { useQuery } from "@tanstack/react-query";
+import { formatErrorMessage } from "../lib/formatError";
+import { relayKeys } from "../lib/queries";
+import { relayApi, type ApprovalInput } from "../lib/relayApi";
 
 const STREAMDOWN_PLUGINS = { cjk };
 
@@ -120,13 +123,15 @@ function CopilotToolRow({ trace }: { trace: AgentToolTrace_Serialize }) {
   const knownKey = KNOWN_TOOL_KEYS[trace.tool_name];
   const label = knownKey ? t(knownKey) : trace.tool_name;
   const isRunning = trace.status === "running";
+  const statusLabel =
+    trace.status === "error" ? t("copilot.tools.failed", { name: trace.tool_name }) : label;
   const lineStatus = isRunning ? "running" : trace.status === "error" ? "error" : undefined;
 
   const line = (
     <TraceLine status={lineStatus}>
       <TraceIcon>{toolIcon(trace.tool_name)}</TraceIcon>
       <TraceTitle>
-        {isRunning ? t("copilot.tools.runningPrefix", { name: label }) : label}
+        {isRunning ? t("copilot.tools.runningPrefix", { name: trace.tool_name }) : statusLabel}
       </TraceTitle>
       {trace.duration_ms != null && <TraceDescription>{trace.duration_ms}ms</TraceDescription>}
     </TraceLine>
@@ -184,6 +189,38 @@ function parseDiffLines(diff: string): ParsedDiffLine[] {
   });
 }
 
+const APPROVAL_BADGES = {
+  approved: { variant: "secondary", label: "copilot.approvalApproved" },
+  rejected: { variant: "outline", label: "copilot.approvalRejected" },
+  pending: { variant: "default", label: "copilot.approvalPending" },
+} as const;
+
+function ResolvedApprovalNote({
+  approved,
+  isPatchFix,
+}: {
+  approved: boolean;
+  isPatchFix: boolean;
+}) {
+  const { t } = useTranslation();
+  return (
+    <Marker className="px-0 py-0 text-[11.5px]">
+      <MarkerIcon>
+        {approved ? (
+          <CheckCircle2 className="text-emerald-600 dark:text-emerald-400" />
+        ) : (
+          <XCircle className="text-muted-foreground" />
+        )}
+      </MarkerIcon>
+      <MarkerContent>
+        {approved
+          ? t("copilot.approvalApprovedNote")
+          : t(isPatchFix ? "copilot.approvalRejectedNote" : "copilot.approvalRunRejectedNote")}
+      </MarkerContent>
+    </Marker>
+  );
+}
+
 function InlineApprovalCard({
   approval,
   onResolveApproval,
@@ -195,7 +232,16 @@ function InlineApprovalCard({
 }) {
   const { t } = useTranslation();
   const isPatchFix = approval.patch_id != null;
-  const cleanPreset = isPatchFix ? null : approval.summary.trim() || null;
+  const { data: preset } = useQuery({
+    queryKey: relayKeys.tasks(),
+    queryFn: relayApi.listTasks,
+    enabled: false, // The workspace owns the task query; observe its cached records.
+    select: (tasks) =>
+      tasks.find((task) => task.spec.task_id === approval.task_id)?.spec.command_preset,
+  });
+  const decision = approval.resolved;
+  const badge =
+    APPROVAL_BADGES[decision === "approved" || decision === "rejected" ? decision : "pending"];
   const diffLines = parseDiffLines(approval.diff_preview);
 
   return (
@@ -205,32 +251,15 @@ function InlineApprovalCard({
           <ShieldCheck className="size-3.5 text-primary" />
           <span>{t("copilot.approvalTitle")}</span>
         </ItemTitle>
-        <Badge
-          variant={
-            approval.resolved === "approved"
-              ? "secondary"
-              : approval.resolved === "rejected"
-                ? "outline"
-                : "default"
-          }
-          className="h-5 px-1.5 text-[10.5px]"
-        >
-          <span className="relay-text-trim leading-none">
-            {approval.resolved === "approved"
-              ? t("copilot.approvalApproved")
-              : approval.resolved === "rejected"
-                ? t("copilot.approvalRejected")
-                : t("copilot.approvalPending")}
-          </span>
+        <Badge variant={badge.variant} className="h-5 px-1.5 text-[10.5px]">
+          <span className="relay-text-trim leading-none">{t(badge.label)}</span>
         </Badge>
       </ItemHeader>
 
       <ItemDescription className="line-clamp-none text-xs leading-relaxed text-foreground">
-        {isPatchFix
-          ? approval.summary
-          : cleanPreset
-            ? t("copilot.cleanRunSummary", { preset: cleanPreset })
-            : t("detail.cleanRun")}
+        {!isPatchFix && preset
+          ? t("copilot.cleanRunSummary", { preset })
+          : approval.summary || t("detail.cleanRun")}
       </ItemDescription>
 
       {diffLines.length > 0 && (
@@ -286,20 +315,7 @@ function InlineApprovalCard({
           </ItemActions>
         </ItemFooter>
       ) : (
-        <Marker className="px-0 py-0 text-[11.5px]">
-          <MarkerIcon>
-            {approval.resolved === "approved" ? (
-              <CheckCircle2 className="text-emerald-600 dark:text-emerald-400" />
-            ) : (
-              <XCircle className="text-muted-foreground" />
-            )}
-          </MarkerIcon>
-          <MarkerContent>
-            {approval.resolved === "approved"
-              ? t("copilot.approvalApprovedNote")
-              : t(isPatchFix ? "copilot.approvalRejectedNote" : "copilot.approvalRunRejectedNote")}
-          </MarkerContent>
-        </Marker>
+        <ResolvedApprovalNote approved={decision === "approved"} isPatchFix={isPatchFix} />
       )}
     </Item>
   );
@@ -388,7 +404,7 @@ export function CopilotMessageItem({
             <AlertCircle />
             <AlertTitle>{t("copilot.errorTitle")}</AlertTitle>
             <AlertDescription className="flex flex-col gap-2">
-              <span className="break-words">{message.error}</span>
+              <span className="break-words">{formatErrorMessage(message.error, t)}</span>
               <div>
                 <Button type="button" variant="outline" size="xs" onClick={onOpenLlmSettings}>
                   <SlidersHorizontal data-icon="inline-start" />

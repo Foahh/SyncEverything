@@ -1,6 +1,7 @@
 import type { TFunction } from "i18next";
 
 type ErrorTranslationKey =
+  | "errors.copilotToolLimit"
   | "errors.openRepoBeforePairing"
   | "errors.chooseRoleBeforePairing"
   | "errors.openRepoBeforeTask"
@@ -14,6 +15,7 @@ type ErrorTranslationKey =
 
 const KNOWN_ERROR_KEYS: Readonly<Record<string, ErrorTranslationKey>> = {
   "Open the same Git repository on both devices before pairing.": "errors.openRepoBeforePairing",
+  "The model reached the tool-call limit before finishing.": "errors.copilotToolLimit",
   "Choose a device role before pairing": "errors.chooseRoleBeforePairing",
   "Open a Git repository before running a task.": "errors.openRepoBeforeTask",
   "Create the first Git commit before running a task.": "errors.createFirstCommit",
