@@ -198,13 +198,10 @@ export function WorkspaceSwitcher({
 
         <div className="flex max-h-72 flex-col gap-1 overflow-y-auto p-1.5">
           {entries.length === 0 ? (
-            <div className="flex flex-col items-center gap-1 rounded-lg border border-dashed border-border px-3 py-5 text-center">
-              <div className="text-xs font-medium text-foreground">
+            <div className="flex flex-col items-center justify-center rounded-lg border border-dashed border-border px-3 py-5 text-center">
+              <div className="text-xs text-muted-foreground">
                 {t("workspaceSwitcher.emptyTitle")}
               </div>
-              <p className="text-[11px] leading-relaxed text-muted-foreground">
-                {t("workspaceSwitcher.emptyDesc")}
-              </p>
             </div>
           ) : (
             entries.map((entry) => {

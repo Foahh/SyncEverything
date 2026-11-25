@@ -1,14 +1,7 @@
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Field, FieldGroup, FieldLabel } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
 import { Separator } from "@/components/ui/separator";
@@ -525,16 +518,13 @@ export function PairDeviceModal({ isOpen, onOpenChange, mode, status }: PairDevi
 
   return (
     <Dialog open={isOpen} onOpenChange={onOpenChange}>
-      <DialogContent className="max-h-[88vh] overflow-y-auto sm:max-w-xl">
+      <DialogContent className="max-h-[88vh] overflow-y-auto overscroll-contain sm:max-w-xl">
         <DialogHeader>
           <div className="flex items-center gap-2.5">
             <div className="flex size-8 shrink-0 items-center justify-center rounded-md bg-primary/10 text-primary">
               <Link2 className="size-4" aria-hidden="true" />
             </div>
-            <div className="flex flex-col gap-0.5">
-              <DialogTitle>{t("modals.pair.title")}</DialogTitle>
-              <DialogDescription>{t("modals.pair.subtitle")}</DialogDescription>
-            </div>
+            <DialogTitle>{t("modals.pair.title")}</DialogTitle>
           </div>
         </DialogHeader>
 
@@ -637,20 +627,15 @@ export function PairDeviceModal({ isOpen, onOpenChange, mode, status }: PairDevi
         <Separator />
 
         <div className="flex flex-col gap-2">
-          <div className="flex items-center justify-between gap-2">
-            <div className="flex items-center gap-2">
-              <h3 className="text-xs font-semibold text-foreground">
-                {t("modals.pair.trustedTitle")}
-              </h3>
-              {trustedPeers.length > 0 && (
-                <Badge variant="secondary" className="font-mono-tech">
-                  {trustedPeers.length}
-                </Badge>
-              )}
-            </div>
-            <span className="text-[11px] text-muted-foreground">
-              {t("modals.pair.autoReconnectHint")}
-            </span>
+          <div className="flex items-center gap-2">
+            <h3 className="text-xs font-semibold text-foreground">
+              {t("modals.pair.trustedTitle")}
+            </h3>
+            {trustedPeers.length > 0 && (
+              <Badge variant="secondary" className="font-mono-tech">
+                {trustedPeers.length}
+              </Badge>
+            )}
           </div>
 
           {trustedPeers.length === 0 ? (
@@ -727,12 +712,6 @@ export function PairDeviceModal({ isOpen, onOpenChange, mode, status }: PairDevi
             </AlertDescription>
           </Alert>
         )}
-
-        <DialogFooter>
-          <Button variant="outline" size="lg" onClick={() => onOpenChange(false)}>
-            <span className="relay-text-trim leading-none">{t("modals.pair.close")}</span>
-          </Button>
-        </DialogFooter>
       </DialogContent>
     </Dialog>
   );

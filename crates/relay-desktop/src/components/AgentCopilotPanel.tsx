@@ -65,12 +65,6 @@ export function AgentCopilotPanel({
   const inputId = useId();
   const [input, setInput] = useState("");
 
-  const suggestions = [
-    t("copilot.suggestions.checkOutdated"),
-    t("copilot.suggestions.inspectEnv"),
-    t("copilot.suggestions.runAndCheck"),
-  ];
-
   const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     const trimmed = input.trim();
@@ -96,39 +90,14 @@ export function AgentCopilotPanel({
     }
   };
 
-  const handlePickSuggestion = (text: string) => {
-    if (isStreaming) return;
-    void onSendMessage(text);
-  };
-
   return (
     <div className="flex min-h-0 flex-1 flex-col">
       {messages.length === 0 ? (
-        <div className="flex min-h-0 flex-1 flex-col justify-center gap-5 overflow-y-auto px-5 py-6">
-          <div className="flex flex-col items-start gap-2">
-            <div className="flex size-9 items-center justify-center rounded-lg bg-primary/10 text-primary">
-              <Sparkles className="size-4" />
-            </div>
-            <h3 className="text-sm font-semibold text-foreground">{t("copilot.emptyTitle")}</h3>
-            <p className="text-xs leading-relaxed text-muted-foreground">
-              {t("copilot.emptyDesc")}
-            </p>
+        <div className="flex min-h-0 flex-1 flex-col items-center justify-center gap-2.5 px-6 text-center">
+          <div className="flex size-9 items-center justify-center rounded-lg bg-primary/10 text-primary">
+            <Sparkles className="size-4" aria-hidden="true" />
           </div>
-
-          <div className="flex flex-col gap-2">
-            {suggestions.map((suggestion) => (
-              <Button
-                key={suggestion}
-                type="button"
-                variant="outline"
-                size="sm"
-                className="h-auto justify-start px-3 py-2 text-left text-xs leading-snug font-normal whitespace-normal text-foreground"
-                onClick={() => handlePickSuggestion(suggestion)}
-              >
-                {suggestion}
-              </Button>
-            ))}
-          </div>
+          <h3 className="text-sm font-medium text-foreground">{t("copilot.emptyTitle")}</h3>
         </div>
       ) : (
         <MessageScrollerProvider autoScroll>

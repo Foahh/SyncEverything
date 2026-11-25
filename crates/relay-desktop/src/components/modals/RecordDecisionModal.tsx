@@ -3,7 +3,6 @@ import { Button } from "@/components/ui/button";
 import {
   Dialog,
   DialogContent,
-  DialogDescription,
   DialogFooter,
   DialogHeader,
   DialogTitle,
@@ -79,10 +78,7 @@ export function RecordDecisionModal({
             <div className="flex size-8 shrink-0 items-center justify-center rounded-md bg-primary/10 text-primary">
               <StickyNote className="size-4" />
             </div>
-            <div className="flex flex-col gap-0.5">
-              <DialogTitle>{t("modals.note.title")}</DialogTitle>
-              <DialogDescription>{t("modals.note.subtitle")}</DialogDescription>
-            </div>
+            <DialogTitle>{t("modals.note.title")}</DialogTitle>
           </div>
         </DialogHeader>
 

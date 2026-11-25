@@ -155,7 +155,7 @@ function DispatchTaskForm({
           </div>
         </Field>
 
-        {selectedPreset.allowed_params.length > 0 ? (
+        {selectedPreset.allowed_params.length > 0 && (
           <div className="grid grid-cols-2 gap-3">
             {selectedPreset.allowed_params.map((param) => (
               <Field key={param}>
@@ -181,8 +181,6 @@ function DispatchTaskForm({
               </Field>
             ))}
           </div>
-        ) : (
-          <p className="text-[11px] text-muted-foreground">{t("modals.task.noParamsHint")}</p>
         )}
 
         <Field>
@@ -266,7 +264,7 @@ export function DispatchTaskModal({
 
         {presets.length > 0 ? (
           <DispatchTaskForm
-            key={presetsKey}
+            key={`${presetsKey}:${seed?.spec.task_id ?? "new"}`}
             runText={runText}
             seed={seed}
             presets={presets}
