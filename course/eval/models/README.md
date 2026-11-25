@@ -67,4 +67,4 @@ uv run python course/eval/models/run_mcp_eval.py `
 
 Passing `--save` stores the structured run log in `course/eval/models/results/` and updates `course/eval/models/benchmark-report.md` with the Markdown comparison table.
 
-New runs record `scoring_version: 2`. The model report and Figure 3 use only live runs scored with the current version once the first such run exists. Until then, they display the original live cohort. Older JSON files remain available for reproducing the historical report.
+New runs record `scoring_version: 3`. The model report and Figure 3 use live runs scored with the current version once the first such run exists. Until then, they display the original live cohort. Older JSON files remain available for reproducing the historical report.

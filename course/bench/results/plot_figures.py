@@ -607,11 +607,11 @@ def plot_fig4_chaos_self_healing() -> None:
     ]
 
     case_labels = [
-        ("chaos-01-missing-dep", "C01: Missing Dep (uv_spec)"),
+        ("chaos-01-missing-dep", "C01: Missing Dependency"),
         ("chaos-02-upstream-edit", "C02: Upstream Edit (STALE)"),
         ("chaos-03-same-line-conflict", "C03: Same-Line Conflict"),
         ("chaos-04-mid-run-disconnect", "C04: Mid-Run Disconnect"),
-        ("chaos-05-runtime-exception", "C05: NameError (file_edits)"),
+        ("chaos-05-runtime-exception", "C05: NameError"),
         ("chaos-06-corrupted-lock", "C06: Corrupted uv.lock"),
         ("chaos-07-stale-evidence-trap", "C07: Stale Evidence Trap"),
         ("chaos-08-duplicate-replay", "C08: Duplicate Task Replay"),

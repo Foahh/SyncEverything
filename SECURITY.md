@@ -28,7 +28,7 @@ SyncEverything (powered by the Relay engine) coordinates Git state and task exec
 
 - The Host daemon **never executes arbitrary shell strings** received over P2P RPC or MCP.
 - Every task must match a named `[presets.<name>]` entry in the target repository's `relay.toml` defining an explicit `program`, fixed `args`, `timeout_secs`, and optional `allowed_params`.
-- Commands are spawned directly via `tokio::process::Command` without invoking a system shell (`sh -c` / `cmd /C`), eliminating shell metacharacter injection.
+- Presets pass arguments individually to `tokio::process::Command`. Windows installations that provide a package manager through a `.cmd` shim use the package-manager launcher with restricted arguments.
 - Any task parameter key not listed in `allowed_params` is deterministically rejected before execution.
 
 ### 2. Isolated `git worktree` Boundaries

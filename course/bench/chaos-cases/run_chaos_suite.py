@@ -1271,7 +1271,8 @@ def call_openai_chat(
             elapsed_ms = (time.perf_counter() - t0) * 1000.0
             return json.loads(raw), elapsed_ms
         except urllib.error.HTTPError as err:
-            detail = err.read().decode("utf-8", errors="replace")
+            with err:
+                detail = err.read().decode("utf-8", errors="replace")
             if attempt == 0 and is_retryable_ollama_xml_500(err.code, detail):
                 continue
             raise RuntimeError(f"HTTP {err.code} from {url}: {detail[:400]}") from err

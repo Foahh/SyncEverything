@@ -28,7 +28,7 @@ flowchart LR
 
 - **`iroh` P2P QUIC, BLAKE3 Sync & Persistent Peer Trust**: A single `iroh` 1.5 endpoint handles direct LAN connections, NAT-traversing relay fallback, air-gapped `--lan-only` pairing, and single-machine `--local-only` loopback testing. Commits travel as exact Git bundles alongside tracked working-tree diffs, incremental DAG deltas, and BLAKE3-addressed execution logs, with a persistent SQLite outbox for offline resilience, persistent `trusted_peers` with startup auto-reconnect, and interactive device revocation (`PEER_REVOKED` RPC & blob gating with immediate QUIC disconnect).
 - **Causal Decision-Evidence DAG with Deterministic `STALE` Quarantine**: Links `Decision` notes (rationale and constraints), `Artifact` revisions (Git commit SHA and environment fingerprint), and `Evidence` runs (metrics and log blob hashes). Whenever an `Artifact` is updated or superseded, `DagEngine` deterministically traverses downstream dependencies and marks affected `Evidence` as `STALE` (`Outdated`), redacting stale metrics at the MCP boundary and blocking stale log reads so agents treat the DAG as the sole metric source of truth.
-- **Isolated `git worktree` Self-Healing, Live Logs, Cancellation & Approval**: Task preflights and repairs run inside per-task Git worktrees so the user's main checkout stays untouched, streaming `stdout`/`stderr` live into SyncEverything Desktop with running/queued task cancellation and partial log persistence. Failed preflights capture `stderr_tail`, `detected_missing_module`, and ±10-line `error_snippets`. Agents inspect worktree files via `read_worktree_file`, propose dependency fixes (`dependency_spec`) or atomic search-and-replace/overwrite edits (`code_diff`) with automatic rollback if smoke verification fails, and pause at a dual-mode approval gate (native MCP Elicitation or SyncEverything Desktop Diff Approval) before running the target preset.
+- **Isolated `git worktree` Self-Healing, Live Logs, Cancellation & Approval**: Task preflights and repairs run inside per-task Git worktrees so the user's main checkout stays untouched. Runs executed inside the desktop process stream `stdout` and `stderr` live into the desktop log viewer. Queued and running tasks can be canceled, with partial logs persisted on the executor. Failed preflights capture `stderr_tail`, `detected_missing_module`, and ±10-line `error_snippets`. Agents inspect worktree files via `read_worktree_file`, propose dependency fixes (`dependency_spec`) or atomic search-and-replace/overwrite edits (`code_diff`) with automatic rollback if smoke verification fails, and pause at a dual-mode approval gate (native MCP Elicitation or SyncEverything Desktop Diff Approval) before running the target preset.
 - **Extensible Package Manager Adapter Layer**: SyncEverything ships a priority-ordered `PackageManagerAdapter` registry covering `uv` (Python), `cargo` (Rust), `bun`/`pnpm`/`yarn`/`npm` (JavaScript/TypeScript), and `generic` Git workspaces—providing starter `relay.toml` generation (L1), `<pm>:blake3:<16hex>` environment fingerprinting and lockfile dependency diffing (L2), and security-hardened `dependency_spec` self-healing (L3), designed to extend cleanly to additional ecosystems without changing core engine or UI code.
 
 ---
@@ -39,13 +39,15 @@ flowchart LR
 
 - **Rust** `1.94+` (edition 2024) and **Git**
 - **Bun** `1.3+` (for the Tauri v2 desktop workbench)
+- Native desktop build dependencies for your operating system. [Tauri prerequisites](https://v2.tauri.app/start/prerequisites/)
 - **`uv`** and **Python `3.11+`** (for Python worktree preflights and examples)
 - **Optional:** [Ollama](https://ollama.com) (`ollama pull qwen3.5:4b`) or any OpenAI-compatible API for built-in self-healing diagnosis
 
-### 1. Build the Relay daemon
+### 1. Install the Relay daemon
 
 ```bash
-cargo build --release -p relay-daemon
+cargo install --locked --path crates/relay-daemon
+relay-daemon --help
 ```
 
 ### 2. Launch SyncEverything Desktop
@@ -63,7 +65,7 @@ On first launch, SyncEverything starts in **Local Test (`LocalDualSandbox`)** mo
 Start a headless Workstation Host (prints a pairing ticket and serves Streamable HTTP MCP at `http://127.0.0.1:7608/mcp`):
 
 ```bash
-cargo run -p relay-daemon -- --repo-root . serve
+relay-daemon --repo-root . serve
 ```
 
 Or connect Claude Code, Cursor, or Codex CLI over **Stdio** (`relay-daemon mcp-stdio`) or **Streamable HTTP**. In **Workspace & AI Settings -> MCP**, you can copy ready-to-paste snippets (including Codex CLI) or use the safe **preview-before-write** project installer to merge `.mcp.json` (Claude Code) or `.cursor/mcp.json` (Cursor) without clobbering existing servers (or start from [`prompts/mcp-clients/`](prompts/mcp-clients/)):

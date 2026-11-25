@@ -663,7 +663,8 @@ def call_openai_chat(
                 raw = resp.read().decode("utf-8")
             return json.loads(raw), (time.perf_counter() - t0) * 1000.0
         except urllib.error.HTTPError as err:
-            detail = err.read().decode("utf-8", errors="replace")
+            with err:
+                detail = err.read().decode("utf-8", errors="replace")
             if attempt == 0 and is_retryable_ollama_xml_500(err.code, detail):
                 continue
             raise RuntimeError(f"HTTP {err.code}: {detail[:300]}") from err
