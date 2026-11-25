@@ -1,6 +1,6 @@
 # Prompts & Standard MCP Client Setup (Track 3)
 
-Relay exposes its 8 frozen tools over the **Model Context Protocol (`rmcp` 3.11)** via two standard transports:
+Relay exposes nine tools over the **Model Context Protocol (`rmcp` 3.11)** via two standard transports:
 
 - **Stdio (`relay-daemon mcp-stdio`)**: Best for local AI coding agents (Claude Code, Cursor, Codex CLI, Windsurf, OpenCode, or generic `dsh`) operating directly on a workstation or laptop checkout.
 - **Streamable HTTP (`relay-daemon serve` / `relay-daemon mcp-http` at `http://127.0.0.1:7608/mcp`)**: Best when multiple clients or a remote laptop agent connect to a long-running Host daemon.
@@ -31,5 +31,5 @@ Relay exposes its 8 frozen tools over the **Model Context Protocol (`rmcp` 3.11)
    ```
 2. Pick the matching template in `prompts/mcp-clients/` and replace `<RELAY_DAEMON_BIN>`, `<REPO_ROOT>`, and `<DATA_DIR>` with paths for your repository.
 3. Optional: attach `edge-fast-path.md` or `host-deep-path.md` to your agent's custom instructions (note that `RelayMcpServer` also advertises its core anti-hallucination rules automatically via MCP server `instructions` during `initialize`).
-4. Verify your agent sees all 8 frozen tools:
-   `inspect_sync_status`, `list_handoffs`, `check_env_diff`, `get_dag_snapshot`, `read_evidence_log`, `run_preflight_in_worktree`, `propose_worktree_patch`, `approve_and_execute_task`.
+4. Verify your agent sees all nine tools.
+   `inspect_sync_status`, `list_handoffs`, `check_env_diff`, `get_dag_snapshot`, `read_evidence_log`, `read_worktree_file`, `run_preflight_in_worktree`, `propose_worktree_patch`, `approve_and_execute_task`.

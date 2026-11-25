@@ -80,10 +80,29 @@ fn agent_safe_dag_context_quarantines_stale_evidence() {
         .split_once("[QUARANTINED STALE EVIDENCE \u{2014} DO NOT CITE]\n")
         .unwrap();
     assert!(eligible.contains("fresh-score"));
-    assert!(eligible.contains("pending-score"));
+    assert!(eligible.contains("PENDING_VERIFY"));
+    assert!(!context.contains("pending-score"));
     assert!(!eligible.contains("stale-id"));
     assert_eq!(quarantine, "\"stale-id\"\n");
     assert!(!context.contains("quarantined-score"));
+}
+
+#[test]
+fn short_api_keys_are_fully_masked() {
+    for secret in ["abcdefg", "abcdefghij", "七个字符的密钥"] {
+        assert_eq!(mask_secret(secret), "••••••");
+    }
+    let client = LlmClient::new(
+        LlmEndpointConfig {
+            api_key: Some("abcdefg".into()),
+            ..LlmEndpointConfig::default()
+        },
+        Duration::from_secs(1),
+    ).unwrap();
+    assert_eq!(
+        client.provider_error_detail("Rejected key abcdefg"),
+        "Rejected key [redacted]"
+    );
 }
 
 #[tokio::test]
@@ -367,10 +386,10 @@ async fn stream_chat_with_tools_parses_chunked_sse_text_and_tool_calls() {
         let _ = socket.read(&mut buf).await.unwrap();
         socket.write_all(b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ntransfer-encoding: chunked\r\n\r\n").await.unwrap();
         let sse = concat!(
-            "data: {\"choices\":[{\"delta\":{\"content\":\"Checking \"}}]}\n\n",
-            "data: {\"choices\":[{\"delta\":{\"content\":\"结果...\"}}]}\n\n",
-            "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_abc\",\"function\":{\"name\":\"get_dag_\",\"arguments\":\"{\\\"include_\"}}]}}]}\n\n",
-            "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"name\":\"snapshot\",\"arguments\":\"stale\\\":true}\"}}]}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"content\":\"Checking \",\"reasoning\":\"Inspect \"}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"content\":\"结果...\",\"reasoning\":\"the result.\"}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_abc\",\"function\":{\"name\":\"get_dag_\",\"arguments\":\"{\"}}]}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"name\":\"snapshot\",\"arguments\":\"}\"}}]}}]}\n\n",
             "data: [DONE]\n\n"
         );
         let split = sse.find('结').unwrap() + 1;
@@ -401,7 +420,8 @@ async fn stream_chat_with_tools_parses_chunked_sse_text_and_tool_calls() {
     assert_eq!(turn.tool_calls.len(), 1);
     assert_eq!(turn.tool_calls[0].id, "call_abc");
     assert_eq!(turn.tool_calls[0].name, "get_dag_snapshot");
-    assert_eq!(turn.tool_calls[0].arguments, "{\"include_stale\":true}");
+    assert_eq!(turn.tool_calls[0].arguments, "{}");
+    assert_eq!(turn.reasoning_fields["reasoning"], "Inspect the result.");
 }
 
 #[tokio::test]
@@ -429,6 +449,7 @@ async fn stream_chat_with_tools_falls_back_to_non_streaming_on_http_400() {
                     "message": {
                         "role": "assistant",
                         "content": "Fallback ok",
+                        "reasoning_content": "Inspect sync before answering.",
                         "tool_calls": [{
                             "id": "call_1",
                             "type": "function",
@@ -467,6 +488,7 @@ async fn stream_chat_with_tools_falls_back_to_non_streaming_on_http_400() {
     assert_eq!(turn.content, "Fallback ok");
     assert_eq!(turn.tool_calls.len(), 1);
     assert_eq!(turn.tool_calls[0].name, "inspect_sync_status");
+    assert_eq!(turn.reasoning_fields["reasoning_content"], "Inspect sync before answering.");
 }
 
 #[tokio::test]

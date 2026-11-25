@@ -6,6 +6,44 @@ use std::path::{Path, PathBuf};
 use tokio::process::Command;
 
 const REPO_ID: &str = "test-forecast";
+
+#[tokio::test]
+async fn mcp_quarantines_pending_evidence_and_rejects_removed_snapshot_fields() {
+    assert!(serde_json::from_str::<GetDagSnapshotArgs>(r#"{"include_stale":false}"#).is_err());
+    let engine = Arc::new(RelayEngine::in_memory(REPO_ID, None).await.unwrap());
+    let now = Utc::now();
+    engine
+        .upsert_node_and_edges(
+            GraphNode {
+                id: "pending".into(),
+                label: "Pending result".into(),
+                payload: NodeKind::Evidence {
+                    task_id: Uuid::now_v7().to_string(),
+                    preset: "check".into(),
+                    metrics_json: serde_json::json!({"score":"unverified metric"}).into(),
+                    log_blob_hash: "unused".into(),
+                },
+                freshness: Freshness::PendingVerify,
+                device_origin: "test".into(),
+                created_at: now,
+                updated_at: now,
+            },
+            vec![],
+        )
+        .await.unwrap();
+    let server = RelayMcpServer::new(engine, None, None);
+    let snapshot = server.handle_get_dag_snapshot(GetDagSnapshotArgs {}).await.unwrap();
+    let output = serde_json::to_string(&snapshot).unwrap();
+    assert!(output.contains("unverified_evidence_metrics_redacted"));
+    assert!(!output.contains("unverified metric"));
+    assert_eq!(snapshot.fresh_evidence_count, 0);
+    let log = server.handle_read_evidence_log(ReadEvidenceLogArgs {
+        node_id: "pending".into(),
+        max_lines: None,
+    }).await;
+    assert!(matches!(log, Err(RelayError::UnverifiedEvidenceBlocked(_))));
+}
+
 const MANIFEST: &str = r#"
 [project]
 repo_id = "test-forecast"
@@ -242,16 +280,19 @@ async fn mcp_end_to_end_preflight_patch_approval_and_stale_block() {
     let marker = report.worktree_path.join(".preflight-marker");
     fs::write(&marker, "reuse this worktree").unwrap();
 
-    let patch = server
-        .handle_propose_patch(ProposeWorktreePatchArgs {
-            task_id: task_id.to_string(),
-            patch_kind: "file_edits".into(),
-            summary: "Define the smoke message".into(),
-            uv_spec: None,
-            edits: Some(fix_edits()),
-        })
-        .await
-        .unwrap();
+    let candidate = ProposeWorktreePatchArgs {
+        task_id: task_id.to_string(), patch_kind: "file_edits".into(),
+        summary: "Define the smoke message".into(), uv_spec: None, edits: Some(fix_edits()),
+    };
+    let other_server = fixture.server();
+    let (first, second) = tokio::join!(
+        server.handle_propose_patch(candidate.clone()),
+        other_server.handle_propose_patch(candidate),
+    );
+    let patch = match (first, second) {
+        (Ok(patch), Err(_)) | (Err(_), Ok(patch)) => patch,
+        results => panic!("exactly one server may register the patch: {results:?}"),
+    };
     assert!(patch.smoke_verified);
     assert_eq!(patch.worktree_branch, report.worktree_branch);
     assert!(marker.is_file());
@@ -299,7 +340,6 @@ async fn mcp_end_to_end_preflight_patch_approval_and_stale_block() {
     assert_eq!(fixture.task(task_id).await, completed);
     let node_id = completed.evidence_node_id.unwrap();
     assert!(!report.worktree_path.exists());
-    assert!(server.context.active_worktrees.lock().await.is_empty());
     assert!(git(&fixture.repo, &["branch", "--list", &report.worktree_branch]).await.is_empty());
     assert!(!fixture.sandbox.is_working_tree_dirty().await.unwrap());
     assert_eq!(fixture.sandbox.head_commit_sha().await.unwrap(), fixture.sha);
@@ -420,6 +460,5 @@ async fn mcp_rejection_and_failed_preset_clean_up_worktrees() {
     assert!(failed.error_message.unwrap().contains("invalid-number"));
     assert!(failed.evidence_node_id.is_none());
     assert!(!fixture.sandbox.task_worktree(failed_id).unwrap().0.exists());
-    assert!(server.context.active_worktrees.lock().await.is_empty());
     assert!(!fixture.sandbox.is_working_tree_dirty().await.unwrap());
 }

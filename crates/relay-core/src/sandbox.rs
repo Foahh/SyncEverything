@@ -403,7 +403,7 @@ impl WorktreeSandbox {
     /// Read a UTF-8 file strictly inside the repository root with line numbers.
     /// Blocks path traversal (`..`), symlinks escaping the repo, `.git`/`.venv`/`.relay` internals, and `.env*` secrets.
     pub async fn read_repo_file(&self, relative_path: &str, max_bytes: usize) -> RelayResult<String> {
-        let view = read_confined_file(&self.repo_root, relative_path, None, None, max_bytes).await?;
+        let view = read_confined_file(&self.repo_root, relative_path, None, Some(u32::MAX), max_bytes).await?;
         Ok(view.content)
     }
 
@@ -621,7 +621,6 @@ impl WorktreeHandle {
     }
 }
 
-const MAX_CONFINED_FILE_READ_BYTES: u64 = 2 * 1024 * 1024;
 const DEFAULT_WORKTREE_READ_WINDOW: u32 = 200;
 
 async fn read_confined_file(
@@ -635,102 +634,125 @@ async fn read_confined_file(
     let normalized = validate_confined_relative_path(trimmed)?;
     let canonical_root = std::fs::canonicalize(root)?;
     let candidate = canonical_root.join(&normalized);
-    let canonical_file = std::fs::canonicalize(&candidate).map_err(|err| {
-        RelayError::Internal(format!("could not open '{trimmed}': {err}"))
-    })?;
+    let canonical_file = std::fs::canonicalize(&candidate)
+        .map_err(|err| RelayError::Internal(format!("could not open '{trimmed}': {err}")))?;
     let resolved = canonical_file.strip_prefix(&canonical_root).map_err(|_| {
         RelayError::Internal(format!(
             "path '{trimmed}' resolves outside the active repository"
         ))
     })?;
     validate_confined_path_components(resolved, trimmed)?;
-    let metadata = tokio::fs::metadata(&canonical_file).await?;
-    if !metadata.is_file() {
+    let start = start_line.unwrap_or(1);
+    let end = end_line.unwrap_or_else(|| start.saturating_add(DEFAULT_WORKTREE_READ_WINDOW - 1));
+    if start == 0 || end < start {
+        return Err(RelayError::Internal(
+            "line range must be 1-based and inclusive".into(),
+        ));
+    }
+    let display_path = normalized.to_string_lossy().replace('\\', "/");
+    tokio::task::spawn_blocking(move || {
+        read_source_window(&canonical_file, display_path, start, end, max_bytes)
+    })
+    .await
+    .map_err(|err| RelayError::Internal(format!("source reader failed: {err}")))?
+}
+
+fn read_source_window(
+    path: &Path,
+    file_path: String,
+    start: u32,
+    end: u32,
+    cap: usize,
+) -> RelayResult<WorktreeFileView> {
+    use std::io::{BufRead, BufReader, Read};
+
+    if !std::fs::metadata(path)?.is_file() {
         return Err(RelayError::Internal(format!(
-            "'{trimmed}' is not a regular file"
+            "'{file_path}' is not a regular file"
         )));
     }
-
-    let cap = max_bytes.max(256);
-    let ranged = start_line.is_some() || end_line.is_some();
-    let read_limit = if ranged {
-        MAX_CONFINED_FILE_READ_BYTES
-    } else {
-        (cap.saturating_add(1).max(4096) as u64).min(MAX_CONFINED_FILE_READ_BYTES)
-    };
-    let file = tokio::fs::File::open(&canonical_file).await?;
+    let mut reader = BufReader::new(std::fs::File::open(path)?);
+    let cap = cap.max(256);
+    let mut content = String::new();
     let mut bytes = Vec::new();
-    file.take(read_limit).read_to_end(&mut bytes).await?;
-    if bytes.iter().take(4096).any(|b| *b == 0) {
-        return Err(RelayError::Internal(format!(
-            "'{trimmed}' appears to be a binary file"
-        )));
-    }
-    let read_truncated = (bytes.len() as u64) < metadata.len();
-    let text = match std::str::from_utf8(&bytes) {
-        Ok(text) => text,
-        Err(error) if read_truncated && error.error_len().is_none() => {
-            std::str::from_utf8(&bytes[..error.valid_up_to()]).expect("validated UTF-8 prefix")
-        }
-        Err(_) => return Err(RelayError::Internal(format!("'{trimmed}' is not valid UTF-8 text"))),
-    };
-
-    let all_lines: Vec<&str> = text.lines().collect();
-    let total_lines = u32::try_from(all_lines.len()).unwrap_or(u32::MAX);
-    let display_path = normalized
-        .components()
-        .filter_map(|c| match c {
-            Component::Normal(part) => Some(part.to_string_lossy().into_owned()),
-            _ => None,
-        })
-        .collect::<Vec<_>>()
-        .join("/");
-
-    if total_lines == 0 {
-        return Ok(WorktreeFileView {
-            file_path: display_path,
-            start_line: 0,
-            end_line: 0,
-            total_lines: 0,
-            truncated: false,
-            content: String::new(),
-        });
-    }
-
-    let start = start_line.unwrap_or(1).max(1);
-    let requested_end = match (start_line, end_line) {
-        (_, Some(end)) => end.max(start),
-        (Some(_), None) => start.saturating_add(DEFAULT_WORKTREE_READ_WINDOW - 1),
-        (None, None) => total_lines,
-    };
-    let end = requested_end.min(total_lines);
-
-    let mut formatted = String::new();
-    let mut truncated = read_truncated;
+    let mut line = String::new();
+    let mut total_lines = 0u32;
     let mut last_emitted = 0u32;
-    if start <= total_lines {
-        for line_no in start..=end {
-            let line = all_lines[(line_no - 1) as usize];
-            let entry = format!("{line_no:>4}: {line}\n");
-            if formatted.len() + entry.len() > cap {
-                truncated = true;
+    let mut truncated = false;
+    while !reader.fill_buf()?.is_empty() {
+        line.clear();
+        bytes.clear();
+        let mut long_line = false;
+        loop {
+            // Validate every byte of the source, keeping only a bounded prefix
+            // of this line and up to three incomplete bytes between chunks.
+            let count = reader.by_ref().take(8192).read_until(b'\n', &mut bytes)?;
+            let at_end = count == 0 || bytes.ends_with(b"\n");
+            if bytes.contains(&0) {
+                return Err(RelayError::Internal(format!(
+                    "'{file_path}' appears to be a binary file"
+                )));
+            }
+            let text = match std::str::from_utf8(&bytes) {
+                Ok(text) => text,
+                Err(err) if !at_end && err.error_len().is_none() => {
+                    std::str::from_utf8(&bytes[..err.valid_up_to()]).expect("valid UTF-8 prefix")
+                }
+                Err(_) => {
+                    return Err(RelayError::Internal(format!(
+                        "'{file_path}' is not valid UTF-8 text"
+                    )));
+                }
+            };
+            let keep = text.floor_char_boundary(cap.saturating_add(2).saturating_sub(line.len()));
+            if !long_line {
+                line.push_str(&text[..keep]);
+            }
+            long_line |= keep < text.len();
+            if at_end {
+                if line.ends_with('\n') {
+                    line.pop();
+                    if line.ends_with('\r') {
+                        line.pop();
+                    }
+                }
                 break;
             }
-            formatted.push_str(&entry);
-            last_emitted = line_no;
+            let valid = text.len();
+            bytes.drain(..valid);
+        }
+        total_lines = total_lines.saturating_add(1);
+        if truncated || !(start..=end).contains(&total_lines) {
+            continue;
+        }
+        let prefix = format!("{total_lines:>4}: ");
+        let remaining = cap.saturating_sub(content.len() + prefix.len() + 1);
+        if remaining < line.len() || long_line || content.len() + prefix.len() + 1 > cap {
+            truncated = true;
+            // Return a usable prefix when the first requested line alone exceeds the budget.
+            if last_emitted == 0 {
+                content.push_str(&prefix);
+                content.push_str(&line[..line.floor_char_boundary(remaining.min(line.len()))]);
+                content.push('\n');
+                last_emitted = total_lines;
+            }
+        } else {
+            content.push_str(&prefix);
+            content.push_str(&line);
+            content.push('\n');
+            last_emitted = total_lines;
         }
     }
     if truncated {
-        formatted.push_str("... [truncated]\n");
+        content.push_str("... [truncated]\n");
     }
-    let effective_start = if last_emitted == 0 { 0 } else { start };
     Ok(WorktreeFileView {
-        file_path: display_path,
-        start_line: effective_start,
+        file_path,
+        start_line: if last_emitted == 0 { 0 } else { start },
         end_line: last_emitted,
         total_lines,
         truncated,
-        content: formatted,
+        content,
     })
 }
 

@@ -2,7 +2,7 @@ use super::LlmClient;
 use crate::error::{RelayError, RelayResult};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 use specta::Type;
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -68,7 +68,11 @@ pub struct LlmToolCall {
 pub struct StreamedChatTurn {
     pub content: String,
     pub tool_calls: Vec<LlmToolCall>,
+    /// Provider fields needed to continue a tool turn. Kept out of display and persisted chat.
+    pub reasoning_fields: Map<String, Value>,
 }
+
+const REASONING_FIELDS: [&str; 2] = ["reasoning", "reasoning_content"];
 
 pub const COPILOT_SYSTEM_PROMPT: &str = concat!(
     "You are the built-in SyncEverything Agent inside the SyncEverything cross-device workbench. ",
@@ -314,7 +318,7 @@ impl LlmClient {
                 }
                 let status = resp.status();
                 let err_body = resp.text().await.unwrap_or_default();
-                if attempt == 0 && super::is_retryable_ollama_xml_500(status, &err_body) {
+                if attempt == 0 && self.should_retry_ollama(status, &err_body) {
                     tracing::warn!(
                         model = %self.model,
                         "Retrying streaming chat once after Ollama HTTP 500 XML parse error"
@@ -328,7 +332,7 @@ impl LlmClient {
                         .non_streaming_chat_with_tools(messages, tools, cancel, &mut on_delta)
                         .await;
                 }
-                let detail: String = err_body.chars().take(280).collect();
+                let detail = self.provider_error_detail(&err_body);
                 return Err(RelayError::Llm(format!("HTTP {status}: {detail}")));
             }
         };
@@ -345,23 +349,43 @@ impl LlmClient {
         }
 
         let mut content = String::new();
+        let mut reasoning_fields = Map::new();
         let mut partials: BTreeMap<usize, PartialToolCall> = BTreeMap::new();
         let mut buffer = Vec::new();
+        let mut finished = false;
 
-        while let Some(bytes) = response.chunk().await.map_err(super::llm_error)? {
+        'stream: while let Some(bytes) = response.chunk().await.map_err(super::llm_error)? {
             if cancel.load(Ordering::Relaxed) {
                 return Err(RelayError::Llm("cancelled".into()));
             }
             for part in bytes.split_inclusive(|&byte| byte == b'\n') {
                 buffer.extend_from_slice(part);
                 if part.ends_with(b"\n") {
-                    process_sse_line(&String::from_utf8_lossy(&buffer), &mut content, &mut partials, &mut on_delta);
+                    finished = process_sse_line(
+                        &String::from_utf8_lossy(&buffer),
+                        &mut content,
+                        &mut reasoning_fields,
+                        &mut partials,
+                        &mut on_delta,
+                    )?;
                     buffer.clear();
+                    if finished {
+                        break 'stream;
+                    }
                 }
             }
         }
-        if !buffer.is_empty() {
-            process_sse_line(&String::from_utf8_lossy(&buffer), &mut content, &mut partials, &mut on_delta);
+        if !finished && !buffer.is_empty() {
+            finished = process_sse_line(
+                &String::from_utf8_lossy(&buffer),
+                &mut content,
+                &mut reasoning_fields,
+                &mut partials,
+                &mut on_delta,
+            )?;
+        }
+        if !finished {
+            return Err(RelayError::Llm("completion stream ended prematurely".into()));
         }
 
         let tool_calls = partials
@@ -386,6 +410,7 @@ impl LlmClient {
         Ok(StreamedChatTurn {
             content,
             tool_calls,
+            reasoning_fields,
         })
     }
 
@@ -430,14 +455,14 @@ impl LlmClient {
             }
             let status = response.status();
             let err_body = response.text().await.unwrap_or_default();
-            if attempt == 0 && super::is_retryable_ollama_xml_500(status, &err_body) {
+            if attempt == 0 && self.should_retry_ollama(status, &err_body) {
                 tracing::warn!(
                     model = %self.model,
                     "Retrying non-streaming chat once after Ollama HTTP 500 XML parse error"
                 );
                 continue;
             }
-            let detail: String = err_body.chars().take(280).collect();
+            let detail = self.provider_error_detail(&err_body);
             return Err(RelayError::Llm(format!("HTTP {status}: {detail}")));
         }
         unreachable!("non_streaming_chat_with_tools retry loop always returns on attempt 1")
@@ -447,29 +472,50 @@ impl LlmClient {
 fn process_sse_line<F>(
     line: &str,
     content: &mut String,
+    reasoning_fields: &mut Map<String, Value>,
     partials: &mut BTreeMap<usize, PartialToolCall>,
     on_delta: &mut F,
-) where
+) -> RelayResult<bool>
+where
     F: FnMut(&str),
 {
     let Some(data) = line.strip_prefix("data:") else {
-        return;
+        return Ok(false);
     };
     let data = data.trim();
-    if data.is_empty() || data == "[DONE]" {
-        return;
+    if data == "[DONE]" {
+        return Ok(true);
     }
-    let Ok(chunk) = serde_json::from_str::<Value>(data) else {
-        return;
-    };
-    let Some(delta) = chunk
+    if data.is_empty() {
+        return Ok(false);
+    }
+    let chunk = serde_json::from_str::<Value>(data)
+        .map_err(|error| RelayError::Llm(format!("invalid completion event: {error}")))?;
+    if chunk.get("error").is_some_and(|error| !error.is_null()) {
+        return Err(RelayError::Llm("provider reported an error during streaming".into()));
+    }
+    let Some(choice) = chunk
         .get("choices")
         .and_then(Value::as_array)
         .and_then(|arr| arr.first())
-        .and_then(|choice| choice.get("delta"))
     else {
-        return;
+        return Ok(false);
     };
+    check_completion_finish(choice)?;
+    let finished = choice.get("finish_reason").and_then(Value::as_str).is_some();
+    let Some(delta) = choice.get("delta") else {
+        return Ok(finished);
+    };
+
+    for field in REASONING_FIELDS {
+        if let Some(fragment) = delta.get(field).and_then(Value::as_str)
+            && let Value::String(text) = reasoning_fields
+                .entry(field)
+                .or_insert_with(|| Value::String(String::new()))
+        {
+            text.push_str(fragment);
+        }
+    }
 
     if let Some(text) = delta.get("content").and_then(Value::as_str)
         && !text.is_empty()
@@ -501,18 +547,40 @@ fn process_sse_line<F>(
             }
         }
     }
+    Ok(finished)
+}
+
+fn check_completion_finish(choice: &Value) -> RelayResult<()> {
+    if let Some(reason @ ("length" | "content_filter")) =
+        choice.get("finish_reason").and_then(Value::as_str)
+    {
+        return Err(RelayError::Llm(format!(
+            "completion stopped before finishing: {reason}"
+        )));
+    }
+    Ok(())
 }
 
 fn parse_non_streaming_turn<F>(payload: &Value, on_delta: &mut F) -> RelayResult<StreamedChatTurn>
 where
     F: FnMut(&str),
 {
-    let message = payload
+    let choice = payload
         .get("choices")
         .and_then(Value::as_array)
         .and_then(|arr| arr.first())
-        .and_then(|choice| choice.get("message"))
+        .ok_or_else(|| RelayError::Llm("completion response missing choices[0]".into()))?;
+    check_completion_finish(choice)?;
+    let message = choice
+        .get("message")
         .ok_or_else(|| RelayError::Llm("completion response missing choices[0].message".into()))?;
+    let reasoning_fields = REASONING_FIELDS
+        .into_iter()
+        .filter_map(|field| {
+            let value = message.get(field)?.as_str()?;
+            Some((field.to_owned(), Value::String(value.to_owned())))
+        })
+        .collect();
 
     let content = message
         .get("content")
@@ -556,5 +624,29 @@ where
     Ok(StreamedChatTurn {
         content,
         tool_calls,
+        reasoning_fields,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rejects_incomplete_tool_responses() {
+        let payload = json!({
+            "choices": [{"finish_reason": "length", "message": {"content": "partial"}}]
+        });
+        assert!(parse_non_streaming_turn(&payload, &mut |_| unreachable!()).is_err());
+
+        let error = process_sse_line(
+            r#"data: {"error":{"message":"model generation stopped"}}"#,
+            &mut String::new(),
+            &mut Map::new(),
+            &mut BTreeMap::new(),
+            &mut |_| unreachable!(),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("provider reported an error during streaming"));
+    }
 }

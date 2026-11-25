@@ -19,7 +19,7 @@ use tokio::process::Command;
 use uuid::Uuid;
 
 const SMOKE_TAIL_LINES: usize = 30;
-const ERROR_SNIPPET_RADIUS: usize = 10;
+const ERROR_SNIPPET_RADIUS: u32 = 10;
 const MAX_ERROR_SNIPPETS: usize = 3;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -209,7 +209,11 @@ impl WorktreeSandbox {
         let error_snippets = if output.success {
             Vec::new()
         } else {
-            extract_error_snippets(worktree_path, &output.stderr)
+            let root = worktree_path.to_owned();
+            let stderr = output.stderr.clone();
+            tokio::task::spawn_blocking(move || extract_error_snippets(&root, &stderr))
+                .await
+                .map_err(|err| RelayError::Internal(format!("snippet reader failed: {err}")))?
         };
         Ok(PreflightReport {
             task_id,
@@ -235,62 +239,94 @@ impl WorktreeSandbox {
         patch: PatchInput<'_>,
         summary: &str,
     ) -> RelayResult<PatchProposal> {
+        self.apply_patch_for_review(
+            task_id,
+            worktree_path,
+            worktree_branch,
+            manifest,
+            patch,
+            summary,
+        )
+        .await
+        .map(|(proposal, _)| proposal)
+    }
+
+    pub(crate) async fn apply_patch_for_review(
+        &self,
+        task_id: TaskId,
+        worktree_path: &Path,
+        worktree_branch: &str,
+        manifest: &RelayManifest,
+        patch: PatchInput<'_>,
+        summary: &str,
+    ) -> RelayResult<(PatchProposal, WorktreeCheckpoint)> {
         self.validate_task_worktree(task_id, worktree_path, worktree_branch)
             .await?;
         let worktree_path = std::path::absolute(worktree_path)?;
         let smoke_preset = self.authorized_smoke_preset(manifest)?;
         let kind = patch.kind();
         let diff_before = working_diff(&worktree_path).await?;
-        let apply_result = match patch {
-            PatchInput::UvSpec(spec) => add_uv_dependency(&worktree_path, spec).await,
-            PatchInput::FileEdits(edits) => apply_file_edits(&worktree_path, edits).await,
+        let staged = match patch {
+            PatchInput::FileEdits(edits) => prepare_file_edits(&worktree_path, edits).await?,
+            PatchInput::UvSpec(_) => BTreeMap::new(),
         };
-        if let Err(error) = apply_result {
-            if matches!(patch, PatchInput::UvSpec(_)) {
-                let _ = rollback_worktree(&worktree_path).await;
-            }
-            return Err(error);
-        }
-        let diff_preview = working_diff(&worktree_path).await?;
-        if diff_preview.is_empty() || diff_preview == diff_before {
-            let _ = rollback_worktree(&worktree_path).await;
-            return Err(RelayError::Internal("patch produced no worktree diff".into()));
-        }
-        let smoke = match self
-            .run_preset(
-                &worktree_path,
-                manifest,
-                smoke_preset,
-                &BTreeMap::new(),
-            )
-            .await
-        {
-            Ok(smoke) => smoke,
-            Err(error) => {
-                let _ = rollback_worktree(&worktree_path).await;
-                return Err(error);
+        let paths = match patch {
+            PatchInput::FileEdits(_) => staged.keys().cloned().collect(),
+            PatchInput::UvSpec(_) => {
+                vec![PathBuf::from("pyproject.toml"), PathBuf::from("uv.lock")]
             }
         };
-        // Smoke can reconcile a tracked lockfile. Approval must cover the final diff.
-        let diff_preview = working_diff(&worktree_path).await?;
-        if !smoke.success {
-            rollback_worktree(&worktree_path).await?;
-        } else if diff_preview.is_empty() || diff_preview == diff_before {
-            return Err(RelayError::Internal(
-                "patch produced no lasting worktree diff".into(),
-            ));
+        let checkpoint = WorktreeCheckpoint::capture(&worktree_path, paths).await?;
+        let result = async {
+            match patch {
+                PatchInput::UvSpec(spec) => add_uv_dependency(&worktree_path, spec).await?,
+                PatchInput::FileEdits(_) => write_file_edits(&worktree_path, &staged).await?,
+            }
+            let diff_preview = working_diff(&worktree_path).await?;
+            if diff_preview.is_empty() || diff_preview == diff_before {
+                return Err(RelayError::Internal(
+                    "patch produced no worktree diff".into(),
+                ));
+            }
+            let smoke = self
+                .run_preset(&worktree_path, manifest, smoke_preset, &BTreeMap::new())
+                .await?;
+            // Smoke may update tracked files, including the lockfile.
+            let diff_preview = working_diff(&worktree_path).await?;
+            if smoke.success && (diff_preview.is_empty() || diff_preview == diff_before) {
+                return Err(RelayError::Internal(
+                    "patch produced no lasting worktree diff".into(),
+                ));
+            }
+            Ok(PatchProposal {
+                patch_id: Uuid::now_v7().to_string(),
+                task_id,
+                kind,
+                summary: summary.into(),
+                diff_preview,
+                worktree_branch: worktree_branch.into(),
+                smoke_verified: smoke.success,
+                smoke_stdout_tail: tail_lines(&smoke.raw_log),
+                created_at: Utc::now(),
+            })
         }
-        Ok(PatchProposal {
-            patch_id: Uuid::now_v7().to_string(),
-            task_id,
-            kind,
-            summary: summary.into(),
-            diff_preview,
-            worktree_branch: worktree_branch.into(),
-            smoke_verified: smoke.success,
-            smoke_stdout_tail: tail_lines(&smoke.raw_log),
-            created_at: Utc::now(),
-        })
+        .await;
+        if !matches!(&result, Ok(proposal) if proposal.smoke_verified) {
+            checkpoint
+                .restore(&worktree_path)
+                .await
+                .map_err(|restore| {
+                    let reason = result
+                        .as_ref()
+                        .err()
+                        .map(ToString::to_string)
+                        .unwrap_or_else(|| "patch failed smoke verification".into());
+                    RelayError::Internal(format!(
+                        "{reason}; could not restore the task worktree: {restore}"
+                    ))
+                })?;
+        }
+        result.map(|proposal| (proposal, checkpoint))
     }
 }
 
@@ -531,168 +567,245 @@ async fn add_uv_dependency(worktree_path: &Path, spec: &str) -> RelayResult<()> 
     Ok(())
 }
 
-async fn rollback_worktree(worktree_path: &Path) -> RelayResult<()> {
-    git_output(git_command(worktree_path).args(["reset", "--hard", "HEAD"])).await?;
-    git_output(git_command(worktree_path).args(["clean", "-fd"])).await?;
-    Ok(())
+/// Keep the baseline working tree and index private to this attempt. A preflight
+/// may have left both tracked changes and new files that the next retry needs.
+pub(crate) struct WorktreeCheckpoint {
+    scratch: tempfile::TempDir,
+    index: PathBuf,
+    tree: String,
+    original_files: Vec<(PathBuf, Option<PathBuf>)>,
+}
+
+impl WorktreeCheckpoint {
+    async fn capture(root: &Path, paths_to_edit: Vec<PathBuf>) -> RelayResult<Self> {
+        let paths = git_output(git_command(root).args([
+            "rev-parse",
+            "--path-format=absolute",
+            "--git-path",
+            "index",
+            "--git-path",
+            "objects",
+        ]))
+        .await?;
+        let paths = std::str::from_utf8(&paths.stdout)
+            .map_err(|err| RelayError::Git(format!("invalid git metadata path: {err}")))?;
+        let mut paths = paths.lines();
+        let index = PathBuf::from(
+            paths
+                .next()
+                .ok_or_else(|| RelayError::Git("missing git index path".into()))?,
+        );
+        let objects = PathBuf::from(
+            paths
+                .next()
+                .ok_or_else(|| RelayError::Git("missing git objects path".into()))?,
+        );
+        let scratch = tempfile::tempdir()?;
+        let info = scratch.path().join("objects/info");
+        tokio::fs::create_dir_all(&info).await?;
+        tokio::fs::write(info.join("alternates"), format!("{}\n", objects.display())).await?;
+        let canonical_root = std::fs::canonicalize(root)?;
+        let mut original_files = Vec::new();
+        for rel in paths_to_edit {
+            let original =
+                ensure_no_symlink_escape(&canonical_root, &rel, &rel_display_path(&rel))?;
+            let backup = match tokio::fs::symlink_metadata(&original).await {
+                Ok(meta) if meta.is_file() => {
+                    let backup = scratch
+                        .path()
+                        .join(format!("source-{}", original_files.len()));
+                    tokio::fs::copy(&original, &backup).await?;
+                    Some(backup)
+                }
+                Ok(_) => {
+                    return Err(RelayError::Internal(format!(
+                        "'{}' must be a regular file",
+                        rel.display()
+                    )));
+                }
+                Err(err) if err.kind() == io::ErrorKind::NotFound => None,
+                Err(err) => return Err(err.into()),
+            };
+            original_files.push((rel, backup));
+        }
+        tokio::fs::copy(&index, scratch.path().join("original-index")).await?;
+        tokio::fs::copy(&index, scratch.path().join("snapshot-index")).await?;
+        let mut checkpoint = Self {
+            scratch,
+            index,
+            original_files,
+            tree: String::new(),
+        };
+        git_output(checkpoint.git(root).args(["add", "--all", "--", "."])).await?;
+        let tree = git_output(checkpoint.git(root).arg("write-tree")).await?;
+        checkpoint.tree = super::output_text(&tree.stdout);
+        Ok(checkpoint)
+    }
+
+    fn git(&self, root: &Path) -> Command {
+        let mut cmd = git_command(root);
+        cmd.env("GIT_INDEX_FILE", self.scratch.path().join("snapshot-index"))
+            .env("GIT_OBJECT_DIRECTORY", self.scratch.path().join("objects"))
+            .env_remove("GIT_ALTERNATE_OBJECT_DIRECTORIES");
+        cmd
+    }
+
+    pub(crate) async fn restore(&self, root: &Path) -> RelayResult<()> {
+        // Index the attempted edits privately so read-tree also removes newly
+        // created files. Ignored dependency caches stay outside this operation.
+        git_output(self.git(root).args(["add", "--all", "--", "."])).await?;
+        git_output(
+            self.git(root)
+                .args(["read-tree", "--reset", "-u", &self.tree]),
+        )
+        .await?;
+        // Git checkout filters can change file bytes (for example LF to CRLF).
+        // Restore the exact input files and remove newly created inputs even if
+        // the attempted edit also changed their ignore rules.
+        let canonical_root = std::fs::canonicalize(root)?;
+        for (rel, backup) in &self.original_files {
+            let path = ensure_no_symlink_escape(&canonical_root, rel, &rel_display_path(rel))?;
+            if let Some(backup) = backup {
+                let parent = path.parent().expect("validated worktree-relative path");
+                tokio::fs::create_dir_all(parent).await?;
+                let temp = tempfile::NamedTempFile::new_in(parent)?;
+                tokio::fs::copy(backup, temp.path()).await?;
+                temp.persist(&path).map_err(|err| err.error)?;
+            } else if let Err(err) = tokio::fs::remove_file(path).await
+                && err.kind() != io::ErrorKind::NotFound
+            {
+                return Err(err.into());
+            }
+        }
+        let temp = tempfile::NamedTempFile::new_in(self.index.parent().expect("git index parent"))?;
+        tokio::fs::copy(self.scratch.path().join("original-index"), temp.path()).await?;
+        temp.persist(&self.index).map_err(|err| err.error)?;
+        Ok(())
+    }
 }
 
 struct StagedEditFile {
-    display_path: String,
-    target_path: PathBuf,
+    target: PathBuf,
     content: String,
-    existed: bool,
+    permissions: Option<std::fs::Permissions>,
 }
 
-async fn apply_file_edits(worktree_path: &Path, edits: &[FileEdit]) -> RelayResult<()> {
+async fn prepare_file_edits(
+    worktree_path: &Path,
+    edits: &[FileEdit],
+) -> RelayResult<BTreeMap<PathBuf, StagedEditFile>> {
     if edits.is_empty() {
         return Err(RelayError::Internal(
             "file_edits requires at least one edit entry".into(),
         ));
     }
     let canonical_root = std::fs::canonicalize(worktree_path)?;
-    let mut staged: BTreeMap<PathBuf, StagedEditFile> = BTreeMap::new();
-
-    // Phase 1: Validate every path and apply every edit atomically in memory.
+    let mut staged = BTreeMap::new();
     for (idx, edit) in edits.iter().enumerate() {
         let edit_num = idx + 1;
         let rel = validate_confined_relative_path(&edit.file_path)?;
         let display_path = rel_display_path(&rel);
-        let target_path = ensure_no_symlink_escape(&canonical_root, &rel, &edit.file_path)?;
-
-        match edit.old_text.as_deref() {
-            Some("") => {
-                return Err(RelayError::Internal(format!(
-                    "edit #{edit_num} for '{display_path}': old_text must not be empty; omit old_text or set it to null to overwrite or create the entire file"
-                )));
-            }
-            Some(old_text) => {
-                if !staged.contains_key(&rel) {
-                    let existed = match tokio::fs::symlink_metadata(&target_path).await {
-                        Ok(meta) => {
-                            if meta.file_type().is_symlink() {
-                                return Err(RelayError::Internal(format!(
-                                    "symlink target '{display_path}' is not allowed in file_edits"
-                                )));
-                            }
-                            if !meta.is_file() {
-                                return Err(RelayError::Internal(format!(
-                                    "'{display_path}' is not a regular file"
-                                )));
-                            }
-                            true
-                        }
-                        Err(err) if err.kind() == io::ErrorKind::NotFound => false,
-                        Err(err) => return Err(err.into()),
-                    };
-                    if !existed {
+        if edit.old_text.as_deref() == Some("") {
+            return Err(RelayError::Internal(format!(
+                "edit #{edit_num} for '{display_path}': old_text must not be empty; omit old_text to overwrite or create the file"
+            )));
+        }
+        let file = match staged.entry(rel.clone()) {
+            std::collections::btree_map::Entry::Occupied(entry) => entry.into_mut(),
+            std::collections::btree_map::Entry::Vacant(entry) => {
+                let target = ensure_no_symlink_escape(&canonical_root, &rel, &display_path)?;
+                let metadata = match tokio::fs::symlink_metadata(&target).await {
+                    Ok(meta) if meta.is_file() => Some(meta),
+                    Ok(_) => {
                         return Err(RelayError::Internal(format!(
-                            "edit #{edit_num} for '{display_path}': file does not exist; omit old_text to create a new file"
+                            "'{display_path}' is not a regular file"
                         )));
                     }
-                    let raw = tokio::fs::read(&target_path).await?;
-                    if raw.iter().take(4096).any(|b| *b == 0) {
+                    Err(err) if err.kind() == io::ErrorKind::NotFound => None,
+                    Err(err) => return Err(err.into()),
+                };
+                let ignored = git_command(worktree_path)
+                    .args(["check-ignore", "--quiet", "--"])
+                    .arg(&rel)
+                    .output()
+                    .await?;
+                match ignored.status.code() {
+                    Some(0) => {
                         return Err(RelayError::Internal(format!(
-                            "edit #{edit_num} for '{display_path}': cannot edit binary file"
+                            "'{display_path}' is ignored by Git and cannot be reviewed"
                         )));
                     }
-                    let text = String::from_utf8(raw).map_err(|_| {
-                        RelayError::Internal(format!(
-                            "edit #{edit_num} for '{display_path}': file is not valid UTF-8"
-                        ))
-                    })?;
-                    staged.insert(
-                        rel.clone(),
-                        StagedEditFile {
-                            display_path: display_path.clone(),
-                            target_path,
-                            content: text,
-                            existed: true,
-                        },
-                    );
+                    Some(1) => {}
+                    _ => super::check_git_output(&ignored)?,
                 }
-
-                let entry = staged.get_mut(&rel).expect("staged file loaded");
-                let updated = apply_unique_replacement(
-                    &entry.display_path,
-                    edit_num,
-                    &entry.content,
-                    old_text,
-                    &edit.new_text,
-                )?;
-                entry.content = updated;
-            }
-            None => {
-                if let Some(entry) = staged.get_mut(&rel) {
-                    entry.content.clone_from(&edit.new_text);
+                let content = if edit.old_text.is_some() {
+                    if metadata.is_none() {
+                        return Err(RelayError::Internal(format!(
+                            "edit #{edit_num} for '{display_path}': file does not exist; omit old_text to create it"
+                        )));
+                    }
+                    let text = tokio::fs::read_to_string(&target).await?;
+                    if text.contains('\0') {
+                        return Err(RelayError::Internal(format!(
+                            "'{display_path}' is a binary file"
+                        )));
+                    }
+                    text
                 } else {
-                    let existed = match tokio::fs::symlink_metadata(&target_path).await {
-                        Ok(meta) => {
-                            if meta.file_type().is_symlink() {
-                                return Err(RelayError::Internal(format!(
-                                    "symlink target '{display_path}' is not allowed in file_edits"
-                                )));
-                            }
-                            if meta.is_dir() {
-                                return Err(RelayError::Internal(format!(
-                                    "'{display_path}' is a directory, not a file"
-                                )));
-                            }
-                            true
-                        }
-                        Err(err) if err.kind() == io::ErrorKind::NotFound => false,
-                        Err(err) => return Err(err.into()),
-                    };
-                    staged.insert(
-                        rel.clone(),
-                        StagedEditFile {
-                            display_path,
-                            target_path,
-                            content: edit.new_text.clone(),
-                            existed,
-                        },
-                    );
-                }
+                    String::new()
+                };
+                entry.insert(StagedEditFile {
+                    target,
+                    content,
+                    permissions: metadata.map(|m| m.permissions()),
+                })
             }
+        };
+        if let Some(old) = &edit.old_text {
+            file.content = apply_unique_replacement(
+                &display_path,
+                edit_num,
+                &file.content,
+                old,
+                &edit.new_text,
+            )?;
+        } else {
+            file.content.clone_from(&edit.new_text);
         }
     }
+    Ok(staged)
+}
 
-    // Phase 2: Commit all validated changes to disk; rollback if an I/O error interrupts halfway.
-    let write_result: RelayResult<()> = async {
-        let mut created_paths = Vec::new();
-        for file in staged.values() {
-            if let Some(parent) = file.target_path.parent() {
-                tokio::fs::create_dir_all(parent).await?;
-            }
-            tokio::fs::write(&file.target_path, file.content.as_bytes()).await?;
-            if !file.existed {
-                created_paths.push(file.display_path.as_str());
-            }
+async fn write_file_edits(
+    worktree_path: &Path,
+    staged: &BTreeMap<PathBuf, StagedEditFile>,
+) -> RelayResult<()> {
+    // Write only after every requested replacement has matched. Replacing a
+    // directory entry keeps other hard links to its old contents untouched.
+    for file in staged.values() {
+        let parent = file
+            .target
+            .parent()
+            .expect("validated worktree-relative path");
+        tokio::fs::create_dir_all(parent).await?;
+        let mut temp = tempfile::NamedTempFile::new_in(parent)?;
+        std::io::Write::write_all(&mut temp, file.content.as_bytes())?;
+        if let Some(permissions) = &file.permissions {
+            temp.as_file().set_permissions(permissions.clone())?;
         }
-        if !created_paths.is_empty() {
-            let mut cmd = git_command(worktree_path);
-            cmd.args(["add", "--intent-to-add", "--"]);
-            for path in created_paths {
-                cmd.arg(path);
-            }
-            git_output(&mut cmd).await?;
-        }
-        Ok(())
+        temp.persist(&file.target).map_err(|err| err.error)?;
     }
-    .await;
-
-    if let Err(error) = write_result {
-        let _ = rollback_worktree(worktree_path).await;
-        return Err(error);
-    }
+    // Existing untracked files must also appear in the approval diff.
+    git_output(
+        git_command(worktree_path)
+            .args(["--literal-pathspecs", "add", "--intent-to-add", "--"])
+            .args(staged.keys()),
+    )
+    .await?;
     Ok(())
 }
 
-fn ensure_no_symlink_escape(
-    canonical_root: &Path,
-    rel: &Path,
-    raw: &str,
-) -> RelayResult<PathBuf> {
+fn ensure_no_symlink_escape(canonical_root: &Path, rel: &Path, raw: &str) -> RelayResult<PathBuf> {
     let mut current = canonical_root.to_path_buf();
     let components: Vec<_> = rel.components().collect();
     for (idx, component) in components.iter().enumerate() {
@@ -705,7 +818,14 @@ fn ensure_no_symlink_escape(
         let is_last = idx + 1 == components.len();
         match std::fs::symlink_metadata(&current) {
             Ok(meta) => {
-                if meta.file_type().is_symlink() {
+                #[cfg(windows)]
+                let is_link = {
+                    use std::os::windows::fs::MetadataExt;
+                    meta.file_attributes() & 0x400 != 0 // FILE_ATTRIBUTE_REPARSE_POINT
+                };
+                #[cfg(not(windows))]
+                let is_link = meta.file_type().is_symlink();
+                if is_link {
                     return Err(RelayError::Internal(format!(
                         "symlink path '{raw}' is not allowed inside worktree edits"
                     )));
@@ -738,45 +858,51 @@ fn apply_unique_replacement(
     old_text: &str,
     new_text: &str,
 ) -> RelayResult<String> {
-    let exact_matches: Vec<usize> = content.match_indices(old_text).map(|(pos, _)| pos).collect();
-    if exact_matches.len() == 1 {
-        let pos = exact_matches[0];
-        let mut out = String::with_capacity(content.len() - old_text.len() + new_text.len());
-        out.push_str(&content[..pos]);
-        out.push_str(new_text);
-        out.push_str(&content[pos + old_text.len()..]);
-        return Ok(out);
+    // Preserve unrelated mixed line endings. Normalize only the replacement
+    // to the local line ending and match model-provided LF in CRLF source.
+    let crlf_old = old_text.replace("\r\n", "\n").replace('\n', "\r\n");
+    let needle = if !content.contains(old_text) && content.contains("\r\n") {
+        crlf_old.as_str()
+    } else {
+        old_text
+    };
+    let mut offsets = Vec::new();
+    let mut count = 0usize;
+    let mut start = 0;
+    let step = needle
+        .chars()
+        .next()
+        .expect("validated nonempty old_text")
+        .len_utf8();
+    while let Some(pos) = content[start..].find(needle) {
+        let pos = start + pos;
+        if offsets.len() < 3 {
+            offsets.push(pos);
+        }
+        count += 1;
+        start = pos + step;
     }
-    if exact_matches.len() > 1 {
-        let context = format_multi_match_context(display_path, content, &exact_matches);
+    if count == 1 {
+        let pos = offsets[0];
+        let line_ending = content[pos..]
+            .find('\n')
+            .map(|n| pos + n)
+            .or_else(|| content[..pos].rfind('\n'));
+        let replacement = if line_ending.is_some_and(|n| content[..n].ends_with('\r')) {
+            new_text.replace("\r\n", "\n").replace('\n', "\r\n")
+        } else {
+            new_text.to_owned()
+        };
+        let mut updated = content.to_owned();
+        updated.replace_range(pos..pos + needle.len(), &replacement);
+        return Ok(updated);
+    }
+    if count > 1 {
+        let context = format_multi_match_context(display_path, content, &offsets);
         return Err(RelayError::Internal(format!(
-            "edit #{edit_num} for '{display_path}': old_text matched {} times (must match uniquely). Include more surrounding context lines.\n{context}",
-            exact_matches.len()
+            "edit #{edit_num} for '{display_path}': old_text matched {count} times (must match uniquely). Include more surrounding context lines.\n{context}"
         )));
     }
-
-    // Handle CRLF files when the model provides LF strings.
-    if content.contains("\r\n") && !old_text.contains("\r\n") {
-        let normalized = content.replace("\r\n", "\n");
-        let lf_matches: Vec<usize> = normalized.match_indices(old_text).map(|(pos, _)| pos).collect();
-        if lf_matches.len() == 1 {
-            let pos = lf_matches[0];
-            let mut replaced =
-                String::with_capacity(normalized.len() - old_text.len() + new_text.len());
-            replaced.push_str(&normalized[..pos]);
-            replaced.push_str(&new_text.replace("\r\n", "\n"));
-            replaced.push_str(&normalized[pos + old_text.len()..]);
-            return Ok(replaced.replace('\n', "\r\n"));
-        }
-        if lf_matches.len() > 1 {
-            let context = format_multi_match_context(display_path, &normalized, &lf_matches);
-            return Err(RelayError::Internal(format!(
-                "edit #{edit_num} for '{display_path}': old_text matched {} times (must match uniquely). Include more surrounding context lines.\n{context}",
-                lf_matches.len()
-            )));
-        }
-    }
-
     let context = format_zero_match_context(display_path, content, old_text);
     Err(RelayError::Internal(format!(
         "edit #{edit_num} for '{display_path}': old_text did not match any text in the file. Inspect the numbered lines below and retry with exact text.\n{context}"
@@ -787,6 +913,18 @@ fn byte_offset_to_line(content: &str, byte_offset: usize) -> usize {
     content[..byte_offset].bytes().filter(|&b| b == b'\n').count() + 1
 }
 
+#[cfg(test)]
+#[test]
+fn replacements_preserve_local_line_endings_and_reject_overlapping_matches() {
+    let original = "header\r\nalpha\r\nbeta\r\nfooter\n";
+    let updated =
+        apply_unique_replacement("notes", 1, original, "alpha\nbeta", "one\ntwo").unwrap();
+    assert_eq!(updated, "header\r\none\r\ntwo\r\nfooter\n");
+    let updated = apply_unique_replacement("notes", 1, original, "alpha", "one\ntwo").unwrap();
+    assert_eq!(updated, "header\r\none\r\ntwo\r\nbeta\r\nfooter\n");
+    assert!(apply_unique_replacement("notes", 1, "aaa", "aa", "x").is_err());
+}
+
 fn format_numbered_window(lines: &[&str], start_1based: usize, end_1based: usize) -> String {
     if lines.is_empty() {
         return String::new();
@@ -795,7 +933,10 @@ fn format_numbered_window(lines: &[&str], start_1based: usize, end_1based: usize
     let end = end_1based.max(start).min(lines.len());
     let mut out = String::new();
     for line_no in start..=end {
-        out.push_str(&format!("{line_no:>4}: {}\n", lines[line_no - 1]));
+        let line = lines[line_no - 1];
+        let end = line.floor_char_boundary(384);
+        let suffix = if end < line.len() { "..." } else { "" };
+        out.push_str(&format!("{line_no:>4}: {}{suffix}\n", &line[..end]));
     }
     out
 }
@@ -832,6 +973,8 @@ fn format_zero_match_context(display_path: &str, content: &str, old_text: &str) 
         .lines()
         .map(str::trim)
         .filter(|s| !s.is_empty())
+        .take(4)
+        .map(|s| &s[..s.floor_char_boundary(384)])
         .collect();
     let mut best_line: Option<(usize, usize)> = None;
     for (idx, line) in lines.iter().enumerate() {
@@ -893,10 +1036,9 @@ pub fn extract_error_snippets(worktree_path: &Path, stderr: &str) -> Vec<ErrorSo
         return Vec::new();
     };
     let mut raw_refs: Vec<(String, u32)> = Vec::new();
-    let lines: Vec<&str> = stderr.lines().collect();
     let mut recent_quoted_path: Option<(usize, String)> = None;
 
-    for (idx, line) in lines.iter().enumerate() {
+    for (idx, line) in stderr.lines().enumerate() {
         // 1. Python traceback format: File "<path>", line <N>
         if let Some((path, line_no)) = parse_python_traceback_line(line) {
             raw_refs.push((path, line_no));
@@ -923,60 +1065,34 @@ pub fn extract_error_snippets(worktree_path: &Path, stderr: &str) -> Vec<ErrorSo
         }
     }
 
-    // Resolve against worktree, filter excluded/sensitive dirs, deduplicate keeping latest occurrence.
-    let mut resolved_order: Vec<(String, u32, PathBuf)> = Vec::new();
-    for (raw_path, line_no) in raw_refs {
-        if line_no == 0 {
-            continue;
-        }
-        let Some((display_path, full_path)) = resolve_snippet_target(&canonical_root, &raw_path)
-        else {
-            continue;
-        };
-        if let Some(pos) = resolved_order
-            .iter()
-            .position(|(p, l, _)| p == &display_path && *l == line_no)
-        {
-            resolved_order.remove(pos);
-        }
-        resolved_order.push((display_path, line_no, full_path));
-    }
-
-    // Keep the innermost/last MAX_ERROR_SNIPPETS locations (closest to the crash site).
-    if resolved_order.len() > MAX_ERROR_SNIPPETS {
-        let drop_count = resolved_order.len() - MAX_ERROR_SNIPPETS;
-        resolved_order.drain(0..drop_count);
-    }
-
+    // Prefer the innermost valid frames, then present them in traceback order.
     let mut snippets = Vec::new();
-    for (display_path, line_no, full_path) in resolved_order {
-        let Ok(bytes) = std::fs::read(&full_path) else {
+    let mut seen = BTreeSet::new();
+    for (raw_path, line_no) in raw_refs.into_iter().rev() {
+        let Some((path, full)) = resolve_snippet_target(&canonical_root, &raw_path) else {
             continue;
         };
-        if bytes.iter().take(4096).any(|b| *b == 0) {
+        if line_no == 0 || !seen.insert((path.clone(), line_no)) {
             continue;
         }
-        let Ok(text) = std::str::from_utf8(&bytes) else {
+        let start = line_no.saturating_sub(ERROR_SNIPPET_RADIUS).max(1);
+        let end = line_no.saturating_add(ERROR_SNIPPET_RADIUS);
+        let Ok(view) = super::read_source_window(&full, path, start, end, 8192) else {
             continue;
         };
-        let file_lines: Vec<&str> = text.lines().collect();
-        if file_lines.is_empty() {
+        if line_no > view.end_line {
             continue;
         }
-        let clamped_line = (line_no as usize).min(file_lines.len()).max(1);
-        let start = clamped_line.saturating_sub(ERROR_SNIPPET_RADIUS).max(1);
-        let end = clamped_line
-            .saturating_add(ERROR_SNIPPET_RADIUS)
-            .min(file_lines.len());
-        let snippet = format_numbered_window(&file_lines, start, end)
-            .trim_end_matches('\n')
-            .to_owned();
         snippets.push(ErrorSourceSnippet {
-            file_path: display_path,
+            file_path: view.file_path,
             line: line_no,
-            snippet,
+            snippet: view.content.trim_end_matches('\n').to_owned(),
         });
+        if snippets.len() == MAX_ERROR_SNIPPETS {
+            break;
+        }
     }
+    snippets.reverse();
     snippets
 }
 
@@ -1006,6 +1122,7 @@ fn parse_colon_file_line_refs(line: &str) -> Vec<(String, u32)> {
 
 fn split_path_and_line(token: &str) -> Option<(&str, u32)> {
     // Support `path:line` and `path:line:col`, including Windows drive letters like `C:\dir\a.py:12:4`.
+    let token = token.trim_end_matches(':');
     let bytes = token.as_bytes();
     let min_colon = if bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' {
         2
