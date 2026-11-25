@@ -91,11 +91,6 @@ impl DesktopRuntime {
         };
 
         let workspace_info = inspect_workspace(repo_root.as_deref());
-        if let Some(root) = repo_root.as_deref()
-            && let Err(error) = crate::recent_workspaces::record_recent_workspace(&base_data_dir, root)
-        {
-            tracing::warn!(%error, "Unable to record recent workspace");
-        }
         let repo_id = workspace_info.repo_id.clone();
         let repo_data_dir = base_data_dir
             .join("repos")
@@ -117,8 +112,11 @@ impl DesktopRuntime {
             .map(|root| WorktreeSandbox::new(root, repo_data_dir.join("worktrees")));
 
         let mode = engine.runtime_mode().await;
-        let (network, events, reconnect_events) =
+        let (mut network, events) =
             Network::start(mode, &repo_data_dir, &engine, sandbox.clone()).await?;
+        let reconnect = network
+            .start_auto_reconnect(&engine)
+            .map(|events| (network.local.clone(), events));
 
         let origin = network.executor_node().id().to_string();
         if let Some(sb) = &sandbox {
@@ -140,6 +138,11 @@ impl DesktopRuntime {
             sandbox.clone(),
             Some(network.executor_node().clone()),
         ));
+        if let Some(root) = repo_root.as_deref()
+            && let Err(error) = crate::recent_workspaces::record_recent_workspace(&base_data_dir, root)
+        {
+            tracing::warn!(%error, "Unable to record recent workspace");
+        }
         let (shutdown, _) = watch::channel(false);
         let runtime = Arc::new(Self {
             engine,
@@ -156,8 +159,8 @@ impl DesktopRuntime {
         });
         runtime.listen(events, mode);
         runtime.start_task_log_forwarder();
-        if let Some(reconnect_events) = reconnect_events {
-            runtime.listen_reconnects(reconnect_events);
+        if let Some((node, reconnect_events)) = reconnect {
+            runtime.listen_reconnects(node, reconnect_events);
         }
         runtime.start_peer_sync();
         runtime.start_git_head_watcher();
@@ -314,7 +317,7 @@ impl DesktopRuntime {
             if current.mode == mode {
                 return Ok(mode);
             }
-            let (next, events, reconnect_events) = Network::start(
+            let (mut next, events) = Network::start(
                 mode,
                 &runtime.repo_data_dir,
                 &runtime.engine,
@@ -325,11 +328,14 @@ impl DesktopRuntime {
                 next.shutdown().await;
                 return Err(error);
             }
+            let reconnect = next
+                .start_auto_reconnect(&runtime.engine)
+                .map(|events| (next.local.clone(), events));
             runtime.mcp.set_node(next.executor_node().clone());
             let previous = guard.replace(next);
             runtime.listen(events, mode);
-            if let Some(reconnect_events) = reconnect_events {
-                runtime.listen_reconnects(reconnect_events);
+            if let Some((node, reconnect_events)) = reconnect {
+                runtime.listen_reconnects(node, reconnect_events);
             }
             if let Some(previous) = previous {
                 previous.shutdown().await;
@@ -385,6 +391,7 @@ impl DesktopRuntime {
             ));
         }
 
+        network.cancel_auto_reconnect();
         let local_id = network.local.id().to_string();
         if let Err(error) = network.local.ping_peer(address.clone(), &local_id).await {
             if let Some(previous) = &network.remote {
@@ -392,7 +399,6 @@ impl DesktopRuntime {
             }
             return Err(error);
         }
-        network.cancel_auto_reconnect();
         if network.remote.as_ref().map(|peer| peer.id) != Some(address.id) {
             network.last_pushed_commit = None;
         }
@@ -401,8 +407,6 @@ impl DesktopRuntime {
 
         if network.mode == RuntimeMode::Client {
             self.refresh_from_host(network).await?;
-        } else {
-            network.local.flush_outbox(address).await?;
         }
         Ok(network.local.peer_status())
     }
@@ -435,6 +439,9 @@ impl DesktopRuntime {
             return Err(RelayError::PeerRevoked(node_id.to_owned()));
         }
         let address = parse_pairing_ticket(&peer.ticket_or_addrs)?;
+        if address.id.to_string() != peer.node_id {
+            return Err(RelayError::Transport("Saved address belongs to a different device".into()));
+        }
         let mut guard = self.network.lock().await;
         let network = guard
             .as_mut()
@@ -450,6 +457,7 @@ impl DesktopRuntime {
             ));
         }
 
+        network.cancel_auto_reconnect();
         let local_id = network.local.id().to_string();
         if let Err(error) = network.local.ping_peer(address.clone(), &local_id).await {
             if let Some(previous) = &network.remote {
@@ -457,7 +465,6 @@ impl DesktopRuntime {
             }
             return Err(error);
         }
-        network.cancel_auto_reconnect();
         if network.remote.as_ref().map(|active| active.id) != Some(address.id) {
             network.last_pushed_commit = None;
         }
@@ -466,8 +473,6 @@ impl DesktopRuntime {
 
         if network.mode == RuntimeMode::Client {
             self.refresh_from_host(network).await?;
-        } else {
-            network.local.flush_outbox(address).await?;
         }
         Ok(network.local.peer_status())
     }
@@ -564,12 +569,12 @@ impl DesktopRuntime {
                         }
                         Err(RelayError::Transport(error)) => {
                             tracing::debug!(%error, "Queueing task for the disconnected host");
-                            self.engine.queue_peer_task(spec).await?
+                            self.engine.queue_peer_task(spec, network.remote.as_ref().map(|peer| peer.id.to_string())).await?
                         }
                         Err(error) => return Err(error),
                     }
                 } else {
-                    self.engine.queue_peer_task(spec).await?
+                    self.engine.queue_peer_task(spec, None).await?
                 }
             }
         };
@@ -602,12 +607,12 @@ impl DesktopRuntime {
                         }
                         Err(RelayError::Transport(error)) => {
                             tracing::debug!(%error, "Queueing task cancellation for the disconnected host");
-                            self.engine.queue_peer_cancel(task_id).await?
+                            self.engine.queue_peer_cancel(task_id, network.remote.as_ref().map(|peer| peer.id.to_string())).await?
                         }
                         Err(error) => return Err(error),
                     }
                 } else {
-                    self.engine.queue_peer_cancel(task_id).await?
+                    self.engine.queue_peer_cancel(task_id, None).await?
                 }
             }
         };
@@ -667,7 +672,7 @@ impl DesktopRuntime {
         }
         let record = if network.mode == RuntimeMode::Client {
             self.engine
-                .queue_peer_approval(task_id, patch_id.as_deref(), decision)
+                .queue_peer_approval(task_id, patch_id.as_deref(), decision, network.remote.as_ref().map(|peer| peer.id.to_string()))
                 .await?
         } else {
             self.engine
@@ -857,7 +862,7 @@ impl DesktopRuntime {
         }
     }
 
-    fn listen_reconnects(self: &Arc<Self>, mut reconnects: ReconnectEvents) {
+    fn listen_reconnects(self: &Arc<Self>, node: Arc<relay_core::sync::RelayNode>, mut reconnects: ReconnectEvents) {
         let runtime = Arc::downgrade(self);
         let mut shutdown_rx = self.shutdown.subscribe();
         tauri::async_runtime::spawn(async move {
@@ -875,23 +880,20 @@ impl DesktopRuntime {
                         let Some(runtime) = runtime.upgrade() else {
                             break;
                         };
-                        if runtime
-                            .engine
-                            .is_peer_revoked(&reconnected.record.node_id)
-                            .await
-                            .unwrap_or(true)
-                        {
-                            continue;
-                        }
                         let mut guard = runtime.network.lock().await;
                         let Some(network) = guard.as_mut() else {
                             break;
                         };
-                        if network.mode == RuntimeMode::LocalDualSandbox
-                            || network.local.id() == reconnected.addr.id
+                        if !Arc::ptr_eq(&network.local, &node)
+                            || network.auto_reconnect.is_none()
+                            || !matches!(
+                                runtime.engine.get_trusted_peer(&reconnected.record.node_id).await,
+                                Ok(Some(peer)) if !peer.is_revoked()
+                            )
                         {
                             continue;
                         }
+                        network.cancel_auto_reconnect();
                         if network.remote.as_ref().map(|peer| peer.id) != Some(reconnected.addr.id) {
                             network.last_pushed_commit = None;
                         }
@@ -901,13 +903,6 @@ impl DesktopRuntime {
                             "peer_paired",
                             format!("Reconnected to {}", reconnected.record.label),
                         );
-                        if reconnected.flushed_outbox > 0 {
-                            emit_state(
-                                &runtime.app,
-                                "outbox_flushed",
-                                format!("Delivered {} queued requests", reconnected.flushed_outbox),
-                            );
-                        }
                         if network.mode == RuntimeMode::Client
                             && let Err(error) = runtime.refresh_from_host(network).await
                         {

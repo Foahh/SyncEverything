@@ -1,6 +1,7 @@
 use super::{RelayNode, parse_pairing_ticket};
-use crate::contracts::{PeerStatus, TrustedPeerRecord};
+use crate::contracts::{PeerRole, PeerStatus, RuntimeMode, TrustedPeerRecord};
 use crate::engine::RelayEngine;
+use crate::error::RelayError;
 use iroh::EndpointAddr;
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -38,7 +39,6 @@ pub struct ReconnectedPeer {
     pub record: TrustedPeerRecord,
     pub addr: EndpointAddr,
     pub status: PeerStatus,
-    pub flushed_outbox: u32,
 }
 
 /// Owns the background auto-reconnect task and cancels it cleanly on `cancel()` or drop.
@@ -77,6 +77,11 @@ pub fn spawn_auto_reconnect(
 
     let task = tokio::spawn(async move {
         let local_id = node.id().to_string();
+        let expected_role = match engine.observed_runtime_mode() {
+            RuntimeMode::Client => PeerRole::Host,
+            RuntimeMode::Host => PeerRole::Client,
+            RuntimeMode::LocalDualSandbox => return,
+        };
         let initial = config.initial_backoff.max(Duration::from_millis(10));
         let max_backoff = config.max_backoff.max(initial);
         let mut backoff = initial;
@@ -105,11 +110,13 @@ pub fn spawn_auto_reconnect(
                 .filter(|peer| {
                     !peer.is_revoked()
                         && peer.node_id != local_id
+                        && peer.role == expected_role
                         && !remotely_revoked.contains(&peer.node_id)
                 })
                 .filter_map(|peer| {
                     parse_pairing_ticket(&peer.ticket_or_addrs)
                         .ok()
+                        .filter(|addr| addr.id.to_string() == peer.node_id)
                         .map(|addr| (peer, addr))
                 })
                 .collect();
@@ -145,35 +152,22 @@ pub fn spawn_auto_reconnect(
 
                 match ping_attempt {
                     Ok(Ok(remote_status)) => {
-                        let flushed_outbox = match node.flush_outbox(addr.clone()).await {
-                            Ok(count) => count,
-                            Err(error) => {
-                                warn!(
-                                    node_id = %record.node_id,
-                                    %error,
-                                    "Reconnected to trusted peer, but outbox flush did not complete"
-                                );
-                                0
-                            }
-                        };
                         info!(
                             node_id = %record.node_id,
                             label = %record.label,
-                            flushed_outbox,
                             "Auto-reconnected to trusted peer"
                         );
+                        // The runtime must synchronize repository inputs before replaying queued work.
                         let _ = reconnected_tx.send(ReconnectedPeer {
                             record,
                             addr,
                             status: remote_status,
-                            flushed_outbox,
                         });
                         connected = true;
                         break;
                     }
                     Ok(Err(error)) => {
-                        let message = error.to_string();
-                        if message.contains("PEER_REVOKED") {
+                        if matches!(error, RelayError::PeerRevoked(_)) {
                             warn!(
                                 node_id = %record.node_id,
                                 "Trusted peer rejected auto-reconnect with PEER_REVOKED; skipping further retries"

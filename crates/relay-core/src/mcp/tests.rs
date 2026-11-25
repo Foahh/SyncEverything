@@ -511,3 +511,41 @@ else:
     assert!(!content.contains("never reached"));
     assert_eq!(hash, blake3::hash(content.as_bytes()).to_hex().to_string());
 }
+
+#[tokio::test]
+async fn cancelling_patch_verification_persists_its_partial_log() {
+    let fixture = Fixture::with_script("print('original smoke log', flush=True)\n").await;
+    let server = fixture.server();
+    let id = fixture.submit("0.5", false).await;
+    let mut chunks = fixture.engine.subscribe_task_logs();
+    let patch_server = server.clone();
+    let operation = tokio::spawn(async move {
+        patch_server.handle_propose_patch(ProposeWorktreePatchArgs {
+            task_id: id.to_string(),
+            patch_kind: "code_diff".into(),
+            summary: "Verify a candidate change".into(),
+            dependency_spec: None,
+            edits: Some(vec![FileEdit {
+                file_path: "src/app.py".into(),
+                old_text: None,
+                new_text: "import time\nprint('verification started', flush=True)\ntime.sleep(30)\n".into(),
+            }]),
+        }).await
+    });
+    tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            if chunks.recv().await.unwrap().text.contains("verification started") {
+                break;
+            }
+        }
+    }).await.expect("patch smoke did not start");
+    fixture.engine.cancel_task(id).await.unwrap();
+    let result = tokio::time::timeout(Duration::from_secs(10), operation)
+        .await
+        .expect("patch smoke did not stop")
+        .unwrap();
+    assert!(matches!(result, Err(RelayError::TaskCancelled(_))));
+    let (_, log) = fixture.engine.read_task_log(id).await.unwrap().unwrap();
+    assert!(log.contains("verification started"));
+    assert!(!fixture.sandbox.task_worktree(id).unwrap().0.exists());
+}

@@ -331,6 +331,7 @@ fn custom_adapter_registers_into_registry_without_core_changes() {
             &'a self,
             _worktree_path: &'a Path,
             _spec: &'a str,
+            _options: DependencyRunOptions,
         ) -> BoxFuture<'a, RelayResult<()>> {
             Box::pin(async { Ok(()) })
         }
@@ -511,6 +512,55 @@ async fn env_diff_supports_js_lockfile_variants_bun_pnpm_yarn_npm() {
     assert_eq!(npm_diff.package_manager, "npm");
     assert!(npm_diff.host_env_fingerprint.starts_with("npm:blake3:"));
     assert_eq!(npm_diff.missing_packages, vec!["zod"]);
+}
+
+#[test]
+fn commit_detection_requires_the_selected_javascript_manager_lockfile() {
+    let registry = PackageManagerRegistry::builtin();
+    for (lockfile, expected) in [
+        ("bun.lock", "bun"),
+        ("pnpm-lock.yaml", "pnpm"),
+        ("yarn.lock", "yarn"),
+        ("package-lock.json", "npm"),
+    ] {
+        let adapter = registry.detect_from_file_presence(|file| {
+            file == "package.json" || file == lockfile
+        });
+        assert_eq!(adapter.name(), expected);
+    }
+}
+
+#[tokio::test]
+async fn env_diff_tracks_the_package_manager_of_each_checkout() {
+    let repo = TempDir::new("env-switch-manager");
+    init_git_repo(repo.path()).await;
+    fs::write(
+        repo.join("package.json"),
+        r#"{"name":"example","dependencies":{"zod":"3.23.8"}}"#,
+    )
+    .unwrap();
+    fs::write(
+        repo.join("package-lock.json"),
+        r#"{"lockfileVersion":3,"packages":{"node_modules/zod":{"version":"3.23.8"}}}"#,
+    )
+    .unwrap();
+    let npm_head = commit_all(repo.path(), "npm initial").await;
+    let npm_fingerprint = compute_env_fingerprint(repo.path()).unwrap();
+    fs::remove_file(repo.join("package-lock.json")).unwrap();
+    fs::write(
+        repo.join("pnpm-lock.yaml"),
+        "lockfileVersion: '9.0'\npackages:\n  zod@3.24.0:\n    resolution: {}\n",
+    )
+    .unwrap();
+
+    let sandbox = WorktreeSandbox::new(repo.path(), repo.join("worktrees"));
+    let diff = sandbox.check_env_diff("HEAD").await.unwrap();
+    assert_eq!(diff.package_manager, "npm");
+    assert_eq!(diff.repo_env_fingerprint, npm_fingerprint);
+    assert_eq!(diff.host_env_fingerprint, compute_env_fingerprint(repo.path()).unwrap());
+    assert_eq!(sandbox.env_fingerprint_at_commit(&npm_head).await.unwrap(), npm_fingerprint);
+    assert!(!diff.in_sync);
+    assert!(diff.notes.iter().any(|note| note.contains("commit 'npm' vs host 'pnpm'")));
 }
 
 #[test]
@@ -713,7 +763,7 @@ async fn l3_generic_cargo_js_adapters_and_mcp_reject_legacy_patch_kinds() {
     fs::create_dir(&generic_dir).unwrap();
     let err = adapter_by_name("generic")
         .unwrap()
-        .add_dependency(&generic_dir, "foo")
+        .add_dependency(&generic_dir, "foo", DependencyRunOptions::default())
         .await
         .unwrap_err();
     assert!(
@@ -726,7 +776,7 @@ async fn l3_generic_cargo_js_adapters_and_mcp_reject_legacy_patch_kinds() {
     fs::create_dir(&cargo_dir).unwrap();
     let cargo_missing = adapter_by_name("cargo")
         .unwrap()
-        .add_dependency(&cargo_dir, "serde@1.0")
+        .add_dependency(&cargo_dir, "serde@1.0", DependencyRunOptions::default())
         .await
         .unwrap_err();
     assert!(cargo_missing.to_string().contains("Cargo.toml"), "{cargo_missing}");
@@ -735,7 +785,7 @@ async fn l3_generic_cargo_js_adapters_and_mcp_reject_legacy_patch_kinds() {
     fs::create_dir(&js_dir).unwrap();
     let js_missing = adapter_by_name("bun")
         .unwrap()
-        .add_dependency(&js_dir, "zod@3.23.8")
+        .add_dependency(&js_dir, "zod@3.23.8", DependencyRunOptions::default())
         .await
         .unwrap_err();
     assert!(js_missing.to_string().contains("package.json"), "{js_missing}");

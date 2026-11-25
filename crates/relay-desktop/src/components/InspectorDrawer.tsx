@@ -313,13 +313,13 @@ function TaskInspectorBody({
 
       <TaskLogViewer
         key={task.spec.task_id}
-        taskId={task.spec.task_id}
         taskState={task.state}
+        waitingForApproval={needsTaskApproval(task)}
         buffer={buffer}
         persistedLog={persistedLog}
       />
 
-      {task.state === "cancelled" && (buffer?.chunks.length || persistedLog?.content) && (
+      {task.state === "cancelled" && Boolean(persistedLog?.content) && (
         <p className="text-[11.5px] text-muted-foreground">{t("detail.partialLogSaved")}</p>
       )}
 

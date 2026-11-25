@@ -1,15 +1,17 @@
 use super::security::{
     ensure_regular_or_absent, pm_error, stage_intent_to_add, validate_uv_dependency_spec,
 };
-use super::{BoxFuture, EnvFileSnapshot, PackageManagerAdapter, ParsedDependencies, StarterPresets};
+use super::{
+    BoxFuture, DependencyRunOptions, EnvFileSnapshot, PackageManagerAdapter, ParsedDependencies,
+    StarterPresets,
+};
 use crate::contracts::CommandPreset;
 use crate::error::{RelayError, RelayResult};
-use crate::sandbox::execution::worktree_command;
+use crate::sandbox::execution::{run_dependency_command, worktree_command};
 use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::io;
 use std::path::Path;
-use std::process::Stdio;
 
 const PYPROJECT: &str = "pyproject.toml";
 const UV_LOCK: &str = "uv.lock";
@@ -135,17 +137,15 @@ impl PackageManagerAdapter for UvAdapter {
         &'a self,
         worktree_path: &'a Path,
         spec: &'a str,
+        options: DependencyRunOptions,
     ) -> BoxFuture<'a, RelayResult<()>> {
         Box::pin(async move {
             let validated = validate_uv_dependency_spec(worktree_path, spec)?;
             ensure_regular_or_absent("uv", worktree_path, &[PYPROJECT, UV_LOCK], &[PYPROJECT])?;
 
-            let output = worktree_command("uv", worktree_path, None)
-                .args(["add", "--no-sync", "--", &validated])
-                .stdin(Stdio::null())
-                .kill_on_drop(true)
-                .output()
-                .await?;
+            let mut command = worktree_command("uv", worktree_path, None);
+            command.args(["add", "--no-sync", "--", &validated]);
+            let output = run_dependency_command(command, "uv", options).await?;
             if !output.status.success() {
                 let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
                 let detail = if stderr.is_empty() {

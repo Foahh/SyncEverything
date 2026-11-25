@@ -36,6 +36,37 @@ fn run_daemon(args: &[&str]) -> Output {
 }
 
 #[test]
+fn doctor_checks_only_the_workspaces_selected_package_manager() {
+    let repo = TempRepo::new("doctor-workspace");
+    fs::create_dir(repo.path().join(".git")).unwrap();
+    let repo_path = repo.path().to_string_lossy();
+    let data = repo.path().join("state");
+    let data_path = data.to_string_lossy();
+    for manager in ["generic", "cargo", "unavailable-adapter"] {
+        fs::write(
+            repo.path().join("relay.toml"),
+            format!(
+                "[project]\nrepo_id = 'doctor'\nname = 'Doctor'\npackage_manager = '{manager}'\n\
+                 [presets.smoke]\nprogram = 'git'\nargs = ['status']\ndescription = 'Status'\ntimeout_secs = 5\n"
+            ),
+        )
+        .unwrap();
+        let output = run_daemon(&[
+            "--repo-root", &repo_path, "--data-dir", &data_path, "doctor", "--json", "--skip-llm",
+        ]);
+        let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(output.status.success(), manager != "unavailable-adapter", "{report}");
+        let checks = report["checks"].as_array().unwrap();
+        assert!(!checks.iter().any(|check| check["name"] == "uv"), "{report}");
+        assert_eq!(
+            checks.iter().any(|check| check["name"] == "cargo" && check["status"] == "ok"),
+            manager == "cargo",
+            "{report}",
+        );
+    }
+}
+
+#[test]
 fn init_dry_run_prints_summary_and_valid_preview_without_writing_file() {
     let repo = TempRepo::new("python-ml-demo");
     fs::write(

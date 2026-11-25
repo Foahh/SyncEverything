@@ -16,19 +16,21 @@ use crate::engine::RelayEngine;
 use crate::error::{RelayError, RelayResult};
 use crate::sandbox::{WorktreeSandbox, compute_env_fingerprint};
 use chrono::Utc;
-use iroh::endpoint::{Connection, NetReportConfig, PortmapperConfig, presets};
+use iroh::endpoint::{Connection, NetReportConfig, PortmapperConfig, WeakConnectionHandle, presets};
 use iroh::protocol::Router;
 use iroh::{Endpoint, EndpointAddr, EndpointId, RelayMode, SecretKey};
 use iroh_blobs::store::fs::FsStore;
 use iroh_blobs::{BlobsProtocol, Hash};
 use peer::PeerState;
 use rpc::{RevocationGuardedBlobs, encode_frame, read_frame, write_frame};
+use std::collections::BTreeMap;
+use std::io::{ErrorKind, Write};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
-use tracing::{info, warn};
+use tracing::info;
 use uuid::Uuid;
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -72,6 +74,7 @@ struct NodeState {
     blob_dir: PathBuf,
     profile: NetworkProfile,
     peer: Mutex<PeerState>,
+    active_connections: Mutex<BTreeMap<(EndpointId, Uuid), WeakConnectionHandle>>,
     events: Option<mpsc::UnboundedSender<RelayNodeEvent>>,
 }
 
@@ -141,7 +144,6 @@ impl RelayNode {
         }
         .map_err(transport_error)?;
         let store = FsStore::load(&blob_dir).await.map_err(transport_error)?;
-        let blobs = RevocationGuardedBlobs::new(BlobsProtocol::new(&store, None), engine.clone());
         let shared = Arc::new(NodeState {
             endpoint: endpoint.clone(),
             store,
@@ -149,8 +151,10 @@ impl RelayNode {
             blob_dir,
             profile: config.profile,
             peer: Mutex::default(),
+            active_connections: Mutex::default(),
             events,
         });
+        let blobs = RevocationGuardedBlobs::new(BlobsProtocol::new(&shared.store, None), shared.clone());
         let router = Router::builder(endpoint)
             .accept(iroh_blobs::ALPN, blobs)
             .accept(RELAY_RPC_ALPN, RelayRpcHandler::new(shared.clone(), config.sandbox))
@@ -210,6 +214,15 @@ impl RelayNode {
     /// Close active inbound/outbound QUIC connections for `peer_id` and clear its selection.
     pub fn disconnect_peer(&self, peer_id: EndpointId) {
         self.shared.peer().disconnect(peer_id);
+        self.shared.active_connections.lock().expect("connection state lock poisoned").retain(|(id, _), handle| {
+            if *id != peer_id {
+                return true;
+            }
+            if let Some(conn) = handle.upgrade() {
+                conn.close(1u32.into(), b"peer disconnected");
+            }
+            false
+        });
     }
 
     /// Register stored addresses for all active (non-revoked) trusted peers.
@@ -220,7 +233,9 @@ impl RelayNode {
             if peer.is_revoked() || peer.node_id == local_id {
                 continue;
             }
-            if let Ok(addr) = parse_pairing_ticket(&peer.ticket_or_addrs) {
+            if let Ok(addr) = parse_pairing_ticket(&peer.ticket_or_addrs)
+                && addr.id.to_string() == peer.node_id
+            {
                 self.register_peer_addr(addr);
                 count = count.saturating_add(1);
             }
@@ -243,28 +258,30 @@ impl RelayNode {
     ) -> RelayResult<WireResponse> {
         let encoded = encode_frame(&request)?;
         let remote_id = peer_addr.id;
-        self.set_remote_peer(peer_addr);
+        self.shared.require_nonrevoked(remote_id).await?;
+        self.register_peer_addr(peer_addr);
         let (addr, cached) = {
             let peer = self.shared.peer();
             (peer.addr(remote_id), peer.outbound(remote_id))
         };
         let (conn, response, started) = if let Some(cached_conn) = cached {
             let started = Instant::now();
-            match exchange_rpc(&cached_conn, &encoded).await {
+            match self.shared.exchange_rpc(&cached_conn, &encoded).await {
                 Ok(response) => (cached_conn, Ok(response), started),
-                Err(_) => {
+                Err(RelayError::Transport(_)) => {
                     // Cached QUIC connection may have been closed remotely; retry once on a fresh dial.
                     self.shared.peer().forget_outbound(&cached_conn);
                     let fresh = self.shared.connect(addr, RELAY_RPC_ALPN).await?;
                     let started = Instant::now();
-                    let response = exchange_rpc(&fresh, &encoded).await;
+                    let response = self.shared.exchange_rpc(&fresh, &encoded).await;
                     (fresh, response, started)
                 }
+                Err(error) => return Err(error),
             }
         } else {
             let fresh = self.shared.connect(addr, RELAY_RPC_ALPN).await?;
             let started = Instant::now();
-            let response = exchange_rpc(&fresh, &encoded).await;
+            let response = self.shared.exchange_rpc(&fresh, &encoded).await;
             (fresh, response, started)
         };
 
@@ -278,6 +295,7 @@ impl RelayNode {
                     peer.forget_outbound(&conn);
                     conn.close(1u32.into(), b"rejected");
                 } else {
+                    peer.select(remote_id);
                     let commit = match (&request, &response) {
                         (
                             WireRequest::SyncDagDelta { .. } | WireRequest::FetchDagSnapshot { .. },
@@ -319,16 +337,27 @@ impl RelayNode {
                         node_id: remote_id.clone(),
                         label: default_peer_label(&remote_id, role),
                         role,
-                        ticket_or_addrs: serde_json::to_string(&peer_addr).unwrap_or_default(),
+                        ticket_or_addrs: serde_json::to_string(&peer_addr)?,
                         paired_at: now,
                         last_seen_at: now,
                         revoked_at: None,
                     };
-                    if let Err(error) = self.shared.engine.upsert_trusted_peer(&record).await {
-                        warn!(node_id = %remote_id, %error, "Unable to persist trusted peer after ping");
+                    match self.shared.engine.upsert_trusted_peer(&record).await {
+                        Ok(stored) if !stored.is_revoked() => {}
+                        Ok(_) => {
+                            self.disconnect_peer(peer_addr.id);
+                            return Err(RelayError::PeerRevoked(remote_id));
+                        }
+                        Err(error) => {
+                            self.disconnect_peer(peer_addr.id);
+                            return Err(error);
+                        }
                     }
                 }
                 Ok(status)
+            }
+            WireResponse::Error { code, .. } if code == "PEER_REVOKED" => {
+                Err(RelayError::PeerRevoked(peer_addr.id.to_string()))
             }
             response => Err(unexpected_response(response, "pong")),
         }
@@ -477,8 +506,9 @@ impl RelayNode {
     pub async fn flush_outbox(&self, peer_addr: EndpointAddr) -> RelayResult<u32> {
         let engine = &self.shared.engine;
         let _guard = engine.lock_outbox_flush().await;
+        self.shared.require_nonrevoked(peer_addr.id).await?;
         let mut delivered = 0;
-        for (seq, _, payload) in engine.list_pending_outbox().await? {
+        for (seq, payload) in engine.claim_peer_outbox(&peer_addr.id.to_string()).await? {
             let request = serde_json::from_value(payload)?;
             let expected = reply_kind(&request);
             let response = self.send_rpc(peer_addr.clone(), request).await?;
@@ -495,6 +525,23 @@ impl RelayNode {
 impl NodeState {
     fn peer(&self) -> MutexGuard<'_, PeerState> {
         self.peer.lock().expect("peer state lock poisoned")
+    }
+
+    fn track_connection(&self, connection: &Connection) -> ActiveConnection<'_> {
+        let key = (connection.remote_id(), Uuid::now_v7());
+        self.active_connections
+            .lock()
+            .expect("connection state lock poisoned")
+            .insert(key, connection.weak_handle());
+        ActiveConnection { node: self, key }
+    }
+
+    async fn require_nonrevoked(&self, id: EndpointId) -> RelayResult<()> {
+        let id = id.to_string();
+        if self.engine.is_peer_revoked(&id).await? {
+            return Err(RelayError::PeerRevoked(id));
+        }
+        Ok(())
     }
 
     async fn connect(&self, addr: EndpointAddr, alpn: &[u8]) -> RelayResult<Connection> {
@@ -531,8 +578,11 @@ impl NodeState {
     }
 
     async fn pull_blob_from(&self, addr: EndpointAddr, hash: Hash) -> RelayResult<()> {
+        self.require_nonrevoked(addr.id).await?;
         if !self.store.blobs().has(hash).await.map_err(transport_error)? {
             let conn = self.connect(addr, iroh_blobs::ALPN).await?;
+            let _active = self.track_connection(&conn);
+            self.require_nonrevoked(conn.remote_id()).await?;
             self.store
                 .remote()
                 .fetch(conn, hash)
@@ -541,6 +591,32 @@ impl NodeState {
             self.store.tags().create(hash).await.map_err(transport_error)?;
         }
         Ok(())
+    }
+
+    async fn exchange_rpc(&self, conn: &Connection, encoded: &[u8]) -> RelayResult<WireResponse> {
+        let _active = self.track_connection(conn);
+        self.require_nonrevoked(conn.remote_id()).await?;
+        tokio::time::timeout(RPC_TIMEOUT, async {
+            let (mut send, mut recv) = conn.open_bi().await.map_err(transport_error)?;
+            write_frame(&mut send, encoded).await?;
+            read_frame(&mut recv).await
+        })
+        .await
+        .unwrap_or_else(|_| Err(RelayError::Transport("Relay RPC timed out".into())))
+    }
+}
+
+struct ActiveConnection<'a> {
+    node: &'a NodeState,
+    key: (EndpointId, Uuid),
+}
+
+impl Drop for ActiveConnection<'_> {
+    fn drop(&mut self) {
+        self.node.active_connections
+            .lock()
+            .expect("connection state lock poisoned")
+            .remove(&self.key);
     }
 }
 
@@ -636,23 +712,31 @@ pub fn parse_pairing_ticket(raw: &str) -> RelayResult<EndpointAddr> {
 
 async fn load_or_create_secret_key(blob_dir: &Path) -> RelayResult<SecretKey> {
     let key_path = blob_dir.join("node.key");
-    match tokio::fs::read(&key_path).await {
-        Ok(bytes) => {
-            let raw: [u8; 32] = bytes.try_into().map_err(|_| {
-                RelayError::Transport(format!(
-                    "invalid node secret key length at {}",
-                    key_path.display()
-                ))
-            })?;
-            Ok(SecretKey::from_bytes(&raw))
+    let bytes = match tokio::fs::read(&key_path).await {
+        Ok(bytes) => bytes,
+        Err(err) if err.kind() == ErrorKind::NotFound => {
+            let dir = blob_dir.to_path_buf();
+            let path = key_path.clone();
+            tokio::task::spawn_blocking(move || {
+                let key = SecretKey::generate().to_bytes();
+                let mut temp = tempfile::NamedTempFile::new_in(dir)?;
+                temp.write_all(&key)?;
+                temp.as_file().sync_all()?;
+                match temp.persist_noclobber(&path) {
+                    Ok(_) => Ok(key.to_vec()),
+                    Err(error) if error.error.kind() == ErrorKind::AlreadyExists => std::fs::read(path),
+                    Err(error) => Err(error.error),
+                }
+            })
+            .await
+            .map_err(transport_error)??
         }
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-            let key = SecretKey::generate();
-            tokio::fs::write(&key_path, key.to_bytes()).await?;
-            Ok(key)
-        }
-        Err(err) => Err(err.into()),
-    }
+        Err(err) => return Err(err.into()),
+    };
+    let raw: [u8; 32] = bytes.try_into().map_err(|_| {
+        RelayError::Transport(format!("invalid node secret key length at {}", key_path.display()))
+    })?;
+    Ok(SecretKey::from_bytes(&raw))
 }
 
 pub(crate) fn peer_role_from_mode(mode: RuntimeMode) -> PeerRole {
@@ -670,16 +754,6 @@ pub(crate) fn default_peer_label(node_id: &str, role: PeerRole) -> String {
         PeerRole::Client => format!("Laptop {short}"),
         PeerRole::Peer => format!("Device {short}"),
     }
-}
-
-async fn exchange_rpc(conn: &Connection, encoded: &[u8]) -> RelayResult<WireResponse> {
-    tokio::time::timeout(RPC_TIMEOUT, async {
-        let (mut send, mut recv) = conn.open_bi().await.map_err(transport_error)?;
-        write_frame(&mut send, encoded).await?;
-        read_frame(&mut recv).await
-    })
-    .await
-    .unwrap_or_else(|_| Err(RelayError::Transport("Relay RPC timed out".into())))
 }
 
 fn transport_error(error: impl std::fmt::Display) -> RelayError {

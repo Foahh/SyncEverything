@@ -149,7 +149,7 @@
     "taskLogsTitle": "Task output",
     "taskStatusStreaming": "Streaming live",
     "taskStatusQueued": "Queued",
-    "taskStatusCancelled": "Cancelled — partial log saved",
+    "taskStatusCancelled": "Cancelled",
     "taskStatusFinished": "Finished",
     "pauseAutoScroll": "Pause auto-scroll",
     "resumeAutoScroll": "Resume auto-scroll",
@@ -416,6 +416,7 @@
     "peerNotFound": "This trusted device no longer exists.",
     "emptyDeviceLabel": "Enter a device name before saving.",
     "localNodeTicket": "This pairing code belongs to the current device.",
+    "mcpPreviewChanged": "The project MCP configuration changed. Refresh the preview before writing.",
     "switchModeToPair": "Switch to Workstation or Laptop mode before pairing with another device."
   }
 }

@@ -2,8 +2,8 @@ use super::pm::{
     EnvFileSnapshot, PackageManagerAdapter, default_registry, diff_dependencies,
     resolve_adapter_for_repo,
 };
-use super::{WorktreeSandbox, check_git_output, git_command, git_output, load_manifest};
-use crate::contracts::EnvDiffReport;
+use super::{WorktreeSandbox, check_git_output, git_command, git_output};
+use crate::contracts::{EnvDiffReport, RelayManifest};
 use crate::error::RelayResult;
 use std::collections::{BTreeMap, BTreeSet};
 use std::io;
@@ -19,45 +19,44 @@ pub fn compute_env_fingerprint(repo_root: &Path) -> RelayResult<String> {
 
 impl WorktreeSandbox {
     pub async fn check_env_diff(&self, commit_sha: &str) -> RelayResult<EnvDiffReport> {
-        let head = self.env_diff_head().await?;
         let target_commit = if commit_sha == "HEAD" {
-            head.clone()
+            self.env_diff_head().await?
         } else {
             Some(self.resolve_commit(commit_sha).await?)
         };
 
-        let adapter = self.resolve_env_adapter(target_commit.as_deref()).await?;
-        let tracked_files = adapter.manifest_and_lock_files();
-
-        let host_files = read_env_files_on_disk(self.repo_root(), &tracked_files)?;
-        let mut target_files = if let Some(sha) = target_commit.as_deref() {
-            self.env_files_at_commit(sha, &tracked_files).await?
+        let host_adapter = resolve_adapter_for_repo(self.repo_root())?;
+        let host_files =
+            read_env_files_on_disk(self.repo_root(), &host_adapter.manifest_and_lock_files())?;
+        let (adapter, target_files) = if let Some(sha) = target_commit.as_deref() {
+            let adapter = self.env_adapter_at_commit(sha).await?;
+            let files = self.env_files_at_commit(sha, &adapter.manifest_and_lock_files()).await?;
+            (adapter, files)
         } else {
-            tracked_files
-                .iter()
-                .map(|&name| (name.to_owned(), None))
-                .collect()
+            (host_adapter, EnvFileSnapshot::new())
         };
 
         let mut notes = Vec::new();
-        if target_commit == head {
-            for &name in &tracked_files {
-                let target_missing = target_files.get(name).is_none_or(Option::is_none);
-                let host_present = host_files.get(name).and_then(Option::as_ref);
-                if target_missing && let Some(bytes) = host_present {
-                    target_files.insert(name.to_owned(), Some(bytes.clone()));
-                    notes.push(format!("{name} is absent from HEAD. Used the working copy."));
-                }
-            }
+        if adapter.name() != host_adapter.name() {
+            notes.push(format!(
+                "Package manager changed: commit '{}' vs host '{}'",
+                adapter.name(),
+                host_adapter.name(),
+            ));
         }
 
         let target_deps = adapter.parse_dependencies(&target_files)?;
-        let host_deps = adapter.parse_dependencies(&host_files)?;
-        let diff = diff_dependencies(&target_deps, &host_deps);
+        let host_deps = host_adapter.parse_dependencies(&host_files)?;
+        let mut diff = diff_dependencies(&target_deps, &host_deps);
+        if adapter.ecosystem() != host_adapter.ecosystem() {
+            // Dependencies with the same name in different registries are unrelated.
+            diff.missing_packages = target_deps.declared.keys().cloned().collect();
+            diff.notes = target_deps.notes.into_iter().chain(host_deps.notes).collect();
+        }
         notes.extend(diff.notes);
 
         let repo_env_fingerprint = adapter.compute_fingerprint(&target_files);
-        let host_env_fingerprint = adapter.compute_fingerprint(&host_files);
+        let host_env_fingerprint = host_adapter.compute_fingerprint(&host_files);
         Ok(EnvDiffReport {
             commit_sha: target_commit.unwrap_or_else(|| commit_sha.to_owned()),
             ecosystem: adapter.ecosystem().to_owned(),
@@ -72,35 +71,23 @@ impl WorktreeSandbox {
 
     pub(crate) async fn env_fingerprint_at_commit(&self, commit: &str) -> RelayResult<String> {
         let sha = self.resolve_commit(commit).await?;
-        let adapter = self.resolve_env_adapter(Some(&sha)).await?;
+        let adapter = self.env_adapter_at_commit(&sha).await?;
         let tracked_files = adapter.manifest_and_lock_files();
         let files = self.env_files_at_commit(&sha, &tracked_files).await?;
         Ok(adapter.compute_fingerprint(&files))
     }
 
-    async fn resolve_env_adapter(
-        &self,
-        target_commit: Option<&str>,
-    ) -> RelayResult<&'static dyn PackageManagerAdapter> {
-        let manifest_path = self.repo_root().join("relay.toml");
-        if manifest_path.is_file() {
-            let manifest = load_manifest(self.repo_root())?;
+    async fn env_adapter_at_commit(&self, sha: &str) -> RelayResult<&'static dyn PackageManagerAdapter> {
+        if let Some(raw) = self.read_env_file_at_commit(sha, "relay.toml").await? {
+            let raw = std::str::from_utf8(&raw)
+                .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+            let manifest: RelayManifest = toml::from_str(raw)?;
             if let Some(explicit) = manifest.project.package_manager.as_deref() {
                 return super::pm::adapter_by_name(explicit);
             }
         }
-
-        let host_adapter = super::pm::detect_adapter(self.repo_root());
-        if host_adapter.name() != "generic" {
-            return Ok(host_adapter);
-        }
-
-        if let Some(sha) = target_commit {
-            let root_files = self.root_files_at_commit(sha).await?;
-            return Ok(default_registry().detect_from_file_presence(|file| root_files.contains(file)));
-        }
-
-        Ok(host_adapter)
+        let root_files = self.root_files_at_commit(sha).await?;
+        Ok(default_registry().detect_from_file_presence(|file| root_files.contains(file)))
     }
 
     async fn root_files_at_commit(&self, sha: &str) -> RelayResult<BTreeSet<String>> {

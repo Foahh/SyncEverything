@@ -2,11 +2,7 @@ import { expect, test } from "bun:test";
 import type { TaskLogStreamEvent, TaskSpec_Deserialize, TaskState } from "../src/bindings";
 import en from "../src/i18n/locales/en.json";
 import zhCN from "../src/i18n/locales/zh-CN.json";
-import {
-  emitPreviewTaskLogEvent,
-  relayApi,
-  resetBrowserPreviewState,
-} from "../src/lib/relayApi";
+import { emitPreviewTaskLogEvent, relayApi, resetBrowserPreviewState } from "../src/lib/relayApi";
 import {
   appendTaskLogChunk,
   clearTaskLogBuffer,
@@ -14,6 +10,7 @@ import {
   isTaskCancellable,
   isTaskRunning,
   nextAutoScrollOnUserScroll,
+  renderTaskLogLines,
   splitLogChunksIntoLines,
   taskStateBadgeProps,
   type TaskLogBuffer,
@@ -101,6 +98,14 @@ test("auto-scroll helpers pause when user scrolls up and stay paused until resum
   expect(nextAutoScrollOnUserScroll(true, scrolledUp)).toBe(false);
   // Once paused, scrolling near bottom does not silently flip auto-scroll back on
   expect(nextAutoScrollOnUserScroll(false, atBottom)).toBe(false);
+});
+
+test("the persisted log restores missing lines without assigning them a stream", () => {
+  const live = [makeChunk({ seq: 1, stream: "stderr", text: "last line\n" })];
+  expect(renderTaskLogLines(live, null)[0].stream).toBe("stderr");
+  const final = renderTaskLogLines(live, "first line\r\nlast line\r\n");
+  expect(final.map((line) => line.text)).toEqual(["first line", "last line"]);
+  expect(final.every((line) => line.stream === null)).toBe(true);
 });
 
 test("task cancellation and badge helpers cover every TaskState variant", () => {

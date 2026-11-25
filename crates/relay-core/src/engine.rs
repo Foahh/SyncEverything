@@ -20,10 +20,12 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, RwLock as StdRwLock};
-use tokio::sync::{Mutex, MutexGuard, OwnedMutexGuard, broadcast, watch};
+use std::time::Duration;
+use tokio::sync::{Mutex, MutexGuard, OwnedMutexGuard, broadcast, oneshot, watch};
 use uuid::Uuid;
 
 const TASK_LOG_BROADCAST_CAPACITY: usize = 1024;
+const CROSS_PROCESS_CANCEL_INTERVAL: Duration = Duration::from_millis(250);
 
 #[derive(Debug, Clone)]
 pub struct TaskCancellationToken {
@@ -41,13 +43,8 @@ impl TaskCancellationToken {
     }
 
     pub async fn cancelled(&mut self) {
-        if *self.rx.borrow() {
-            return;
-        }
-        while self.rx.changed().await.is_ok() {
-            if *self.rx.borrow() {
-                return;
-            }
+        if self.rx.wait_for(|&cancelled| cancelled).await.is_err() {
+            std::future::pending::<()>().await;
         }
     }
 }
@@ -65,6 +62,7 @@ pub struct TaskCancellationGuard {
     task_id: TaskId,
     entry_id: u64,
     token: TaskCancellationToken,
+    _stop_observer: Option<oneshot::Sender<()>>,
 }
 
 impl TaskCancellationGuard {
@@ -241,19 +239,51 @@ impl RelayEngine {
                 .cancellation_handles
                 .write()
                 .expect("cancellation registry poisoned");
-            handles.insert(task_id, CancellationEntry { id: entry_id, tx });
+            if handles.contains_key(&task_id) {
+                return Err(RelayError::Internal(format!(
+                    "task {task_id} already has an active worktree operation"
+                )));
+            }
+            handles.insert(task_id, CancellationEntry { id: entry_id, tx: tx.clone() });
         }
-        let guard = TaskCancellationGuard {
+        let mut guard = TaskCancellationGuard {
             registry: self.cancellation_handles.clone(),
             task_id,
             entry_id,
             token,
+            _stop_observer: None,
         };
-        if let Some(task) = self.get_task(task_id).await?
-            && task.state == TaskState::Cancelled
-        {
+        let task = self
+            .get_task(task_id)
+            .await?
+            .ok_or_else(|| RelayError::TaskNotFound(task_id.to_string()))?;
+        if task.state == TaskState::Cancelled {
             return Err(RelayError::TaskCancelled(task_id.to_string()));
         }
+        // The desktop and a standalone MCP process can work against the same database.
+        // Keep the watch channel for immediate local notification and observe persisted
+        // cancellation so a request made by the other process can stop the preset too.
+        let engine = self.clone();
+        let (stop, mut stopped) = oneshot::channel();
+        guard._stop_observer = Some(stop);
+        tokio::spawn(async move {
+            while !*tx.borrow() {
+                tokio::select! {
+                    _ = &mut stopped => break,
+                    () = tokio::time::sleep(CROSS_PROCESS_CANCEL_INTERVAL) => {}
+                }
+                // Allow this read to release its SQL connection normally if the
+                // operation finishes while the query is running.
+                if engine
+                    .get_task(task_id)
+                    .await
+                    .is_ok_and(|task| task.is_some_and(|task| task.state == TaskState::Cancelled))
+                {
+                    let _ = tx.send(true);
+                    break;
+                }
+            }
+        });
         Ok(guard)
     }
 
@@ -562,7 +592,7 @@ impl RelayEngine {
     }
 
     /// Record an offline submission and its replay request in the same SQLite transaction.
-    pub async fn queue_peer_task(&self, spec: TaskSpec) -> RelayResult<TaskRecord> {
+    pub async fn queue_peer_task(&self, spec: TaskSpec, node_id: Option<String>) -> RelayResult<TaskRecord> {
         let record = queued_task(spec);
         let payload = serde_json::to_value(WireRequest::SubmitTask {
             spec: record.spec.clone(),
@@ -572,7 +602,7 @@ impl RelayEngine {
         tokio::spawn(async move {
             let _guard = guard;
             let (record, inserted) = engine
-                .persist_submitted_task(&record, false, Some(&payload))
+                .persist_submitted_task(&record, false, Some((&payload, node_id.as_deref())))
                 .await?;
             if inserted {
                 engine.pending_outbox.fetch_add(1, Ordering::Relaxed);
@@ -594,7 +624,7 @@ impl RelayEngine {
         &self,
         incoming: &TaskRecord,
         from_peer: bool,
-        outbox: Option<&Value>,
+        outbox: Option<(&Value, Option<&str>)>,
     ) -> RelayResult<(TaskRecord, bool)> {
         self.check_repo(&incoming.spec.repo_id)?;
         let mut tx = self.store.begin_write().await?;
@@ -625,8 +655,8 @@ impl RelayEngine {
                 created_at: record.created_at,
             };
             write_handoff(&mut tx, &handoff).await?;
-            if let Some(payload) = outbox {
-                write_outbox(&mut tx, &self.repo_id, payload).await?;
+            if let Some((payload, node_id)) = outbox {
+                write_outbox(&mut tx, &self.repo_id, payload, node_id).await?;
             }
         }
         tx.commit().await?;
@@ -634,18 +664,20 @@ impl RelayEngine {
     }
 
     pub async fn cancel_task(&self, task_id: TaskId) -> RelayResult<TaskRecord> {
-        self.cancel_task_inner(task_id, None).await
+        self.cancel_task_inner(task_id, None).await.map(|(record, _)| record)
     }
 
     /// Record an offline cancellation and its replay request in the same SQLite transaction.
-    pub async fn queue_peer_cancel(&self, task_id: TaskId) -> RelayResult<TaskRecord> {
+    pub async fn queue_peer_cancel(&self, task_id: TaskId, node_id: Option<String>) -> RelayResult<TaskRecord> {
         let payload = serde_json::to_value(WireRequest::CancelTask { task_id })?;
         let guard = self.metadata_writes.clone().lock_owned().await;
         let engine = self.clone();
         tokio::spawn(async move {
             let _guard = guard;
-            let record = engine.cancel_task_inner(task_id, Some(&payload)).await?;
-            engine.pending_outbox.fetch_add(1, Ordering::Relaxed);
+            let (record, queued) = engine.cancel_task_inner(task_id, Some((&payload, node_id.as_deref()))).await?;
+            if queued {
+                engine.pending_outbox.fetch_add(1, Ordering::Relaxed);
+            }
             Ok(record)
         })
         .await
@@ -655,18 +687,22 @@ impl RelayEngine {
     async fn cancel_task_inner(
         &self,
         task_id: TaskId,
-        outbox: Option<&Value>,
-    ) -> RelayResult<TaskRecord> {
+        outbox: Option<(&Value, Option<&str>)>,
+    ) -> RelayResult<(TaskRecord, bool)> {
         let mut tx = self.store.begin_write().await?;
         let mut record = self.require_task(&mut tx, task_id).await?;
+        if record.state == TaskState::Cancelled {
+            // A remote caller may retry a cancellation after the original reply was lost.
+            return Ok((record, false));
+        }
         move_task(&mut record, TaskState::Cancelled)?;
         if record.preflight_summary.is_none() {
             record.preflight_summary = Some("Cancelled by user".into());
         }
         record.error_message = None;
         write_task(&mut tx, &record).await?;
-        if let Some(payload) = outbox {
-            write_outbox(&mut tx, &self.repo_id, payload).await?;
+        if let Some((payload, node_id)) = outbox {
+            write_outbox(&mut tx, &self.repo_id, payload, node_id).await?;
         }
         tx.commit().await?;
 
@@ -679,7 +715,7 @@ impl RelayEngine {
         if let Some(cancel_tx) = sender {
             let _ = cancel_tx.send(true);
         }
-        Ok(record)
+        Ok((record, outbox.is_some()))
     }
 
     /// Persist partial stdout/stderr captured when a running task is cancelled and ensure
@@ -822,6 +858,7 @@ impl RelayEngine {
         task_id: TaskId,
         patch_id: Option<&str>,
         decision: ApprovalDecision,
+        node_id: Option<String>,
     ) -> RelayResult<TaskRecord> {
         let patch_id = patch_id.map(str::to_owned);
         let payload = serde_json::to_value(WireRequest::ResolveApproval {
@@ -835,7 +872,7 @@ impl RelayEngine {
         tokio::spawn(async move {
             let _guard = guard;
             let (record, _) = engine
-                .resolve_ui_approval_inner(task_id, patch_id.as_deref(), decision, Some(&payload), false)
+                .resolve_ui_approval_inner(task_id, patch_id.as_deref(), decision, Some((&payload, node_id.as_deref())), false)
                 .await?;
             engine.pending_outbox.fetch_add(1, Ordering::Relaxed);
             Ok(record)
@@ -849,7 +886,7 @@ impl RelayEngine {
         task_id: TaskId,
         patch_id: Option<&str>,
         decision: ApprovalDecision,
-        outbox: Option<&Value>,
+        outbox: Option<(&Value, Option<&str>)>,
         allow_replay: bool,
     ) -> RelayResult<(TaskRecord, bool)> {
         let mut tx = self.store.begin_write().await?;
@@ -866,8 +903,8 @@ impl RelayEngine {
         }
         move_task(&mut record, approval_state(decision))?;
         write_task(&mut tx, &record).await?;
-        if let Some(payload) = outbox {
-            write_outbox(&mut tx, &self.repo_id, payload).await?;
+        if let Some((payload, node_id)) = outbox {
+            write_outbox(&mut tx, &self.repo_id, payload, node_id).await?;
         }
         tx.commit().await?;
         Ok((record, true))
@@ -1124,6 +1161,7 @@ impl RelayEngine {
         .map_err(|err| RelayError::Internal(err.to_string()))?
     }
 
+    #[cfg(test)]
     pub(crate) async fn list_pending_outbox(&self) -> RelayResult<Vec<(i64, String, Value)>> {
         let _guard = self.metadata_writes.lock().await;
         let items = self.store.list_pending_outbox(Some(&self.repo_id)).await?;
@@ -1131,6 +1169,10 @@ impl RelayEngine {
             .map_err(|_| RelayError::Internal("pending outbox count exceeds u32".into()))?;
         self.pending_outbox.store(count, Ordering::Relaxed);
         Ok(items)
+    }
+
+    pub(crate) async fn claim_peer_outbox(&self, node_id: &str) -> RelayResult<Vec<(i64, Value)>> {
+        self.store.claim_peer_outbox(&self.repo_id, node_id).await
     }
 
     pub(crate) async fn lock_outbox_flush(&self) -> MutexGuard<'_, ()> {

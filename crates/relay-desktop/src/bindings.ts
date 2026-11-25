@@ -40,7 +40,7 @@ export const commands = {
 	cancelChatTurn: (options?: InvokeOptions) => __TAURI_INVOKE<boolean>("cancel_chat_turn", undefined, options),
 	clearChatMessages: (options?: InvokeOptions) => __TAURI_INVOKE<null>("clear_chat_messages", undefined, options),
 	previewProjectMcpConfig: (request: ProjectMcpConfigRequest_Deserialize, options?: InvokeOptions) => __TAURI_INVOKE<ProjectMcpConfigPreview_Serialize>("preview_project_mcp_config", { request }, options),
-	writeProjectMcpConfig: (request: ProjectMcpConfigRequest_Deserialize, options?: InvokeOptions) => __TAURI_INVOKE<ProjectMcpConfigWriteResult>("write_project_mcp_config", { request }, options),
+	writeProjectMcpConfig: (request: ProjectMcpConfigRequest_Deserialize, confirmation: ProjectMcpConfigConfirmation_Deserialize, options?: InvokeOptions) => __TAURI_INVOKE<ProjectMcpConfigWriteResult>("write_project_mcp_config", { request, confirmation }, options),
 };
 
 /** Events */
@@ -318,6 +318,20 @@ export type PresetInfo = {
 };
 
 export type ProjectMcpClient = "claude_code" | "cursor";
+
+export type ProjectMcpConfigConfirmation = ProjectMcpConfigConfirmation_Serialize | ProjectMcpConfigConfirmation_Deserialize;
+
+export type ProjectMcpConfigConfirmation_Deserialize = {
+	target_path: string,
+	existing_content?: string | null,
+	merged_content: string,
+};
+
+export type ProjectMcpConfigConfirmation_Serialize = {
+	target_path: string,
+	existing_content: string | null,
+	merged_content: string,
+};
 
 export type ProjectMcpConfigPreview = ProjectMcpConfigPreview_Serialize | ProjectMcpConfigPreview_Deserialize;
 

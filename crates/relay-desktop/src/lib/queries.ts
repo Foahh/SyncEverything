@@ -4,6 +4,7 @@ import type {
   GraphEdge,
   GraphNode,
   LlmSettingsUpdate_Deserialize,
+  ProjectMcpConfigConfirmation_Deserialize,
   ProjectMcpConfigRequest_Deserialize,
   RuntimeMode,
   TaskSpec_Deserialize,
@@ -355,7 +356,12 @@ export function usePreviewProjectMcpConfig() {
 
 export function useWriteProjectMcpConfig() {
   return useMutation({
-    mutationFn: (request: ProjectMcpConfigRequest_Deserialize) =>
-      relayApi.writeProjectMcpConfig(request),
+    mutationFn: ({
+      request,
+      confirmation,
+    }: {
+      request: ProjectMcpConfigRequest_Deserialize;
+      confirmation: ProjectMcpConfigConfirmation_Deserialize;
+    }) => relayApi.writeProjectMcpConfig(request, confirmation),
   });
 }

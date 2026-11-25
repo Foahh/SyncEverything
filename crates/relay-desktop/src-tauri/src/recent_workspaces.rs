@@ -1,6 +1,8 @@
 use chrono::{DateTime, Utc};
 use relay_core::error::RelayResult;
-use relay_core::sandbox::{detect_adapter, load_manifest, resolve_adapter_for_repo, slugify_repo_id};
+use relay_core::sandbox::{
+    detect_adapter, load_manifest, resolve_adapter_for_repo, slugify_repo_id,
+};
 use serde::{Deserialize, Serialize};
 use specta::Type;
 use std::collections::HashSet;
@@ -82,6 +84,7 @@ pub fn record_recent_workspace_at(
 ) -> RelayResult<Vec<RecentWorkspaceEntry>> {
     let display = normalize_display_path(repo_path);
     let key = canonical_path_key(&display);
+    let _guard = lock_store_for_update(base_data_dir)?;
     let mut stored = load_store(base_data_dir)?;
 
     let previous = stored
@@ -131,6 +134,7 @@ pub fn remove_recent_workspace(
 ) -> RelayResult<Vec<RecentWorkspaceEntry>> {
     let raw_trimmed = repo_path.to_string_lossy().trim().to_owned();
     let target_key = canonical_path_key(Path::new(&raw_trimmed));
+    let _guard = lock_store_for_update(base_data_dir)?;
     let mut stored = load_store(base_data_dir)?;
     stored.retain(|entry| {
         entry.path != raw_trimmed && canonical_path_key(Path::new(&entry.path)) != target_key
@@ -151,8 +155,20 @@ fn load_store(base_data_dir: &Path) -> RelayResult<Vec<StoredRecentWorkspace>> {
     Ok(parsed.entries)
 }
 
-fn save_store_atomic(base_data_dir: &Path, entries: &[StoredRecentWorkspace]) -> RelayResult<()> {
+fn lock_store_for_update(base_data_dir: &Path) -> RelayResult<std::fs::File> {
     std::fs::create_dir_all(base_data_dir)?;
+    // Lock a stable file rather than the JSON file, which is replaced on each write.
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(base_data_dir.join("recent_workspaces.lock"))?;
+    lock.lock()?;
+    Ok(lock)
+}
+
+fn save_store_atomic(base_data_dir: &Path, entries: &[StoredRecentWorkspace]) -> RelayResult<()> {
     let payload = serde_json::to_vec_pretty(&RecentWorkspacesFile {
         entries: entries.to_vec(),
     })?;
@@ -315,6 +331,26 @@ mod tests {
 
         let reloaded = list_recent_workspaces(data_dir.path()).unwrap();
         assert_eq!(reloaded, recorded);
+    }
+
+    #[test]
+    fn concurrent_workspace_updates_preserve_both_entries() {
+        let data_dir = TempDir::new().unwrap();
+        let first = make_repo(data_dir.path(), "first");
+        let second = make_repo(data_dir.path(), "second");
+        let barrier = std::sync::Barrier::new(2);
+        std::thread::scope(|scope| {
+            for repo in [&first, &second] {
+                let data_dir = data_dir.path();
+                let barrier = &barrier;
+                scope.spawn(move || {
+                    barrier.wait();
+                    record_recent_workspace(data_dir, repo).unwrap();
+                });
+            }
+        });
+        let entries = list_recent_workspaces(data_dir.path()).unwrap();
+        assert_eq!(entries.len(), 2);
     }
 
     #[test]

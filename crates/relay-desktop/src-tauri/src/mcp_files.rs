@@ -9,6 +9,8 @@ use tauri::{AppHandle, State};
 use tempfile::NamedTempFile;
 
 pub const DEFAULT_MCP_HTTP_URL: &str = "http://127.0.0.1:7608/mcp";
+const MCP_PREVIEW_CHANGED: &str =
+    "The project MCP configuration has changed. Refresh the preview before writing.";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
 #[serde(rename_all = "snake_case")]
@@ -78,6 +80,13 @@ pub struct ProjectMcpConfigPreview {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub struct ProjectMcpConfigConfirmation {
+    pub target_path: String,
+    pub existing_content: Option<String>,
+    pub merged_content: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
 pub struct ProjectMcpConfigWriteResult {
     pub client: ProjectMcpClient,
     pub transport: McpTransportMode,
@@ -116,9 +125,18 @@ pub(crate) async fn write_project_mcp_config(
     app: AppHandle,
     state: State<'_, RuntimeManager>,
     request: ProjectMcpConfigRequest,
+    confirmation: ProjectMcpConfigConfirmation,
 ) -> Result<ProjectMcpConfigWriteResult, String> {
-    let workspace = state.get_or_init(&app).await?.workspace_info();
-    tokio::task::spawn_blocking(move || write_for_workspace(&workspace, &request))
+    state.get_or_init(&app).await?;
+    let _guard = state.lifecycle.lock().await;
+    let workspace = state
+        .current
+        .read()
+        .await
+        .as_ref()
+        .ok_or_else(|| MCP_PREVIEW_CHANGED.to_owned())?
+        .workspace_info();
+    tokio::task::spawn_blocking(move || write_for_workspace(&workspace, &request, &confirmation))
         .await
         .map_err(|err| format!("Write task failed: {err}"))?
 }
@@ -147,44 +165,20 @@ pub fn validate_http_url(raw: &str) -> Result<String, String> {
         return Err("MCP HTTP endpoint URL must not include embedded credentials.".into());
     }
 
-    let (host, port_opt) = if let Some(after_bracket) = authority.strip_prefix('[') {
-        let Some((ipv6_host, suffix)) = after_bracket.split_once(']') else {
-            return Err("MCP HTTP endpoint URL has an unclosed IPv6 host bracket.".into());
-        };
-        if ipv6_host.is_empty() {
-            return Err("MCP HTTP endpoint URL must include a valid host.".into());
-        }
-        let port = if suffix.is_empty() {
-            None
-        } else if let Some(port_str) = suffix.strip_prefix(':') {
-            Some(port_str)
-        } else {
-            return Err("MCP HTTP endpoint URL has an invalid host/port format.".into());
-        };
-        (ipv6_host, port)
-    } else if let Some((host_part, port_part)) = authority.rsplit_once(':') {
-        if host_part.contains(':') {
-            return Err("IPv6 hosts in MCP HTTP endpoint URL must be enclosed in brackets.".into());
-        }
-        (host_part, Some(port_part))
-    } else {
-        (authority, None)
-    };
-
-    if host.is_empty()
-        || !host
+    if trimmed.contains('\\') || authority.ends_with(':') {
+        return Err("MCP HTTP endpoint URL is not a valid URL.".into());
+    }
+    let url = tauri::Url::parse(trimmed)
+        .map_err(|_| "MCP HTTP endpoint URL is not a valid URL.".to_owned())?;
+    if url.host_str().is_none_or(|host| {
+        !host
             .chars()
-            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '-' | ':'))
-    {
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '-' | ':' | '[' | ']'))
+    }) {
         return Err("MCP HTTP endpoint URL contains an invalid host.".into());
     }
-    if let Some(port_str) = port_opt {
-        let port: u16 = port_str
-            .parse()
-            .map_err(|_| "MCP HTTP endpoint URL contains an invalid port number.".to_owned())?;
-        if port == 0 {
-            return Err("MCP HTTP endpoint URL port must be between 1 and 65535.".into());
-        }
+    if url.port() == Some(0) {
+        return Err("MCP HTTP endpoint URL port must be between 1 and 65535.".into());
     }
 
     Ok(trimmed.to_owned())
@@ -226,10 +220,7 @@ pub fn build_relay_server_entry(
             }))
         }
         McpTransportMode::StreamableHttp => {
-            let raw_url = request
-                .http_url
-                .as_deref()
-                .unwrap_or(DEFAULT_MCP_HTTP_URL);
+            let raw_url = request.http_url.as_deref().unwrap_or(DEFAULT_MCP_HTTP_URL);
             let url = validate_http_url(raw_url)?;
             match request.client {
                 ProjectMcpClient::ClaudeCode => Ok(json!({
@@ -250,19 +241,28 @@ pub fn preview_for_workspace(
 ) -> Result<ProjectMcpConfigPreview, String> {
     let repo_root = require_repo_root(workspace)?;
     let layout = resolve_target_layout(repo_root, request.client)?;
+    preview_for_target(workspace, request, &layout)
+}
+
+fn read_existing_config(
+    layout: &TargetLayout,
+    client: ProjectMcpClient,
+) -> Result<Option<String>, String> {
+    if !layout.file_exists {
+        return Ok(None);
+    }
+    fs::read_to_string(&layout.target_path)
+        .map(Some)
+        .map_err(|err| format!("Unable to read {}: {err}", client.relative_path()))
+}
+
+fn preview_for_target(
+    workspace: &WorkspaceInfo,
+    request: &ProjectMcpConfigRequest,
+    layout: &TargetLayout,
+) -> Result<ProjectMcpConfigPreview, String> {
     let relay_entry = build_relay_server_entry(workspace, request)?;
-    let existing_content = if layout.file_exists {
-        Some(
-            fs::read_to_string(&layout.target_path).map_err(|err| {
-                format!(
-                    "Unable to read {}: {err}",
-                    request.client.relative_path()
-                )
-            })?,
-        )
-    } else {
-        None
-    };
+    let existing_content = read_existing_config(layout, request.client)?;
 
     let (merged_content, status, preserved_server_names) = merge_mcp_json(
         existing_content.as_deref(),
@@ -286,29 +286,29 @@ pub fn preview_for_workspace(
 pub fn write_for_workspace(
     workspace: &WorkspaceInfo,
     request: &ProjectMcpConfigRequest,
+    confirmation: &ProjectMcpConfigConfirmation,
 ) -> Result<ProjectMcpConfigWriteResult, String> {
     let repo_root = require_repo_root(workspace)?;
     let layout = resolve_target_layout(repo_root, request.client)?;
-    let relay_entry = build_relay_server_entry(workspace, request)?;
-
-    let existing_content = if layout.file_exists {
-        Some(
-            fs::read_to_string(&layout.target_path).map_err(|err| {
-                format!(
-                    "Unable to read {}: {err}",
-                    request.client.relative_path()
-                )
-            })?,
-        )
-    } else {
-        None
-    };
-
-    let (merged_content, status, _) = merge_mcp_json(
-        existing_content.as_deref(),
-        relay_entry,
-        request.client.relative_path(),
-    )?;
+    let preview = preview_for_target(workspace, request, &layout)?;
+    if preview.target_path != confirmation.target_path
+        || preview.existing_content != confirmation.existing_content
+        || preview.merged_content != confirmation.merged_content
+    {
+        return Err(MCP_PREVIEW_CHANGED.to_owned());
+    }
+    if preview.status == ProjectMcpFileStatus::Unchanged {
+        return Ok(ProjectMcpConfigWriteResult {
+            client: request.client,
+            transport: request.transport,
+            relative_path: preview.relative_path,
+            target_path: preview.target_path,
+            created: false,
+            status: preview.status,
+            written_content: preview.existing_content.unwrap_or(preview.merged_content),
+        });
+    }
+    let written_content = preview.merged_content;
 
     if !layout.parent_exists {
         if let Some(subdir) = request.client.parent_subdir() {
@@ -323,13 +323,12 @@ pub fn write_for_workspace(
         }
     }
 
-    // Re-verify target containment and symlink safety right before atomic replacement.
     let verified = resolve_target_layout(repo_root, request.client)?;
-    if !verified.parent_exists {
-        return Err(format!(
-            "Target directory for {} is not available.",
-            request.client.relative_path()
-        ));
+    if !verified.parent_exists
+        || verified.canonical_root != layout.canonical_root
+        || verified.parent_dir != layout.parent_dir
+    {
+        return Err(MCP_PREVIEW_CHANGED.to_owned());
     }
 
     let mut temp = NamedTempFile::new_in(&verified.parent_dir).map_err(|err| {
@@ -338,7 +337,7 @@ pub fn write_for_workspace(
             request.client.relative_path()
         )
     })?;
-    temp.write_all(merged_content.as_bytes()).map_err(|err| {
+    temp.write_all(written_content.as_bytes()).map_err(|err| {
         format!(
             "Unable to write temporary file for {}: {err}",
             request.client.relative_path()
@@ -350,7 +349,23 @@ pub fn write_for_workspace(
             request.client.relative_path()
         )
     })?;
-    temp.persist(&verified.target_path).map_err(|err| {
+    // Refuse edits made after the preview or while the replacement was prepared.
+    let current = resolve_target_layout(repo_root, request.client)?;
+    if current.parent_dir != verified.parent_dir
+        || current.target_path != verified.target_path
+        || read_existing_config(&current, request.client)? != preview.existing_content
+    {
+        return Err(MCP_PREVIEW_CHANGED.to_owned());
+    }
+    let replacement = if layout.file_exists {
+        temp.persist(&current.target_path)
+    } else {
+        temp.persist_noclobber(&current.target_path)
+    };
+    replacement.map_err(|err| {
+        if err.error.kind() == ErrorKind::AlreadyExists {
+            return MCP_PREVIEW_CHANGED.to_owned();
+        }
         format!(
             "Unable to atomically replace {}: {}",
             request.client.relative_path(),
@@ -364,8 +379,8 @@ pub fn write_for_workspace(
         relative_path: request.client.relative_path().to_owned(),
         target_path: verified.display_target_path.to_string_lossy().into_owned(),
         created: !layout.file_exists,
-        status,
-        written_content: merged_content,
+        status: preview.status,
+        written_content,
     })
 }
 
@@ -379,7 +394,10 @@ fn require_repo_root(workspace: &WorkspaceInfo) -> Result<&Path, String> {
     Ok(Path::new(raw))
 }
 
-fn resolve_target_layout(repo_root: &Path, client: ProjectMcpClient) -> Result<TargetLayout, String> {
+fn resolve_target_layout(
+    repo_root: &Path,
+    client: ProjectMcpClient,
+) -> Result<TargetLayout, String> {
     let canonical_root = fs::canonicalize(repo_root)
         .map_err(|err| format!("Active repository root is not accessible: {err}"))?;
     if !canonical_root.is_dir() {
@@ -404,12 +422,8 @@ fn resolve_target_layout(repo_root: &Path, client: ProjectMcpClient) -> Result<T
                             client.relative_path()
                         ));
                     }
-                    let canonical_subdir = verify_contained_child(
-                        &canonical_root,
-                        &candidate,
-                        subdir,
-                        subdir,
-                    )?;
+                    let canonical_subdir =
+                        verify_contained_child(&canonical_root, &candidate, subdir, subdir)?;
                     (canonical_subdir, true)
                 }
                 Err(err) if err.kind() == ErrorKind::NotFound => (candidate, false),
@@ -604,6 +618,72 @@ mod tests {
         }
     }
 
+    fn confirm(preview: ProjectMcpConfigPreview) -> ProjectMcpConfigConfirmation {
+        ProjectMcpConfigConfirmation {
+            target_path: preview.target_path,
+            existing_content: preview.existing_content,
+            merged_content: preview.merged_content,
+        }
+    }
+
+    fn write_previewed(
+        workspace: &WorkspaceInfo,
+        request: &ProjectMcpConfigRequest,
+    ) -> Result<ProjectMcpConfigWriteResult, String> {
+        let confirmation = confirm(preview_for_workspace(workspace, request)?);
+        write_for_workspace(workspace, request, &confirmation)
+    }
+
+    #[test]
+    fn rejects_writes_after_target_or_file_contents_change() {
+        let first = TempDir::new().unwrap();
+        let second = TempDir::new().unwrap();
+        let workspace = sample_workspace(first.path());
+        let request = ProjectMcpConfigRequest {
+            client: ProjectMcpClient::ClaudeCode,
+            transport: McpTransportMode::StreamableHttp,
+            http_url: None,
+        };
+
+        let confirmation = confirm(preview_for_workspace(&workspace, &request).unwrap());
+        let error = write_for_workspace(&sample_workspace(second.path()), &request, &confirmation)
+            .unwrap_err();
+        assert_eq!(error, MCP_PREVIEW_CHANGED);
+        assert!(!second.path().join(".mcp.json").exists());
+
+        let target = first.path().join(".mcp.json");
+        let original = r#"{"mcpServers":{"new-server":{"url":"http://localhost/other"}}}"#;
+        fs::write(&target, original).unwrap();
+        let error = write_for_workspace(&workspace, &request, &confirmation).unwrap_err();
+        assert_eq!(error, MCP_PREVIEW_CHANGED);
+        assert_eq!(fs::read_to_string(&target).unwrap(), original);
+
+        let confirmation = confirm(preview_for_workspace(&workspace, &request).unwrap());
+        fs::write(&target, "{}").unwrap();
+        let error = write_for_workspace(&workspace, &request, &confirmation).unwrap_err();
+        assert_eq!(error, MCP_PREVIEW_CHANGED);
+        assert_eq!(fs::read_to_string(&target).unwrap(), "{}");
+    }
+
+    #[test]
+    fn unchanged_write_preserves_existing_formatting() {
+        let dir = TempDir::new().unwrap();
+        let workspace = sample_workspace(dir.path());
+        let target = dir.path().join(".mcp.json");
+        let original =
+            r#"{"mcpServers": {"relay": {"url": "http://127.0.0.1:7608/mcp", "type":"http"}}}"#;
+        fs::write(&target, original).unwrap();
+        let request = ProjectMcpConfigRequest {
+            client: ProjectMcpClient::ClaudeCode,
+            transport: McpTransportMode::StreamableHttp,
+            http_url: None,
+        };
+        let result = write_previewed(&workspace, &request).unwrap();
+        assert_eq!(result.status, ProjectMcpFileStatus::Unchanged);
+        assert_eq!(result.written_content, original);
+        assert_eq!(fs::read_to_string(&target).unwrap(), original);
+    }
+
     #[test]
     fn creates_new_claude_code_stdio_config_and_preview_is_read_only() {
         let dir = TempDir::new().expect("temp dir");
@@ -637,7 +717,7 @@ mod tests {
             ])
         );
 
-        let written = write_for_workspace(&workspace, &request).expect("write");
+        let written = write_previewed(&workspace, &request).expect("write");
         assert!(written.created);
         assert_eq!(written.status, ProjectMcpFileStatus::CreateNew);
         assert_eq!(written.written_content, preview.merged_content);
@@ -672,7 +752,7 @@ mod tests {
             json!({ "url": "http://127.0.0.1:7608/mcp" })
         );
 
-        let written = write_for_workspace(&workspace, &request).expect("write");
+        let written = write_previewed(&workspace, &request).expect("write");
         assert!(written.created);
         assert!(dir.path().join(".cursor").is_dir());
         assert!(dir.path().join(".cursor").join("mcp.json").is_file());
@@ -716,7 +796,7 @@ mod tests {
             vec!["github".to_owned(), "postgres".to_owned()]
         );
 
-        let written = write_for_workspace(&workspace, &request).expect("write");
+        let written = write_previewed(&workspace, &request).expect("write");
         assert!(!written.created);
         assert_eq!(written.status, ProjectMcpFileStatus::AddServer);
 
@@ -762,9 +842,12 @@ mod tests {
 
         let preview = preview_for_workspace(&workspace, &request).expect("preview");
         assert_eq!(preview.status, ProjectMcpFileStatus::UpdateServer);
-        assert_eq!(preview.preserved_server_names, vec!["filesystem".to_owned()]);
+        assert_eq!(
+            preview.preserved_server_names,
+            vec!["filesystem".to_owned()]
+        );
 
-        let written = write_for_workspace(&workspace, &request).expect("write");
+        let written = write_previewed(&workspace, &request).expect("write");
         assert_eq!(written.status, ProjectMcpFileStatus::UpdateServer);
         let on_disk: Value =
             serde_json::from_str(&fs::read_to_string(&target).expect("read")).expect("json");
@@ -795,7 +878,7 @@ mod tests {
         let preview_err = preview_for_workspace(&workspace, &request).unwrap_err();
         assert!(preview_err.contains("invalid JSON"), "got: {preview_err}");
 
-        let write_err = write_for_workspace(&workspace, &request).unwrap_err();
+        let write_err = write_previewed(&workspace, &request).unwrap_err();
         assert!(write_err.contains("invalid JSON"), "got: {write_err}");
         assert_eq!(fs::read_to_string(&target).expect("read"), corrupted);
     }
@@ -812,13 +895,19 @@ mod tests {
 
         let target = dir.path().join(".mcp.json");
         fs::write(&target, "[\"not-an-object\"]").expect("write array root");
-        let root_err = write_for_workspace(&workspace, &request).unwrap_err();
-        assert!(root_err.contains("root JSON value must be an object"), "got: {root_err}");
-        assert_eq!(fs::read_to_string(&target).expect("read"), "[\"not-an-object\"]");
+        let root_err = write_previewed(&workspace, &request).unwrap_err();
+        assert!(
+            root_err.contains("root JSON value must be an object"),
+            "got: {root_err}"
+        );
+        assert_eq!(
+            fs::read_to_string(&target).expect("read"),
+            "[\"not-an-object\"]"
+        );
 
         let bad_servers = r#"{ "mcpServers": ["wrong-type"] }"#;
         fs::write(&target, bad_servers).expect("write bad mcpServers");
-        let servers_err = write_for_workspace(&workspace, &request).unwrap_err();
+        let servers_err = write_previewed(&workspace, &request).unwrap_err();
         assert!(
             servers_err.contains("\"mcpServers\" must be a JSON object"),
             "got: {servers_err}"
@@ -865,11 +954,18 @@ mod tests {
         let repo = TempDir::new().expect("repo dir");
         let outside = TempDir::new().expect("outside dir");
         let outside_mcp = outside.path().join("mcp.json");
-        fs::write(&outside_mcp, r#"{"mcpServers":{"secret":{"command":"keep"}}}"#).expect("seed");
+        fs::write(
+            &outside_mcp,
+            r#"{"mcpServers":{"secret":{"command":"keep"}}}"#,
+        )
+        .expect("seed");
 
         let cursor_link = repo.path().join(".cursor");
         let linked = create_dir_link(outside.path(), &cursor_link);
-        assert!(linked, "expected directory symlink or junction creation to succeed");
+        assert!(
+            linked,
+            "expected directory symlink or junction creation to succeed"
+        );
 
         let workspace = sample_workspace(repo.path());
         let request = ProjectMcpConfigRequest {
@@ -885,7 +981,7 @@ mod tests {
                 || preview_err.contains("outside"),
             "unexpected error: {preview_err}"
         );
-        let write_err = write_for_workspace(&workspace, &request).unwrap_err();
+        let write_err = write_previewed(&workspace, &request).unwrap_err();
         assert!(
             write_err.contains("symbolic link")
                 || write_err.contains("junction")
@@ -919,7 +1015,7 @@ mod tests {
             http_url: None,
         };
 
-        let err = write_for_workspace(&workspace, &request).unwrap_err();
+        let err = write_previewed(&workspace, &request).unwrap_err();
         assert!(err.contains("symbolic link"), "got: {err}");
         assert_eq!(
             fs::read_to_string(&outside_file).expect("read outside"),
@@ -931,8 +1027,11 @@ mod tests {
     fn preserves_top_level_keys_when_mcp_servers_key_is_absent() {
         let dir = TempDir::new().expect("temp dir");
         let target = dir.path().join(".mcp.json");
-        fs::write(&target, r#"{"$schema": "https://example.com/schema.json", "inputs": []}"#)
-            .expect("seed");
+        fs::write(
+            &target,
+            r#"{"$schema": "https://example.com/schema.json", "inputs": []}"#,
+        )
+        .expect("seed");
 
         let workspace = sample_workspace(dir.path());
         let request = ProjectMcpConfigRequest {
@@ -946,7 +1045,7 @@ mod tests {
         assert_eq!(preview.status, ProjectMcpFileStatus::AddServer);
         assert!(preview.preserved_server_names.is_empty());
 
-        write_for_workspace(&workspace, &request).expect("write");
+        write_previewed(&workspace, &request).expect("write");
         let on_disk: Value =
             serde_json::from_str(&fs::read_to_string(&target).expect("read")).expect("json");
         assert_eq!(on_disk["$schema"], "https://example.com/schema.json");
@@ -976,7 +1075,7 @@ mod tests {
             http_url: None,
         };
         assert!(preview_for_workspace(&workspace, &request).is_err());
-        assert!(write_for_workspace(&workspace, &request).is_err());
+        assert!(write_previewed(&workspace, &request).is_err());
     }
 
     fn create_dir_link(target: &Path, link: &Path) -> bool {

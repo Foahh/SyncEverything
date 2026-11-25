@@ -697,7 +697,14 @@ function McpConfigTab({ workspace }: { workspace?: WorkspaceInfo_Serialize }) {
   });
   const copied = copyFeedback?.snippet === snippet && copyFeedback.ok;
 
-  const currentRequestKey = `${workspace?.repo_root ?? ""}|${client}|${transport}|${httpUrl.trim()}`;
+  const currentRequestKey = JSON.stringify([
+    workspace?.repo_root,
+    workspace?.repo_id,
+    workspace?.mcp_data_dir,
+    client,
+    transport,
+    transport === "streamable_http" ? httpUrl.trim() : null,
+  ]);
   const activePreview =
     previewState && previewState.key === currentRequestKey ? previewState.data : null;
 
@@ -762,32 +769,43 @@ function McpConfigTab({ workspace }: { workspace?: WorkspaceInfo_Serialize }) {
     if (!request || !activePreview) return;
     const requestKey = currentRequestKey;
     setWriteFeedback(null);
-    writeMutation.mutate(request, {
-      onSuccess: (result) => {
-        setWriteFeedback({
-          ok: true,
-          text: result.created
-            ? t("modals.workspace.mcpWriteSuccessCreated", { path: result.relative_path })
-            : t("modals.workspace.mcpWriteSuccessUpdated", { path: result.relative_path }),
-        });
-        setPreviewState({
-          key: requestKey,
-          data: {
-            ...activePreview,
-            file_exists: true,
-            status: "unchanged",
-            existing_content: result.written_content,
-            merged_content: result.written_content,
-          },
-        });
+    writeMutation.mutate(
+      {
+        request,
+        confirmation: {
+          target_path: activePreview.target_path,
+          existing_content: activePreview.existing_content,
+          merged_content: activePreview.merged_content,
+        },
       },
-      onError: (err) => {
-        setWriteFeedback({
-          ok: false,
-          text: formatErrorMessage(err, t, "Unable to write project MCP configuration."),
-        });
+      {
+        onSuccess: (result) => {
+          setWriteFeedback({
+            ok: true,
+            text: result.created
+              ? t("modals.workspace.mcpWriteSuccessCreated", { path: result.relative_path })
+              : t("modals.workspace.mcpWriteSuccessUpdated", { path: result.relative_path }),
+          });
+          setPreviewState({
+            key: requestKey,
+            data: {
+              ...activePreview,
+              file_exists: true,
+              status: "unchanged",
+              existing_content: result.written_content,
+              merged_content: result.written_content,
+            },
+          });
+        },
+        onError: (err) => {
+          setPreviewState(null);
+          setWriteFeedback({
+            ok: false,
+            text: formatErrorMessage(err, t, "Unable to write project MCP configuration."),
+          });
+        },
       },
-    });
+    );
   };
 
   const snippetFallback =
@@ -1002,7 +1020,7 @@ function McpConfigTab({ workspace }: { workspace?: WorkspaceInfo_Serialize }) {
             type="button"
             size="lg"
             className="flex-1"
-            disabled={!canPreviewProject || previewMutation.isPending}
+            disabled={!canPreviewProject || previewMutation.isPending || writeMutation.isPending}
             onClick={handlePreviewProject}
           >
             <FileCode2 data-icon="inline-start" />
@@ -1136,7 +1154,11 @@ function McpConfigTab({ workspace }: { workspace?: WorkspaceInfo_Serialize }) {
             <Button
               type="button"
               size="default"
-              disabled={writeMutation.isPending || activePreview.status === "unchanged"}
+              disabled={
+                writeMutation.isPending ||
+                previewMutation.isPending ||
+                activePreview.status === "unchanged"
+              }
               onClick={handleConfirmWrite}
             >
               <ShieldCheck data-icon="inline-start" />

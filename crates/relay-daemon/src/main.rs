@@ -120,7 +120,7 @@ enum Commands {
     },
     /// Probe the configured Ollama or OpenAI-compatible Cloud LLM endpoint.
     LlmCheck,
-    /// Check required external runtimes (git, uv), repository relay.toml, data dir, and optional LLM endpoint.
+    /// Check Git, the workspace package manager, relay.toml, the data directory, and optional LLM.
     Doctor {
         /// Output machine-readable JSON instead of human-readable status lines.
         #[arg(long)]
@@ -350,7 +350,6 @@ async fn main() -> Result<()> {
                     info!(
                         node_id = %reconnected.record.node_id,
                         label = %reconnected.record.label,
-                        flushed_outbox = reconnected.flushed_outbox,
                         "Reconnected to trusted peer"
                     );
                 }
@@ -535,15 +534,6 @@ async fn run_doctor(cli: &Cli, as_json: bool, skip_llm: bool) -> Result<()> {
         "detail": git_check.1,
     }));
 
-    let uv_check = probe_binary("uv", &["--version"]).await;
-    required_ok &= uv_check.0;
-    checks.push(json!({
-        "name": "uv",
-        "required": true,
-        "status": if uv_check.0 { "ok" } else { "fail" },
-        "detail": uv_check.1,
-    }));
-
     let data_dir_ok = std::fs::create_dir_all(&cli.data_dir).is_ok();
     required_ok &= data_dir_ok;
     checks.push(json!({
@@ -565,15 +555,34 @@ async fn run_doctor(cli: &Cli, as_json: bool, skip_llm: bool) -> Result<()> {
                 Ok(manifest) => {
                     let has_smoke = manifest.presets.contains_key(&manifest.project.smoke_preset);
                     if has_git && has_smoke {
-                        (
-                            "ok",
-                            format!(
-                                "repo_id='{}', presets={} (smoke='{}')",
-                                manifest.project.repo_id,
-                                manifest.presets.len(),
-                                manifest.project.smoke_preset,
-                            ),
-                        )
+                        match relay_core::sandbox::resolve_adapter(&root, manifest.project.package_manager.as_deref()) {
+                            Ok(adapter) => {
+                                if adapter.name() != "generic" {
+                                    let (ok, detail) = probe_binary(adapter.name(), &["--version"]).await;
+                                    required_ok &= ok;
+                                    checks.push(json!({
+                                        "name": adapter.name(),
+                                        "required": true,
+                                        "status": if ok { "ok" } else { "fail" },
+                                        "detail": detail,
+                                    }));
+                                }
+                                (
+                                    "ok",
+                                    format!(
+                                        "repo_id='{}', presets={} (smoke='{}', manager='{}')",
+                                        manifest.project.repo_id,
+                                        manifest.presets.len(),
+                                        manifest.project.smoke_preset,
+                                        adapter.name(),
+                                    ),
+                                )
+                            }
+                            Err(error) => {
+                                required_ok &= !explicit_repo;
+                                (if explicit_repo { "fail" } else { "warn" }, error.to_string())
+                            }
+                        }
                     } else if !has_git {
                         if explicit_repo {
                             required_ok = false;
@@ -652,7 +661,7 @@ async fn run_doctor(cli: &Cli, as_json: bool, skip_llm: bool) -> Result<()> {
             "{}",
             serde_json::to_string_pretty(&json!({
                 "ok": required_ok,
-                "runtime_architecture": "2 Rust binaries (relay-desktop, relay-daemon) + external runtimes (git, uv, optional Ollama/Cloud LLM)",
+                "runtime_architecture": "Relay daemon and desktop with Git, the workspace package manager, and optional local or cloud inference",
                 "checks": checks,
             }))?
         );
@@ -671,12 +680,26 @@ async fn run_doctor(cli: &Cli, as_json: bool, skip_llm: bool) -> Result<()> {
 }
 
 async fn probe_binary(program: &str, args: &[&str]) -> (bool, String) {
-    match Command::new(program)
-        .args(args)
-        .stdin(Stdio::null())
-        .output()
-        .await
-    {
+    let executable = PathBuf::from(program);
+    #[cfg(windows)]
+    let executable = match std::env::var_os("PATH") {
+        Some(path) => match relay_core::sandbox::pm::security::resolve_windows_package_launcher(
+            program,
+            &args.iter().map(|arg| (*arg).to_owned()).collect::<Vec<_>>(),
+            &path,
+        ) {
+            Ok(shim) => shim.unwrap_or(executable),
+            Err(error) => return (false, error.to_string()),
+        },
+        None => executable,
+    };
+    let mut command = Command::new(executable);
+    command.args(args).stdin(Stdio::null()).kill_on_drop(true);
+    let result = tokio::time::timeout(Duration::from_secs(5), command.output()).await;
+    let Ok(result) = result else {
+        return (false, "version check timed out".into());
+    };
+    match result {
         Ok(output) if output.status.success() => {
             let line = String::from_utf8_lossy(&output.stdout)
                 .lines()

@@ -539,7 +539,8 @@ pub fn is_safe_cmd_arg(arg: &str) -> bool {
 }
 
 #[cfg(windows)]
-pub(crate) fn resolve_windows_package_launcher(
+/// Resolve an installed package manager executable or checked Windows command shim.
+pub fn resolve_windows_package_launcher(
     program: &str,
     args: &[String],
     search_path: &std::ffi::OsStr,

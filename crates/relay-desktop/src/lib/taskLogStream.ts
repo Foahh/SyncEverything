@@ -20,7 +20,7 @@ export interface ScrollMetrics {
 export interface RenderedLogLine {
   key: string;
   seq: number;
-  stream: TaskLogStreamKind;
+  stream: TaskLogStreamKind | null;
   text: string;
 }
 
@@ -69,7 +69,7 @@ export function appendTaskLogChunk(
   event: TaskLogStreamEvent,
   maxChunks = MAX_BUFFERED_LOG_CHUNKS_PER_TASK,
 ): Record<string, TaskLogBuffer> {
-  const existing = buffers[event.task_id];
+  const existing = Object.hasOwn(buffers, event.task_id) ? buffers[event.task_id] : undefined;
   if (!existing) {
     const chunks = maxChunks > 0 ? [event] : [];
     return {
@@ -120,7 +120,7 @@ export function clearTaskLogBuffer(
   if (!taskId) {
     return {};
   }
-  if (!(taskId in buffers)) {
+  if (!Object.hasOwn(buffers, taskId)) {
     return buffers;
   }
   const next = { ...buffers };
@@ -166,4 +166,21 @@ export function splitLogChunksIntoLines(chunks: TaskLogStreamEvent[]): RenderedL
     }
   }
   return lines;
+}
+
+export function renderTaskLogLines(
+  chunks: TaskLogStreamEvent[],
+  persistedContent: string | null,
+): RenderedLogLine[] {
+  if (persistedContent == null) return splitLogChunksIntoLines(chunks);
+  if (!persistedContent) return [];
+
+  const parts = persistedContent.replace(/\r\n/g, "\n").split("\n");
+  if (parts.at(-1) === "") parts.pop();
+  return parts.map((text, index) => ({
+    key: `persisted-${index}`,
+    seq: index,
+    stream: null,
+    text,
+  }));
 }

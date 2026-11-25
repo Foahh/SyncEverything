@@ -1,5 +1,8 @@
 use super::security::pm_error;
-use super::{BoxFuture, EnvFileSnapshot, PackageManagerAdapter, ParsedDependencies, StarterPresets};
+use super::{
+    BoxFuture, DependencyRunOptions, EnvFileSnapshot, PackageManagerAdapter, ParsedDependencies,
+    StarterPresets,
+};
 use crate::contracts::CommandPreset;
 use crate::error::RelayResult;
 use std::collections::BTreeMap;
@@ -65,6 +68,7 @@ impl PackageManagerAdapter for GenericAdapter {
         &'a self,
         _worktree_path: &'a Path,
         spec: &'a str,
+        _options: DependencyRunOptions,
     ) -> BoxFuture<'a, RelayResult<()>> {
         Box::pin(async move {
             Err(pm_error(

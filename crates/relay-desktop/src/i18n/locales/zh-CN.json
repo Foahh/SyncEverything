@@ -149,7 +149,7 @@
     "taskLogsTitle": "任务输出",
     "taskStatusStreaming": "实时输出中",
     "taskStatusQueued": "等待执行",
-    "taskStatusCancelled": "已取消 — 已保存部分日志",
+    "taskStatusCancelled": "已取消",
     "taskStatusFinished": "已结束",
     "pauseAutoScroll": "暂停自动滚动",
     "resumeAutoScroll": "恢复自动滚动",
@@ -416,6 +416,7 @@
     "peerNotFound": "未找到该受信任设备记录。",
     "emptyDeviceLabel": "保存前请输入设备名称。",
     "localNodeTicket": "该配对码属于当前本机，请粘贴另一台设备的配对码。",
+    "mcpPreviewChanged": "项目的 MCP 配置已变化。请刷新预览后再写入。",
     "switchModeToPair": "请先切换到算力主机或笔记本模式，再与其他设备配对。"
   }
 }

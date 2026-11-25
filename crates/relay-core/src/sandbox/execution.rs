@@ -15,11 +15,11 @@ use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 use std::io;
 use std::path::{Component, Path, PathBuf};
-use std::process::Stdio;
+use std::process::{Output, Stdio};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
-use tokio::io::{AsyncBufReadExt, AsyncRead, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::mpsc;
 use uuid::Uuid;
@@ -96,6 +96,11 @@ pub struct PreflightReport {
     pub detected_missing_module: Option<String>,
     pub error_snippets: Vec<ErrorSourceSnippet>,
     pub raw_log: String,
+}
+
+pub(crate) enum PatchVerification {
+    Finished(PatchProposal, String),
+    Cancelled(String),
 }
 
 impl WorktreeSandbox {
@@ -187,6 +192,8 @@ impl WorktreeSandbox {
         let program = launcher.as_deref().unwrap_or(program);
         let cargo_target_dir = self.shared_cargo_target_dir()?;
         let mut command = worktree_command(program, &worktree_path, Some(&cargo_target_dir));
+        #[cfg(unix)]
+        command.process_group(0);
         let is_uv = Path::new(&preset.program)
             .file_stem()
             .and_then(|stem| stem.to_str())
@@ -202,6 +209,7 @@ impl WorktreeSandbox {
             .stderr(Stdio::piped())
             .kill_on_drop(true)
             .spawn()?;
+        let process_tree = ProcessTree::capture(&child);
         let stdout_pipe = child
             .stdout
             .take()
@@ -262,12 +270,7 @@ impl WorktreeSandbox {
         tokio::pin!(timeout_sleep);
 
         let mut cancel_token = options.cancel_token;
-        let cancel_wait = async {
-            match &mut cancel_token {
-                Some(token) => token.cancelled().await,
-                None => std::future::pending::<()>().await,
-            }
-        };
+        let cancel_wait = wait_for_cancellation(&mut cancel_token);
         tokio::pin!(cancel_wait);
 
         let wait_outcome = tokio::select! {
@@ -292,7 +295,7 @@ impl WorktreeSandbox {
                 (status.code(), status.success(), false, false)
             }
             WaitOutcome::Cancelled => {
-                kill_child_tree(&mut child).await;
+                kill_child_tree(&mut child, &process_tree).await;
                 let _ = drain_reader_tasks(&mut stdout_task, &mut stderr_task, STREAM_DRAIN_TIMEOUT)
                     .await;
                 if let Some(emitter) = emitter_task {
@@ -301,7 +304,7 @@ impl WorktreeSandbox {
                 (None, false, false, true)
             }
             WaitOutcome::TimedOut => {
-                kill_child_tree(&mut child).await;
+                kill_child_tree(&mut child, &process_tree).await;
                 let _ = drain_reader_tasks(&mut stdout_task, &mut stderr_task, STREAM_DRAIN_TIMEOUT)
                     .await;
                 if let Some(emitter) = emitter_task {
@@ -419,7 +422,7 @@ impl WorktreeSandbox {
         patch: PatchInput<'_>,
         summary: &str,
     ) -> RelayResult<PatchProposal> {
-        self.apply_and_verify_patch_with_options(
+        match self.apply_and_verify_patch_with_options(
             task_id,
             worktree_path,
             worktree_branch,
@@ -431,11 +434,15 @@ impl WorktreeSandbox {
                 ..PresetRunOptions::default()
             },
         )
-        .await
+        .await?
+        {
+            PatchVerification::Finished(proposal, _) => Ok(proposal),
+            PatchVerification::Cancelled(_) => Err(RelayError::TaskCancelled(task_id.to_string())),
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub async fn apply_and_verify_patch_with_options(
+    pub(crate) async fn apply_and_verify_patch_with_options(
         &self,
         task_id: TaskId,
         worktree_path: &Path,
@@ -444,7 +451,7 @@ impl WorktreeSandbox {
         patch: PatchInput<'_>,
         summary: &str,
         mut options: PresetRunOptions,
-    ) -> RelayResult<PatchProposal> {
+    ) -> RelayResult<PatchVerification> {
         self.validate_task_worktree(task_id, worktree_path, worktree_branch)
             .await?;
         if options.task_id.is_none() {
@@ -456,7 +463,20 @@ impl WorktreeSandbox {
         let kind = patch.kind();
         let diff_before = working_diff(&worktree_path).await?;
         let apply_result = match patch {
-            PatchInput::DependencySpec(spec) => adapter.add_dependency(&worktree_path, spec).await,
+            PatchInput::DependencySpec(spec) => {
+                let timeout_secs = resolve_preset(manifest, smoke_preset)?.timeout_secs;
+                adapter
+                    .add_dependency(
+                        &worktree_path,
+                        spec,
+                        pm::DependencyRunOptions {
+                            task_id: Some(task_id),
+                            timeout: Duration::from_secs(timeout_secs.into()),
+                            cancel_token: options.cancel_token.clone(),
+                        },
+                    )
+                    .await
+            }
             PatchInput::CodeDiff(edits) => apply_code_diff_edits(&worktree_path, edits).await,
         };
         if let Err(error) = apply_result {
@@ -465,59 +485,57 @@ impl WorktreeSandbox {
             }
             return Err(error);
         }
-        let diff_preview = working_diff(&worktree_path).await?;
-        if diff_preview.is_empty() || diff_preview == diff_before {
-            let _ = rollback_worktree(&worktree_path).await;
-            return Err(RelayError::Internal("patch produced no worktree diff".into()));
-        }
-        let smoke = match self
-            .run_preset_streaming(
-                &worktree_path,
-                manifest,
-                smoke_preset,
-                &BTreeMap::new(),
-                options,
-            )
-            .await
-        {
-            Ok(smoke) => smoke,
-            Err(error) => {
-                let _ = rollback_worktree(&worktree_path).await;
-                return Err(error);
+        let verification = async {
+            let diff_preview = working_diff(&worktree_path).await?;
+            if diff_preview.is_empty() || diff_preview == diff_before {
+                return Err(RelayError::Internal("patch produced no worktree diff".into()));
             }
-        };
-        if smoke.cancelled {
-            let _ = rollback_worktree(&worktree_path).await;
-            return Err(RelayError::TaskCancelled(task_id.to_string()));
+            let smoke = self
+                .run_preset_streaming(
+                    &worktree_path,
+                    manifest,
+                    smoke_preset,
+                    &BTreeMap::new(),
+                    options,
+                )
+                .await?;
+            if smoke.cancelled {
+                return Ok(PatchVerification::Cancelled(smoke.raw_log));
+            }
+            // Smoke can reconcile or create a lockfile. Approval covers the final diff.
+            if smoke.success {
+                pm::security::stage_intent_to_add(
+                    adapter.name(),
+                    &worktree_path,
+                    adapter.lockfile_paths(),
+                )
+                .await?;
+            }
+            let diff_preview = working_diff(&worktree_path).await?;
+            if smoke.success && (diff_preview.is_empty() || diff_preview == diff_before) {
+                return Err(RelayError::Internal(
+                    "patch produced no lasting worktree diff".into(),
+                ));
+            }
+            let proposal = PatchProposal {
+                patch_id: Uuid::now_v7().to_string(),
+                task_id,
+                kind,
+                summary: summary.into(),
+                diff_preview,
+                worktree_branch: worktree_branch.into(),
+                smoke_verified: smoke.success,
+                smoke_stdout_tail: tail_lines(&smoke.raw_log),
+                created_at: Utc::now(),
+            };
+            Ok(PatchVerification::Finished(proposal, smoke.raw_log))
         }
-        // Smoke can reconcile or create a lockfile. Approval must cover the complete final diff.
-        if smoke.success {
-            pm::security::stage_intent_to_add(
-                adapter.name(),
-                &worktree_path,
-                adapter.lockfile_paths(),
-            )
-            .await?;
-        }
-        let diff_preview = working_diff(&worktree_path).await?;
-        if !smoke.success {
+        .await;
+        if !matches!(&verification, Ok(PatchVerification::Finished(proposal, _)) if proposal.smoke_verified)
+        {
             rollback_worktree(&worktree_path).await?;
-        } else if diff_preview.is_empty() || diff_preview == diff_before {
-            return Err(RelayError::Internal(
-                "patch produced no lasting worktree diff".into(),
-            ));
         }
-        Ok(PatchProposal {
-            patch_id: Uuid::now_v7().to_string(),
-            task_id,
-            kind,
-            summary: summary.into(),
-            diff_preview,
-            worktree_branch: worktree_branch.into(),
-            smoke_verified: smoke.success,
-            smoke_stdout_tail: tail_lines(&smoke.raw_log),
-            created_at: Utc::now(),
-        })
+        verification
     }
 }
 
@@ -704,20 +722,178 @@ async fn drain_reader_tasks(
     }
 }
 
-async fn kill_child_tree(child: &mut tokio::process::Child) {
+struct ProcessTree {
     #[cfg(windows)]
-    if let Some(pid) = child.id() {
-        let mut kill_cmd = Command::new("taskkill");
-        kill_cmd
-            .args(["/PID", &pid.to_string(), "/T", "/F"])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .kill_on_drop(true);
-        let _ = tokio::time::timeout(CHILD_KILL_WAIT_TIMEOUT, kill_cmd.status()).await;
+    job: Option<std::os::windows::io::OwnedHandle>,
+}
+
+impl ProcessTree {
+    fn capture(_child: &tokio::process::Child) -> Self {
+        Self {
+            #[cfg(windows)]
+            job: attach_process_job(_child).ok(),
+        }
+    }
+}
+
+#[cfg(windows)]
+fn attach_process_job(
+    child: &tokio::process::Child,
+) -> io::Result<std::os::windows::io::OwnedHandle> {
+    use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
+    use windows_sys::Win32::System::JobObjects::{
+        AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+        JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
+        SetInformationJobObject,
+    };
+
+    let child = child
+        .raw_handle()
+        .ok_or_else(|| io::Error::other("the child process already exited"))?;
+    // An anonymous job needs neither security attributes nor a name.
+    let job = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
+    if job.is_null() {
+        return Err(io::Error::last_os_error());
+    }
+    // CreateJobObjectW returned a new handle owned by this function.
+    let job = unsafe { OwnedHandle::from_raw_handle(job) };
+    let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+    limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+    // The handle and the matching structures remain valid for both calls.
+    if unsafe {
+        SetInformationJobObject(
+            job.as_raw_handle(),
+            JobObjectExtendedLimitInformation,
+            std::ptr::from_ref(&limits).cast(),
+            std::mem::size_of_val(&limits) as u32,
+        ) == 0
+            || AssignProcessToJobObject(job.as_raw_handle(), child) == 0
+    } {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(job)
+}
+
+#[cfg(windows)]
+async fn terminate_process_job(job: &std::os::windows::io::OwnedHandle) -> bool {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::System::JobObjects::{
+        JOBOBJECT_BASIC_ACCOUNTING_INFORMATION, JobObjectBasicAccountingInformation,
+        QueryInformationJobObject, TerminateJobObject,
+    };
+
+    // The caller owns the job handle for the duration of termination.
+    if unsafe { TerminateJobObject(job.as_raw_handle(), 1) } == 0 {
+        return false;
+    }
+    tokio::time::timeout(CHILD_KILL_WAIT_TIMEOUT, async {
+        loop {
+            let mut accounting = JOBOBJECT_BASIC_ACCOUNTING_INFORMATION::default();
+            // The output buffer has the structure and size required by this information class.
+            let result = unsafe {
+                QueryInformationJobObject(
+                    job.as_raw_handle(),
+                    JobObjectBasicAccountingInformation,
+                    std::ptr::from_mut(&mut accounting).cast(),
+                    std::mem::size_of_val(&accounting) as u32,
+                    std::ptr::null_mut(),
+                )
+            };
+            if result == 0 {
+                return false;
+            }
+            if accounting.ActiveProcesses == 0 {
+                return true;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .unwrap_or(false)
+}
+
+async fn kill_child_tree(child: &mut tokio::process::Child, _process_tree: &ProcessTree) {
+    #[cfg(unix)]
+    if let Some(pid) = child.id().and_then(|pid| libc::pid_t::try_from(pid).ok()) {
+        // Each supervised child starts in its own process group. Its unreaped PID
+        // identifies that group, and a negative PID signals its members.
+        unsafe { libc::kill(-pid, libc::SIGKILL) };
+    }
+    #[cfg(windows)]
+    {
+        let job_terminated = match &_process_tree.job {
+            Some(job) => terminate_process_job(job).await,
+            None => false,
+        };
+        if !job_terminated && let Some(pid) = child.id() {
+            let mut kill_cmd = Command::new("taskkill");
+            kill_cmd
+                .args(["/PID", &pid.to_string(), "/T", "/F"])
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .kill_on_drop(true);
+            let _ = tokio::time::timeout(CHILD_KILL_WAIT_TIMEOUT, kill_cmd.status()).await;
+        }
     }
     let _ = child.start_kill();
     let _ = tokio::time::timeout(CHILD_KILL_WAIT_TIMEOUT, child.wait()).await;
+}
+
+async fn wait_for_cancellation(token: &mut Option<TaskCancellationToken>) {
+    match token {
+        Some(token) => token.cancelled().await,
+        None => std::future::pending::<()>().await,
+    }
+}
+
+pub(super) async fn run_dependency_command(
+    mut command: Command,
+    manager: &str,
+    mut options: pm::DependencyRunOptions,
+) -> RelayResult<Output> {
+    let cancelled_error = || {
+        RelayError::TaskCancelled(options.task_id.map_or_else(String::new, |id| id.to_string()))
+    };
+    if options
+        .cancel_token
+        .as_ref()
+        .is_some_and(TaskCancellationToken::is_cancelled)
+    {
+        return Err(cancelled_error());
+    }
+    #[cfg(unix)]
+    command.process_group(0);
+    let mut child = command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()?;
+    let process_tree = ProcessTree::capture(&child);
+    let mut stdout = child.stdout.take().expect("configured dependency stdout pipe");
+    let mut stderr = child.stderr.take().expect("configured dependency stderr pipe");
+    let mut output = Vec::new();
+    let mut errors = Vec::new();
+    let result = tokio::select! {
+        biased;
+        () = wait_for_cancellation(&mut options.cancel_token) => Err(cancelled_error()),
+        result = tokio::time::timeout(options.timeout, async {
+            tokio::try_join!(stdout.read_to_end(&mut output), stderr.read_to_end(&mut errors))?;
+            child.wait().await
+        }) => match result {
+            Ok(result) => result.map_err(RelayError::from),
+            Err(_) => Err(pm::security::pm_error(manager, "dependency installation timed out")),
+        },
+    };
+    if result.is_err() {
+        kill_child_tree(&mut child, &process_tree).await;
+    }
+    Ok(Output {
+        status: result?,
+        stdout: output,
+        stderr: errors,
+    })
 }
 
 #[cfg(all(windows, test))]

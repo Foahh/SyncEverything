@@ -148,7 +148,7 @@ export function LeftRail({
               {tasks.map((task) => {
                 const needsFixReview = needsTaskApproval(task);
                 const badge = taskStateBadgeProps(task.state);
-                const running = isTaskRunning(task.state);
+                const running = isTaskRunning(task.state) && !needsFixReview;
                 const cancellable = isTaskCancellable(task.state);
                 const isCancelling = cancellingTaskId === task.spec.task_id;
                 const isSelected = selectedTaskId === task.spec.task_id;

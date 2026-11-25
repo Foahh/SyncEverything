@@ -7,6 +7,7 @@ pub use execution::{
     ErrorSourceSnippet, PatchInput, PreflightReport, PresetRunOptions, PresetRunOutput,
     TaskLogCallback, detect_missing_python_module, extract_error_snippets, extract_metrics_json,
 };
+pub(crate) use execution::PatchVerification;
 pub use pm::{
     DependencyChange, DependencyDiff, EnvFileSnapshot, GeneratedManifest, PackageManagerAdapter,
     PackageManagerInfo, PackageManagerRegistry, ParsedDependencies, StarterPresets,

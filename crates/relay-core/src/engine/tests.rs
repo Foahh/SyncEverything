@@ -506,10 +506,10 @@ async fn desktop_mode_and_queued_peer_decisions_survive_restart() {
 
     let id = Uuid::now_v7();
     let spec = spec(id, "base");
-    let queued = engine.queue_peer_task(spec.clone()).await.unwrap();
-    assert_eq!(engine.queue_peer_task(spec).await.unwrap(), queued);
+    let queued = engine.queue_peer_task(spec.clone(), None).await.unwrap();
+    assert_eq!(engine.queue_peer_task(spec, None).await.unwrap(), queued);
     let decision = engine
-        .queue_peer_approval(id, None, ApprovalDecision::Rejected)
+        .queue_peer_approval(id, None, ApprovalDecision::Rejected, None)
         .await
         .unwrap();
     assert_eq!(decision.state, TaskState::Rejected);
@@ -544,12 +544,13 @@ async fn cancellation_handles_queued_active_raii_cleanup_and_persisted_partial_l
     let cancelled_queued = engine.cancel_task(queued_id).await.unwrap();
     assert_eq!(cancelled_queued.state, TaskState::Cancelled);
 
-    // 2) Re-cancelling a terminal task or cancelling an unknown task fails cleanly.
-    assert!(matches!(
-        engine.cancel_task(queued_id).await,
-        Err(RelayError::InvalidStateTransition { from, to, .. })
-            if from == "Cancelled" && to == "Cancelled"
-    ));
+    // 2) A cancellation replay acknowledges the original result without another outbox entry.
+    assert_eq!(engine.cancel_task(queued_id).await.unwrap(), cancelled_queued);
+    let offline_id = Uuid::now_v7();
+    engine.queue_peer_task(spec(offline_id, "base"), None).await.unwrap();
+    let offline = engine.queue_peer_cancel(offline_id, None).await.unwrap();
+    assert_eq!(engine.queue_peer_cancel(offline_id, None).await.unwrap(), offline);
+    assert_eq!(engine.observed_outbox_count(), 2);
     assert!(matches!(
         engine.cancel_task(Uuid::now_v7()).await,
         Err(RelayError::TaskNotFound(_))
@@ -601,4 +602,25 @@ async fn cancellation_handles_queued_active_raii_cleanup_and_persisted_partial_l
     let stored = reopened.read_task_log(running_id).await.unwrap().unwrap();
     assert_eq!(stored, (hash, partial.to_owned()));
     close(reopened).await;
+}
+
+#[tokio::test]
+async fn cancellation_written_by_another_engine_stops_the_running_operation() {
+    let db = TempDb::new();
+    let worker = db.open().await;
+    let controller = db.open().await;
+    let task_id = Uuid::now_v7();
+    worker.submit_task(spec(task_id, "base")).await.unwrap();
+    let guard = worker.register_task_cancellation(task_id).await.unwrap();
+    let mut token = guard.token();
+    assert!(!token.is_cancelled());
+
+    controller.cancel_task(task_id).await.unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(3), token.cancelled())
+        .await
+        .expect("the worker did not observe the persisted cancellation");
+    assert!(token.is_cancelled());
+    drop(guard);
+    close(worker).await;
+    close(controller).await;
 }

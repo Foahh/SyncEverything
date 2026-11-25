@@ -33,7 +33,7 @@ impl Network {
         data_dir: &Path,
         engine: &Arc<RelayEngine>,
         sandbox: Option<WorktreeSandbox>,
-    ) -> RelayResult<(Self, Vec<NodeEvents>, Option<ReconnectEvents>)> {
+    ) -> RelayResult<(Self, Vec<NodeEvents>)> {
         if mode == RuntimeMode::LocalDualSandbox {
             let profile = NetworkProfile::LocalOnly;
             let (host, host_events) =
@@ -62,7 +62,7 @@ impl Network {
                 auto_reconnect: None,
             };
             network.sync_loopback_head(engine.repo_id()).await;
-            return Ok((network, vec![host_events, client_events], None));
+            return Ok((network, vec![host_events, client_events]));
         }
 
         let (store_dir, sandbox) = match mode {
@@ -102,14 +102,6 @@ impl Network {
         if let Err(error) = local.preload_trusted_peer_addrs().await {
             tracing::warn!(%error, "Unable to preload trusted peer addresses");
         }
-        let (auto_reconnect, reconnect_rx) = spawn_auto_reconnect(
-            local.clone(),
-            engine.clone(),
-            AutoReconnectConfig {
-                sender_device: local.id().to_string(),
-                ..Default::default()
-            },
-        );
         Ok((
             Self {
                 mode,
@@ -117,11 +109,29 @@ impl Network {
                 loopback_host: None,
                 remote: None,
                 last_pushed_commit: None,
-                auto_reconnect: Some(auto_reconnect),
+                auto_reconnect: None,
             },
             vec![events],
-            Some(reconnect_rx),
         ))
+    }
+
+    pub(super) fn start_auto_reconnect(
+        &mut self,
+        engine: &Arc<RelayEngine>,
+    ) -> Option<ReconnectEvents> {
+        if self.mode == RuntimeMode::LocalDualSandbox {
+            return None;
+        }
+        let (handle, events) = spawn_auto_reconnect(
+            self.local.clone(),
+            engine.clone(),
+            AutoReconnectConfig {
+                sender_device: self.local.id().to_string(),
+                ..Default::default()
+            },
+        );
+        self.auto_reconnect = Some(handle);
+        Some(events)
     }
 
     pub(super) fn cancel_auto_reconnect(&mut self) {

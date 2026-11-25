@@ -96,7 +96,9 @@ export default function App() {
 
   const { data: persistedTaskLog } = useTaskLog(
     selectedTaskId,
-    inspectorMode === "task" && selectedTask != null && !isTaskRunning(selectedTask.state),
+    inspectorMode === "task" &&
+      selectedTask != null &&
+      (!isTaskRunning(selectedTask.state) || needsTaskApproval(selectedTask)),
   );
 
   const pendingFixTask: TaskRecord_Serialize | null = useMemo(() => {

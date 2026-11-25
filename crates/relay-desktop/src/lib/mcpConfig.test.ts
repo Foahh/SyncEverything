@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { relayApi, resetBrowserPreviewState } from "./relayApi";
 import {
   buildMcpSnippet,
   buildRelayMcpServerEntry,
@@ -226,4 +227,29 @@ describe("project MCP target mapping and safe JSON merge", () => {
     expect(diff.some((line) => line.kind === "added" && line.text.includes('"a": 2,'))).toBe(true);
     expect(diff.some((line) => line.kind === "added" && line.text.includes('"b": 3'))).toBe(true);
   });
+});
+
+test("project writes require the confirmed target and file contents", async () => {
+  resetBrowserPreviewState();
+  const request = {
+    client: "claude_code",
+    transport: "streamable_http",
+    http_url: DEFAULT_MCP_HTTP_URL,
+  } as const;
+  try {
+    await relayApi.openWorkspaceRepo("/projects/first");
+    const first = await relayApi.previewProjectMcpConfig(request);
+    await relayApi.openWorkspaceRepo("/projects/second");
+    await expect(relayApi.writeProjectMcpConfig(request, first)).rejects.toThrow(
+      "Refresh the preview",
+    );
+    const second = await relayApi.previewProjectMcpConfig(request);
+    expect(second.file_exists).toBe(false);
+    await relayApi.writeProjectMcpConfig(request, second);
+    await expect(relayApi.writeProjectMcpConfig(request, second)).rejects.toThrow(
+      "Refresh the preview",
+    );
+  } finally {
+    resetBrowserPreviewState();
+  }
 });

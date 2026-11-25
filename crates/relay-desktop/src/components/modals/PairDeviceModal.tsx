@@ -136,9 +136,10 @@ interface TrustedDeviceRowProps {
   mode: RuntimeMode;
   isConnected: boolean;
   copiedNodeId: string | null;
-  busyNodeId: string | null;
+  isBusy: boolean;
+  isReconnecting: boolean;
   onCopyNodeId: (nodeId: string) => void;
-  onRename: (nodeId: string, nextLabel: string) => void;
+  onRename: (nodeId: string, nextLabel: string) => Promise<boolean>;
   onReconnect: (peer: TrustedPeerRecord_Serialize) => void;
   onRevoke: (peer: TrustedPeerRecord_Serialize) => void;
   onRemove: (peer: TrustedPeerRecord_Serialize) => void;
@@ -149,7 +150,8 @@ function TrustedDeviceRow({
   mode,
   isConnected,
   copiedNodeId,
-  busyNodeId,
+  isBusy,
+  isReconnecting,
   onCopyNodeId,
   onRename,
   onReconnect,
@@ -161,7 +163,6 @@ function TrustedDeviceRow({
   const [draftLabel, setDraftLabel] = useState(peer.label);
 
   const isRevoked = peer.revoked_at !== null;
-  const isBusy = busyNodeId === peer.node_id;
   const isCopied = copiedNodeId === peer.node_id;
   const renameInputId = `rename-peer-${peer.node_id.slice(0, 12)}`;
 
@@ -170,12 +171,11 @@ function TrustedDeviceRow({
     setIsEditing(true);
   };
 
-  const submitRename = () => {
+  const submitRename = async () => {
     const trimmed = draftLabel.trim();
-    if (!trimmed) return;
-    setIsEditing(false);
-    if (trimmed !== peer.label) {
-      onRename(peer.node_id, trimmed);
+    if (!trimmed || isBusy) return;
+    if (trimmed === peer.label || (await onRename(peer.node_id, trimmed))) {
+      setIsEditing(false);
     }
   };
 
@@ -192,7 +192,7 @@ function TrustedDeviceRow({
               className="flex min-w-0 flex-1 items-center gap-1.5"
               onSubmit={(event) => {
                 event.preventDefault();
-                submitRename();
+                void submitRename();
               }}
             >
               <label htmlFor={renameInputId} className="sr-only">
@@ -204,6 +204,8 @@ function TrustedDeviceRow({
                 onChange={(event) => setDraftLabel(event.target.value)}
                 onKeyDown={(event) => {
                   if (event.key === "Escape") {
+                    event.preventDefault();
+                    event.stopPropagation();
                     setIsEditing(false);
                     setDraftLabel(peer.label);
                   }
@@ -336,11 +338,11 @@ function TrustedDeviceRow({
             >
               <RefreshCw
                 data-icon="inline-start"
-                className={isBusy ? "animate-spin" : undefined}
+                className={isReconnecting ? "animate-spin" : undefined}
                 aria-hidden="true"
               />
               <span className="relay-text-trim leading-none">
-                {isBusy
+                {isReconnecting
                   ? t("modals.pair.actions.reconnecting")
                   : t("modals.pair.actions.reconnect")}
               </span>
@@ -385,7 +387,10 @@ export function PairDeviceModal({ isOpen, onOpenChange, mode, status }: PairDevi
   const [copied, setCopied] = useState(false);
   const [copiedNodeId, setCopiedNodeId] = useState<string | null>(null);
   const [remoteInput, setRemoteInput] = useState("");
-  const [busyNodeId, setBusyNodeId] = useState<string | null>(null);
+  const [busyAction, setBusyAction] = useState<{
+    nodeId: string;
+    kind: "rename" | "reconnect" | "revoke" | "remove";
+  } | null>(null);
   const [feedback, setFeedback] = useState<{ ok: boolean; text: string } | null>(null);
 
   const { data: trustedPeers = [] } = useTrustedPeers();
@@ -457,63 +462,27 @@ export function PairDeviceModal({ isOpen, onOpenChange, mode, status }: PairDevi
     });
   };
 
-  const handleRenamePeer = (nodeId: string, label: string) => {
-    setBusyNodeId(nodeId);
+  const runPeerAction = async (
+    action: NonNullable<typeof busyAction>,
+    mutate: () => Promise<string>,
+  ) => {
+    if (busyAction) return false;
+    setBusyAction(action);
     setFeedback(null);
-    renamePeer.mutate(
-      { nodeId, label },
-      {
-        onSuccess: (updated) => {
-          setFeedback({
-            ok: true,
-            text: t("modals.pair.renamedSuccess", { label: updated.label }),
-          });
-        },
-        onError: (err) => setFeedback({ ok: false, text: formatErrorMessage(err, t) }),
-        onSettled: () => setBusyNodeId(null),
-      },
-    );
-  };
-
-  const handleReconnectPeer = (peer: TrustedPeerRecord_Serialize) => {
-    setBusyNodeId(peer.node_id);
-    setFeedback(null);
-    reconnectPeer.mutate(peer.node_id, {
-      onSuccess: () => {
-        setFeedback({ ok: true, text: t("modals.pair.reconnectedSuccess", { label: peer.label }) });
-      },
-      onError: (err) => setFeedback({ ok: false, text: formatErrorMessage(err, t) }),
-      onSettled: () => setBusyNodeId(null),
-    });
-  };
-
-  const handleRevokePeer = (peer: TrustedPeerRecord_Serialize) => {
-    setBusyNodeId(peer.node_id);
-    setFeedback(null);
-    revokePeer.mutate(peer.node_id, {
-      onSuccess: () => {
-        setFeedback({ ok: true, text: t("modals.pair.revokedSuccess", { label: peer.label }) });
-      },
-      onError: (err) => setFeedback({ ok: false, text: formatErrorMessage(err, t) }),
-      onSettled: () => setBusyNodeId(null),
-    });
-  };
-
-  const handleRemovePeer = (peer: TrustedPeerRecord_Serialize) => {
-    setBusyNodeId(peer.node_id);
-    setFeedback(null);
-    removePeer.mutate(peer.node_id, {
-      onSuccess: () => {
-        setFeedback({ ok: true, text: t("modals.pair.removedSuccess", { label: peer.label }) });
-      },
-      onError: (err) => setFeedback({ ok: false, text: formatErrorMessage(err, t) }),
-      onSettled: () => setBusyNodeId(null),
-    });
+    try {
+      setFeedback({ ok: true, text: await mutate() });
+      return true;
+    } catch (error) {
+      setFeedback({ ok: false, text: formatErrorMessage(error, t) });
+      return false;
+    } finally {
+      setBusyAction(null);
+    }
   };
 
   return (
     <Dialog open={isOpen} onOpenChange={onOpenChange}>
-      <DialogContent className="sm:max-w-xl">
+      <DialogContent className="max-h-[88vh] overflow-y-auto sm:max-w-xl">
         <DialogHeader>
           <div className="flex items-center gap-2.5">
             <div className="flex size-8 shrink-0 items-center justify-center rounded-md bg-primary/10 text-primary">
@@ -658,12 +627,35 @@ export function PairDeviceModal({ isOpen, onOpenChange, mode, status }: PairDevi
                     mode={mode}
                     isConnected={isConnected}
                     copiedNodeId={copiedNodeId}
-                    busyNodeId={busyNodeId}
+                    isBusy={busyAction !== null}
+                    isReconnecting={
+                      busyAction?.kind === "reconnect" && busyAction.nodeId === peer.node_id
+                    }
                     onCopyNodeId={(nodeId) => void handleCopyNodeId(nodeId)}
-                    onRename={handleRenamePeer}
-                    onReconnect={handleReconnectPeer}
-                    onRevoke={handleRevokePeer}
-                    onRemove={handleRemovePeer}
+                    onRename={(nodeId, label) =>
+                      runPeerAction({ nodeId, kind: "rename" }, async () => {
+                        const updated = await renamePeer.mutateAsync({ nodeId, label });
+                        return t("modals.pair.renamedSuccess", { label: updated.label });
+                      })
+                    }
+                    onReconnect={({ node_id: nodeId, label }) =>
+                      void runPeerAction({ nodeId, kind: "reconnect" }, async () => {
+                        await reconnectPeer.mutateAsync(nodeId);
+                        return t("modals.pair.reconnectedSuccess", { label });
+                      })
+                    }
+                    onRevoke={({ node_id: nodeId, label }) =>
+                      void runPeerAction({ nodeId, kind: "revoke" }, async () => {
+                        await revokePeer.mutateAsync(nodeId);
+                        return t("modals.pair.revokedSuccess", { label });
+                      })
+                    }
+                    onRemove={({ node_id: nodeId, label }) =>
+                      void runPeerAction({ nodeId, kind: "remove" }, async () => {
+                        await removePeer.mutateAsync(nodeId);
+                        return t("modals.pair.removedSuccess", { label });
+                      })
+                    }
                   />
                 );
               })}

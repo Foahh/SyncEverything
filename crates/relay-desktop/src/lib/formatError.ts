@@ -17,6 +17,7 @@ type ErrorTranslationKey =
   | "errors.peerNotFound"
   | "errors.emptyDeviceLabel"
   | "errors.localNodeTicket"
+  | "errors.mcpPreviewChanged"
   | "errors.switchModeToPair";
 
 const KNOWN_ERROR_KEYS: Readonly<Record<string, ErrorTranslationKey>> = {
@@ -33,6 +34,8 @@ const KNOWN_ERROR_KEYS: Readonly<Record<string, ErrorTranslationKey>> = {
   "This task can no longer be cancelled.": "errors.taskNotCancellable",
   "device label cannot be empty": "errors.emptyDeviceLabel",
   "This ticket belongs to the local node": "errors.localNodeTicket",
+  "The project MCP configuration has changed. Refresh the preview before writing.":
+    "errors.mcpPreviewChanged",
   "Switch to Client or Host mode to pair with another machine": "errors.switchModeToPair",
 };
 

@@ -8,53 +8,41 @@ import type { TaskLogSnapshot, TaskState } from "../bindings";
 import {
   isTaskRunning,
   nextAutoScrollOnUserScroll,
-  splitLogChunksIntoLines,
+  renderTaskLogLines,
   type TaskLogBuffer,
 } from "../lib/taskLogStream";
 
 interface TaskLogViewerProps {
-  taskId: string;
   taskState: TaskState;
+  waitingForApproval: boolean;
   buffer: TaskLogBuffer | undefined;
   persistedLog: TaskLogSnapshot | null | undefined;
 }
 
-export function TaskLogViewer({ taskId, taskState, buffer, persistedLog }: TaskLogViewerProps) {
+export function TaskLogViewer({
+  taskState,
+  waitingForApproval,
+  buffer,
+  persistedLog,
+}: TaskLogViewerProps) {
   const { t } = useTranslation();
   const scrollContainerRef = useRef<HTMLDivElement | null>(null);
   const [autoScroll, setAutoScroll] = useState(true);
 
-  const running = isTaskRunning(taskState);
+  const running = isTaskRunning(taskState) && !waitingForApproval;
   const chunks = buffer?.chunks;
-  const persistedContent = persistedLog?.content ?? null;
-
-  const liveLines = useMemo(() => splitLogChunksIntoLines(chunks ?? []), [chunks]);
-
-  const fallbackLines = useMemo(() => {
-    if (liveLines.length > 0 || !persistedContent) {
-      return [];
-    }
-    const normalized = persistedContent.replace(/\r\n/g, "\n");
-    const parts = normalized.split("\n");
-    if (parts.length > 1 && parts[parts.length - 1] === "") {
-      parts.pop();
-    }
-    return parts.map((text, index) => ({
-      key: `persisted-${index}`,
-      seq: index,
-      stream: "stdout" as const,
-      text,
-    }));
-  }, [liveLines.length, persistedContent]);
-
-  const lines = liveLines.length > 0 ? liveLines : fallbackLines;
+  const persistedContent = running ? null : (persistedLog?.content ?? null);
+  const lines = useMemo(
+    () => renderTaskLogLines(chunks ?? [], persistedContent),
+    [chunks, persistedContent],
+  );
 
   useEffect(() => {
     if (!autoScroll) return;
     const el = scrollContainerRef.current;
     if (!el) return;
     el.scrollTop = el.scrollHeight;
-  }, [autoScroll, lines.length, taskId]);
+  }, [autoScroll, lines]);
 
   const handleScroll = () => {
     const el = scrollContainerRef.current;
@@ -70,22 +58,18 @@ export function TaskLogViewer({ taskId, taskState, buffer, persistedLog }: TaskL
   };
 
   const handleToggleAutoScroll = () => {
-    setAutoScroll((prev) => {
-      const next = !prev;
-      if (next && scrollContainerRef.current) {
-        scrollContainerRef.current.scrollTop = scrollContainerRef.current.scrollHeight;
-      }
-      return next;
-    });
+    setAutoScroll((prev) => !prev);
   };
 
-  const statusLabel = running
-    ? t("detail.taskStatusStreaming")
-    : taskState === "queued"
-      ? t("detail.taskStatusQueued")
-      : taskState === "cancelled"
-        ? t("detail.taskStatusCancelled")
-        : t("detail.taskStatusFinished");
+  const statusLabel = waitingForApproval
+    ? t("sidebar.awaitingApproval")
+    : running
+      ? t("detail.taskStatusStreaming")
+      : taskState === "queued"
+        ? t("detail.taskStatusQueued")
+        : taskState === "cancelled"
+          ? t("detail.taskStatusCancelled")
+          : t("detail.taskStatusFinished");
 
   return (
     <div className="flex flex-col gap-2">
@@ -110,7 +94,9 @@ export function TaskLogViewer({ taskId, taskState, buffer, persistedLog }: TaskL
                 aria-hidden="true"
               />
             )}
-            <span className="relay-text-trim leading-none">{statusLabel}</span>
+            <span role="status" className="relay-text-trim leading-none">
+              {statusLabel}
+            </span>
           </Badge>
         </div>
 
@@ -140,12 +126,11 @@ export function TaskLogViewer({ taskId, taskState, buffer, persistedLog }: TaskL
         ref={scrollContainerRef}
         onScroll={handleScroll}
         role="log"
-        aria-live="polite"
-        aria-relevant="additions"
+        aria-live="off"
         aria-label={t("detail.taskLogsTitle")}
         className="relay-code-dark font-mono-tech max-h-[360px] min-h-[160px] overflow-y-auto overscroll-contain rounded-lg border border-border bg-[#0e131b] text-[11.5px] leading-relaxed text-slate-200 [scrollbar-gutter:stable]"
       >
-        {buffer?.truncated && (
+        {persistedContent == null && buffer?.truncated && (
           <div className="border-b border-slate-800 bg-slate-900/80 px-2.5 py-1 text-[10.5px] text-slate-400">
             {t("detail.logsTruncated")}
           </div>
@@ -169,14 +154,16 @@ export function TaskLogViewer({ taskId, taskState, buffer, persistedLog }: TaskL
                       : "text-slate-200",
                   )}
                 >
-                  <span
-                    className={cn(
-                      "w-7 shrink-0 select-none text-[9.5px] font-semibold tracking-wide uppercase",
-                      isStderr ? "text-red-400" : "text-slate-500",
-                    )}
-                  >
-                    {isStderr ? t("detail.stderrLabel") : t("detail.stdoutLabel")}
-                  </span>
+                  {entry.stream && (
+                    <span
+                      className={cn(
+                        "w-7 shrink-0 select-none text-[9.5px] font-semibold tracking-wide uppercase",
+                        isStderr ? "text-red-400" : "text-slate-500",
+                      )}
+                    >
+                      {isStderr ? t("detail.stderrLabel") : t("detail.stdoutLabel")}
+                    </span>
+                  )}
                   <span className="min-w-0 flex-1">{entry.text || " "}</span>
                 </div>
               );

@@ -340,12 +340,12 @@ async fn offline_outbox_flushes_when_peer_comes_online() {
         .unwrap();
     assert_eq!(client.peer_status().pending_outbox_count, 1);
 
-    let offline = EndpointAddr::new(iroh::SecretKey::generate().public());
+    let (host, host_engine) = start_local(&temp, "host-blobs", None).await;
+    let offline = EndpointAddr::new(host.id());
     assert!(client.flush_outbox(offline).await.is_err());
     assert_eq!(client.peer_status().pending_outbox_count, 1);
     assert!(!client.peer_status().connected);
 
-    let (host, host_engine) = start_local(&temp, "host-blobs", None).await;
     assert_eq!(client.flush_outbox(host.addr()).await.unwrap(), 1);
     assert_eq!(client.peer_status().pending_outbox_count, 0);
     assert_eq!(client_engine.pending_outbox_count().await.unwrap(), 0);
@@ -354,6 +354,42 @@ async fn offline_outbox_flushes_when_peer_comes_online() {
 
     client.shutdown().await.unwrap();
     host.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn outbox_replays_tasks_only_to_their_selected_workstation() {
+    let temp = TempDir::new();
+    let (client, client_engine) = start_local(&temp, "scoped-client", None).await;
+    let (first, first_engine) = start_local(&temp, "first-host", None).await;
+    let (second, second_engine) = start_local(&temp, "second-host", None).await;
+    let queue = |id| TaskSpec {
+        task_id: id,
+        repo_id: REPO.into(),
+        base_commit_sha: COMMIT.into(),
+        command_preset: "smoke".into(),
+        params: BTreeMap::new(),
+        require_approval: true,
+        requested_by_device: client.id().to_string(),
+        user_note: None,
+    };
+    let first_task = Uuid::now_v7();
+    let second_task = Uuid::now_v7();
+    client_engine.queue_peer_task(queue(first_task), Some(first.id().to_string())).await.unwrap();
+    client_engine.queue_peer_task(queue(second_task), Some(second.id().to_string())).await.unwrap();
+
+    assert_eq!(client.flush_outbox(second.addr()).await.unwrap(), 1);
+    assert!(second_engine.get_task(first_task).await.unwrap().is_none());
+    assert!(second_engine.get_task(second_task).await.unwrap().is_some());
+    assert_eq!(client_engine.pending_outbox_count().await.unwrap(), 1);
+
+    assert_eq!(client.flush_outbox(first.addr()).await.unwrap(), 1);
+    assert!(first_engine.get_task(first_task).await.unwrap().is_some());
+    assert!(first_engine.get_task(second_task).await.unwrap().is_none());
+    assert_eq!(client_engine.pending_outbox_count().await.unwrap(), 0);
+
+    client.shutdown().await.unwrap();
+    first.shutdown().await.unwrap();
+    second.shutdown().await.unwrap();
 }
 
 #[tokio::test]
@@ -556,15 +592,12 @@ async fn wire_cancel_task_cancels_queued_and_running_tasks_over_local_only_peer_
         TaskState::Cancelled
     );
 
-    // 2) Cancelling already-terminal or unknown task returns clean RPC error codes.
-    let already_terminal = client
-        .send_rpc(host.addr(), WireRequest::CancelTask { task_id: queued_id })
+    // 2) Replay returns the same cancellation, while an unknown task is rejected.
+    let repeated = client
+        .cancel_remote_task(host.addr(), queued_id)
         .await
         .unwrap();
-    assert!(matches!(
-        already_terminal,
-        WireResponse::Error { ref code, .. } if code == "invalid_state"
-    ));
+    assert_eq!(repeated, cancelled);
     let missing = client
         .send_rpc(
             host.addr(),
@@ -679,6 +712,16 @@ async fn host_revocation_gate_blocks_all_rpcs_and_blobs_from_revoked_peer() {
     let log_text = "verified log content\n";
     host.publish_evidence_log(log_text).await.unwrap();
     let log_hash: Hash = blake3::hash(log_text.as_bytes()).to_hex().to_string().parse().unwrap();
+    let blob_connection = client.endpoint().connect(host.addr(), iroh_blobs::ALPN).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            let accepted = host.shared.active_connections.lock().unwrap().len();
+            if accepted >= 2 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    }).await.expect("both peer connections were accepted");
 
     // 3. Revoke client on the host and disconnect live QUIC handles
     let revoked = host_engine
@@ -687,6 +730,8 @@ async fn host_revocation_gate_blocks_all_rpcs_and_blobs_from_revoked_peer() {
         .unwrap();
     assert!(revoked.is_revoked());
     host.disconnect_peer(client.id());
+    tokio::time::timeout(Duration::from_secs(3), blob_connection.closed())
+        .await.expect("active blob connection was closed");
 
     // Even if a new pairing window is opened, revocation gate MUST still block
     host.open_pairing_window(Duration::from_secs(30));
@@ -830,7 +875,7 @@ async fn restarted_interactive_host_accepts_persisted_trusted_client_without_pai
 }
 
 #[tokio::test]
-async fn startup_auto_reconnect_recovers_after_offline_and_flushes_outbox() {
+async fn startup_auto_reconnect_leaves_replay_to_the_runtime() {
     let temp = TempDir::new();
     let host_db = temp.join("auto-host.db");
     let client_db = temp.join("auto-client.db");
@@ -940,8 +985,10 @@ async fn startup_auto_reconnect_recovers_after_offline_and_flushes_outbox() {
         .expect("auto-reconnect timed out")
         .expect("auto-reconnect channel closed");
     assert_eq!(reconnected.record.node_id, host.id().to_string());
-    assert_eq!(reconnected.flushed_outbox, 1);
     assert!(client.peer_status().connected);
+    assert_eq!(client.peer_status().pending_outbox_count, 1);
+    assert!(host_engine.dag_snapshot(true).await.unwrap().nodes.is_empty());
+    assert_eq!(client.flush_outbox(reconnected.addr).await.unwrap(), 1);
     assert_eq!(client.peer_status().pending_outbox_count, 0);
     assert_delta(&host_engine.dag_snapshot(true).await.unwrap(), &delta, COMMIT);
 
@@ -951,17 +998,28 @@ async fn startup_auto_reconnect_recovers_after_offline_and_flushes_outbox() {
 }
 
 #[tokio::test]
-async fn startup_auto_reconnect_skips_revoked_peers_and_supports_cancellation() {
+async fn startup_auto_reconnect_skips_revoked_hosts_and_other_clients() {
     let temp = TempDir::new();
     let (host, _) = start_local(&temp, "skip-revoked-host", None).await;
+    let (other_client, other_engine) = start_local(&temp, "other-client", None).await;
+    other_engine.set_runtime_mode(RuntimeMode::Client).await.unwrap();
     let (client, client_engine) = start_local(&temp, "skip-revoked-client", None).await;
     let client = Arc::new(client);
+    let now = Utc::now();
     client_engine
         .set_runtime_mode(RuntimeMode::Client)
         .await
         .unwrap();
+    client_engine.upsert_trusted_peer(&TrustedPeerRecord {
+        node_id: other_client.id().to_string(),
+        label: "Another Laptop".into(),
+        role: PeerRole::Client,
+        ticket_or_addrs: serde_json::to_string(&other_client.addr()).unwrap(),
+        paired_at: now,
+        last_seen_at: now,
+        revoked_at: None,
+    }).await.unwrap();
 
-    let now = Utc::now();
     client_engine
         .upsert_trusted_peer(&TrustedPeerRecord {
             node_id: host.id().to_string(),
@@ -986,7 +1044,7 @@ async fn startup_auto_reconnect_skips_revoked_peers_and_supports_cancellation() 
             max_attempts: Some(3),
         },
     );
-    // Should exit quickly without connecting because the only stored peer is revoked
+    // Neither saved device is an active host candidate.
     let recv = tokio::time::timeout(Duration::from_secs(2), reconnected_rx.recv())
         .await
         .unwrap();
@@ -996,4 +1054,15 @@ async fn startup_auto_reconnect_skips_revoked_peers_and_supports_cancellation() 
 
     client.shutdown_shared().await.unwrap();
     host.shutdown().await.unwrap();
+    other_client.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn simultaneous_identity_initialization_uses_one_persisted_key() {
+    let temp = TempDir::new();
+    let (first, second) = tokio::join!(
+        load_or_create_secret_key(&temp.0),
+        load_or_create_secret_key(&temp.0)
+    );
+    assert_eq!(first.unwrap().public(), second.unwrap().public());
 }

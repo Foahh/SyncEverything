@@ -88,6 +88,11 @@ CREATE TABLE IF NOT EXISTS sync_outbox (
     created_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS sync_outbox_recipients (
+    seq INTEGER PRIMARY KEY REFERENCES sync_outbox (seq) ON DELETE CASCADE,
+    node_id TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS chat_messages (
     id TEXT PRIMARY KEY NOT NULL,
     repo_id TEXT NOT NULL,
@@ -161,6 +166,11 @@ impl RelayStore {
     pub async fn connect_in_memory() -> RelayResult<Self> {
         let pool = SqlitePoolOptions::new()
             .max_connections(1)
+            // The sole connection owns this database. An interrupted acquire must
+            // never discard it while awaiting a health check.
+            .test_before_acquire(false)
+            .idle_timeout(None)
+            .max_lifetime(None)
             .connect("sqlite::memory:")
             .await?;
         Self::init_schema(pool).await
@@ -405,7 +415,7 @@ impl RelayStore {
 
     pub async fn enqueue_outbox(&self, repo_id: &str, payload: &Value) -> RelayResult<i64> {
         let mut conn = self.pool.acquire().await?;
-        write_outbox(&mut conn, repo_id, payload).await
+        write_outbox(&mut conn, repo_id, payload, None).await
     }
 
     pub async fn list_pending_outbox(
@@ -428,6 +438,34 @@ impl RelayStore {
     pub async fn mark_outbox_delivered(&self, seq: i64) -> RelayResult<()> {
         self.mark_repo_outbox_delivered(None, seq).await?;
         Ok(())
+    }
+
+    pub(crate) async fn claim_peer_outbox(
+        &self,
+        repo_id: &str,
+        node_id: &str,
+    ) -> RelayResult<Vec<(i64, Value)>> {
+        let mut tx = self.begin_write().await?;
+        // Unassigned work is attached to the first host before any request can be sent.
+        sqlx::query(
+            "INSERT OR IGNORE INTO sync_outbox_recipients (seq, node_id)
+             SELECT seq, ? FROM sync_outbox WHERE repo_id = ? AND delivered = 0",
+        )
+        .bind(node_id)
+        .bind(repo_id)
+        .execute(&mut *tx)
+        .await?;
+        let rows = sqlx::query_as::<_, (i64, Json<Value>)>(
+            "SELECT o.seq, o.payload_json FROM sync_outbox o
+             JOIN sync_outbox_recipients r ON r.seq = o.seq
+             WHERE o.repo_id = ? AND o.delivered = 0 AND r.node_id = ? ORDER BY o.seq",
+        )
+        .bind(repo_id)
+        .bind(node_id)
+        .fetch_all(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(rows.into_iter().map(|(seq, Json(payload))| (seq, payload)).collect())
     }
 
     pub(crate) async fn mark_repo_outbox_delivered(
@@ -812,6 +850,7 @@ pub(crate) async fn write_outbox(
     conn: &mut SqliteConnection,
     repo_id: &str,
     payload: &Value,
+    node_id: Option<&str>,
 ) -> RelayResult<i64> {
     let result = sqlx::query(
         "INSERT INTO sync_outbox (repo_id, payload_json, created_at) VALUES (?, ?, ?)",
@@ -819,9 +858,17 @@ pub(crate) async fn write_outbox(
     .bind(repo_id)
     .bind(Json(payload))
     .bind(timestamp(Utc::now()))
-    .execute(conn)
+    .execute(&mut *conn)
     .await?;
-    Ok(result.last_insert_rowid())
+    let seq = result.last_insert_rowid();
+    if let Some(node_id) = node_id {
+        sqlx::query("INSERT INTO sync_outbox_recipients (seq, node_id) VALUES (?, ?)")
+            .bind(seq)
+            .bind(node_id)
+            .execute(conn)
+            .await?;
+    }
+    Ok(seq)
 }
 
 pub(crate) async fn insert_task(

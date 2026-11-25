@@ -15,6 +15,7 @@ import {
   type LlmSettingsView_Serialize,
   type PeerRole,
   type PeerStatus_Serialize,
+  type ProjectMcpConfigConfirmation_Deserialize,
   type ProjectMcpConfigPreview_Serialize,
   type ProjectMcpConfigRequest_Deserialize,
   type ProjectMcpConfigWriteResult,
@@ -1131,12 +1132,26 @@ export const relayApi = {
 
   async writeProjectMcpConfig(
     request: ProjectMcpConfigRequest_Deserialize,
+    confirmation: ProjectMcpConfigConfirmation_Deserialize,
   ): Promise<ProjectMcpConfigWriteResult> {
     if (isTauriRuntime()) {
-      return commands.writeProjectMcpConfig(request);
+      return commands.writeProjectMcpConfig(request, confirmation);
     }
     const preview = await relayApi.previewProjectMcpConfig(request);
-    mockState.projectMcpFiles[preview.relative_path] = preview.merged_content;
+    if (
+      preview.target_path !== confirmation.target_path ||
+      preview.existing_content !== (confirmation.existing_content ?? null) ||
+      preview.merged_content !== confirmation.merged_content
+    ) {
+      throw new Error(
+        "The project MCP configuration has changed. Refresh the preview before writing.",
+      );
+    }
+    const writtenContent =
+      preview.status === "unchanged"
+        ? (preview.existing_content ?? preview.merged_content)
+        : preview.merged_content;
+    mockState.projectMcpFiles[preview.relative_path] = writtenContent;
     return {
       client: preview.client,
       transport: preview.transport,
@@ -1144,7 +1159,7 @@ export const relayApi = {
       target_path: preview.target_path,
       created: !preview.file_exists,
       status: preview.status,
-      written_content: preview.merged_content,
+      written_content: writtenContent,
     };
   },
 

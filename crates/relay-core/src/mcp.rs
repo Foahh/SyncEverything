@@ -7,7 +7,7 @@ use crate::contracts::{
 };
 use crate::engine::RelayEngine;
 use crate::error::{RelayError, RelayResult};
-use crate::sandbox::{PatchInput, PreflightReport, WorktreeHandle, WorktreeSandbox};
+use crate::sandbox::{PatchInput, PatchVerification, PreflightReport, WorktreeHandle, WorktreeSandbox};
 use crate::state::validate_transition;
 use crate::sync::RelayNode;
 use chrono::Utc;
@@ -528,9 +528,10 @@ impl RelayMcpContext {
                 )));
             }
         };
-        let proposal = match sandbox
+        let id = task.spec.task_id;
+        let verification = sandbox
             .apply_and_verify_patch_with_options(
-                task.spec.task_id,
+                id,
                 handle.worktree_path(),
                 handle.branch_name(),
                 &manifest,
@@ -538,24 +539,41 @@ impl RelayMcpContext {
                 &args.summary,
                 options,
             )
-            .await
-        {
-            Ok(proposal) => proposal,
+            .await;
+        let (proposal, raw_log) = match verification {
+            Ok(PatchVerification::Finished(proposal, log)) => (proposal, log),
+            Ok(PatchVerification::Cancelled(log)) => {
+                if !log.is_empty() {
+                    let _ = self.engine.record_cancelled_task_log(id, &log).await;
+                }
+                self.cleanup_after_error(task).await;
+                return Err(RelayError::TaskCancelled(id.to_string()));
+            }
             Err(error @ RelayError::TaskCancelled(_)) => {
-                drop(cancel_guard);
                 self.cleanup_after_error(task).await;
                 return Err(error);
             }
             Err(error) => return Err(error),
         };
-        drop(cancel_guard);
+        if !raw_log.is_empty() {
+            let _ = self.engine.record_task_log(id, &raw_log).await;
+        }
+        if cancel_guard.token().is_cancelled() {
+            self.cleanup_after_error(task).await;
+            return Err(RelayError::TaskCancelled(id.to_string()));
+        }
         if !proposal.smoke_verified {
             return Err(RelayError::Internal(format!(
                 "patch failed smoke verification (worktree rolled back cleanly for retry):\n{}",
                 proposal.smoke_stdout_tail,
             )));
         }
-        let task = self.engine.attach_patch_proposal(proposal).await?;
+        let attachment = self.engine.attach_patch_proposal(proposal).await;
+        if attachment.is_err() && self.task(id).await?.state == TaskState::Cancelled {
+            self.cleanup_after_error(task).await;
+            return Err(RelayError::TaskCancelled(id.to_string()));
+        }
+        let task = attachment?;
         task.active_proposal.ok_or_else(|| {
             RelayError::Internal("verified patch was not recorded".into())
         })

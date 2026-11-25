@@ -1,15 +1,19 @@
 use super::security::{
     ensure_regular_or_absent, pm_error, stage_intent_to_add, validate_js_dependency_spec,
 };
-use super::{BoxFuture, EnvFileSnapshot, PackageManagerAdapter, ParsedDependencies, StarterPresets};
+use super::{
+    BoxFuture, DependencyRunOptions, EnvFileSnapshot, PackageManagerAdapter, ParsedDependencies,
+    StarterPresets,
+};
 use crate::contracts::CommandPreset;
 use crate::error::{RelayError, RelayResult};
-use crate::sandbox::execution::worktree_command;
+use crate::sandbox::execution::{run_dependency_command, worktree_command};
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::io;
 use std::path::Path;
-use std::process::Stdio;
+use std::time::Duration;
+use tokio::process::Command;
 
 const PACKAGE_JSON: &str = "package.json";
 const BUN_LOCK: &str = "bun.lock";
@@ -56,30 +60,44 @@ impl JsAdapter {
         self.variant
     }
 
-    fn add_args(&self, validated_spec: &str) -> Vec<String> {
-        match self.variant {
-            JsVariant::Bun => vec![
-                "add".into(),
-                "--ignore-scripts".into(),
-                validated_spec.to_owned(),
-            ],
-            JsVariant::Pnpm => vec![
-                "add".into(),
-                "--ignore-scripts".into(),
-                validated_spec.to_owned(),
-            ],
-            JsVariant::Yarn => vec![
-                "add".into(),
-                "--ignore-scripts".into(),
-                validated_spec.to_owned(),
-            ],
-            JsVariant::Npm => vec![
-                "install".into(),
-                "--ignore-scripts".into(),
-                validated_spec.to_owned(),
-            ],
-        }
+    fn command(&self, worktree_path: &Path, args: &[&str]) -> RelayResult<Command> {
+        let manager = self.name();
+        let program = Path::new(manager);
+        #[cfg(windows)]
+        let launcher = match std::env::var_os("PATH") {
+            Some(path) => {
+                let args = args.iter().map(|arg| (*arg).to_owned()).collect::<Vec<_>>();
+                super::security::resolve_windows_package_launcher(manager, &args, &path)?
+            }
+            None => None,
+        };
+        #[cfg(windows)]
+        let program = launcher.as_deref().unwrap_or(program);
+
+        let mut command = worktree_command(program, worktree_path, None);
+        command.args(args);
+        Ok(command)
     }
+}
+
+fn yarn_skip_build_flag(version: &[u8]) -> RelayResult<&'static str> {
+    let major = std::str::from_utf8(version)
+        .ok()
+        .and_then(|value| value.trim().split_once('.'))
+        .and_then(|(major, _)| major.parse::<u32>().ok());
+    match major {
+        Some(1) => Ok("--ignore-scripts"),
+        Some(2..) => Ok("--mode=skip-build"),
+        _ => Err(pm_error("yarn", "could not determine the installed Yarn version")),
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn yarn_add_suppresses_scripts_using_the_installed_major_version() {
+    assert_eq!(yarn_skip_build_flag(b"1.22.22\n").unwrap(), "--ignore-scripts");
+    assert_eq!(yarn_skip_build_flag(b"4.6.0\r\n").unwrap(), "--mode=skip-build");
+    assert!(yarn_skip_build_flag(b"unknown").is_err());
 }
 
 impl PackageManagerAdapter for JsAdapter {
@@ -265,6 +283,7 @@ impl PackageManagerAdapter for JsAdapter {
         &'a self,
         worktree_path: &'a Path,
         spec: &'a str,
+        options: DependencyRunOptions,
     ) -> BoxFuture<'a, RelayResult<()>> {
         Box::pin(async move {
             let manager = self.name();
@@ -272,22 +291,29 @@ impl PackageManagerAdapter for JsAdapter {
             let check_files = self.manifest_and_lock_files();
             ensure_regular_or_absent(manager, worktree_path, &check_files, &[PACKAGE_JSON])?;
 
-            let args = self.add_args(&validated);
-            let program = Path::new(manager);
-            #[cfg(windows)]
-            let launcher = match std::env::var_os("PATH") {
-                Some(path) => super::security::resolve_windows_package_launcher(manager, &args, &path)?,
-                None => None,
-            };
-            #[cfg(windows)]
-            let program = launcher.as_deref().unwrap_or(program);
-
-            let output = worktree_command(program, worktree_path, None)
-                .args(&args)
-                .stdin(Stdio::null())
-                .kill_on_drop(true)
-                .output()
+            let no_scripts = if self.variant == JsVariant::Yarn {
+                let output = run_dependency_command(
+                    self.command(worktree_path, &["--version"])?,
+                    manager,
+                    DependencyRunOptions {
+                        timeout: options.timeout.min(Duration::from_secs(10)),
+                        ..options.clone()
+                    },
+                )
                 .await?;
+                if !output.status.success() {
+                    return Err(pm_error(
+                        manager,
+                        format!("yarn --version exited with {}", output.status),
+                    ));
+                }
+                yarn_skip_build_flag(&output.stdout)?
+            } else {
+                "--ignore-scripts"
+            };
+            let verb = if self.variant == JsVariant::Npm { "install" } else { "add" };
+            let command = self.command(worktree_path, &[verb, no_scripts, &validated])?;
+            let output = run_dependency_command(command, manager, options).await?;
             if !output.status.success() {
                 let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
                 let stdout = String::from_utf8_lossy(&output.stdout).trim().to_owned();

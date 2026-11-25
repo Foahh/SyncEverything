@@ -4,7 +4,6 @@ use super::{
 use crate::contracts::{
     GitSyncBundleMeta, PeerRole, RuntimeMode, TrustedPeerRecord, WireRequest, WireResponse,
 };
-use crate::engine::RelayEngine;
 use crate::error::{RelayError, RelayResult};
 use crate::sandbox::WorktreeSandbox;
 use chrono::Utc;
@@ -21,19 +20,20 @@ const MAX_PAYLOAD: usize = 16 * 1024 * 1024;
 #[derive(Debug, Clone)]
 pub(super) struct RevocationGuardedBlobs {
     blobs: BlobsProtocol,
-    engine: Arc<RelayEngine>,
+    node: Arc<NodeState>,
 }
 
 impl RevocationGuardedBlobs {
-    pub(super) fn new(blobs: BlobsProtocol, engine: Arc<RelayEngine>) -> Self {
-        Self { blobs, engine }
+    pub(super) fn new(blobs: BlobsProtocol, node: Arc<NodeState>) -> Self {
+        Self { blobs, node }
     }
 }
 
 impl ProtocolHandler for RevocationGuardedBlobs {
     async fn accept(&self, conn: Connection) -> Result<(), AcceptError> {
+        let _active = self.node.track_connection(&conn);
         let remote_node_id = conn.remote_id().to_string();
-        match self.engine.is_peer_revoked(&remote_node_id).await {
+        match self.node.engine.is_peer_revoked(&remote_node_id).await {
             Ok(true) => {
                 warn!(node_id = %remote_node_id, "Rejected blob connection from revoked peer");
                 conn.close(1u32.into(), b"PEER_REVOKED");
@@ -51,6 +51,10 @@ impl ProtocolHandler for RevocationGuardedBlobs {
             Ok(false) => {}
         }
         self.blobs.accept(conn).await
+    }
+
+    async fn shutdown(&self) {
+        self.blobs.shutdown().await;
     }
 }
 
@@ -102,7 +106,8 @@ impl RelayRpcHandler {
         let engine = &self.node.engine;
 
         // Mandatory revocation gate: check remote authenticated NodeId BEFORE dispatching any RPC.
-        if engine.is_peer_revoked(&remote_node_id).await? {
+        let known_peer = engine.get_trusted_peer(&remote_node_id).await?;
+        if known_peer.as_ref().is_some_and(TrustedPeerRecord::is_revoked) {
             warn!(node_id = %remote_node_id, "Rejected RPC from revoked peer");
             return Ok(error_response(
                 "PEER_REVOKED",
@@ -110,17 +115,13 @@ impl RelayRpcHandler {
             ));
         }
 
-        let is_trusted_in_db = engine
-            .get_trusted_peer(&remote_node_id)
-            .await?
-            .is_some_and(|peer| !peer.is_revoked());
+        let is_trusted_in_db = known_peer.is_some();
         let mut newly_paired = false;
         {
             let mut peer = self.node.peer();
             if self.node.events.is_some() && !peer.is_selected(id) {
                 if is_trusted_in_db {
-                    peer.select(id);
-                    newly_paired = true;
+                    newly_paired = peer.selected_addr().is_none();
                 } else if matches!(&request, WireRequest::Ping { .. }) && peer.accept_pairing(id) {
                     newly_paired = true;
                 } else {
@@ -162,12 +163,14 @@ impl RelayRpcHandler {
                         node_id: remote_node_id.clone(),
                         label,
                         role,
-                        ticket_or_addrs: serde_json::to_string(&addr).unwrap_or_default(),
+                        ticket_or_addrs: serde_json::to_string(&addr)?,
                         paired_at: now,
                         last_seen_at: now,
                         revoked_at: None,
                     };
-                    engine.upsert_trusted_peer(&record).await?;
+                    if engine.upsert_trusted_peer(&record).await?.is_revoked() {
+                        return Ok(error_response("PEER_REVOKED", format!("peer {remote_node_id} has been revoked by this host")));
+                    }
                 }
                 if newly_paired {
                     self.notify(RelayNodeEvent::PeerPaired);
@@ -300,6 +303,7 @@ impl RelayRpcHandler {
 
 impl ProtocolHandler for RelayRpcHandler {
     async fn accept(&self, conn: Connection) -> Result<(), AcceptError> {
+        let _active = self.node.track_connection(&conn);
         while let Ok((send, recv)) = conn.accept_bi().await {
             match tokio::time::timeout(RPC_TIMEOUT, self.serve_stream(&conn, send, recv)).await {
                 Ok(Ok(())) => {}

@@ -38,7 +38,7 @@ const ALLOWED_HOST_RE = /^[A-Za-z0-9.:\-[\]]+$/;
 function hasControlChar(value: string): boolean {
   for (let i = 0; i < value.length; i += 1) {
     const code = value.charCodeAt(i);
-    if (code <= 0x1f || code === 0x7f) {
+    if (code <= 0x1f || (code >= 0x7f && code <= 0x9f)) {
       return true;
     }
   }
@@ -92,6 +92,9 @@ export function validateMcpHttpUrl(raw: string): HttpUrlValidationResult {
       ok: false,
       error: "MCP HTTP endpoint URL must not include embedded credentials.",
     };
+  }
+  if (trimmed.includes("\\") || authority.endsWith(":")) {
+    return { ok: false, error: "MCP HTTP endpoint URL is not a valid URL." };
   }
 
   let parsed: URL;

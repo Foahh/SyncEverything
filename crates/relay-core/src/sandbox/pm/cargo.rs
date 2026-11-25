@@ -1,15 +1,17 @@
 use super::security::{
     ensure_regular_or_absent, pm_error, stage_intent_to_add, validate_cargo_dependency_spec,
 };
-use super::{BoxFuture, EnvFileSnapshot, PackageManagerAdapter, ParsedDependencies, StarterPresets};
+use super::{
+    BoxFuture, DependencyRunOptions, EnvFileSnapshot, PackageManagerAdapter, ParsedDependencies,
+    StarterPresets,
+};
 use crate::contracts::CommandPreset;
 use crate::error::{RelayError, RelayResult};
-use crate::sandbox::execution::worktree_command;
+use crate::sandbox::execution::{run_dependency_command, worktree_command};
 use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::io;
 use std::path::Path;
-use std::process::Stdio;
 
 const CARGO_TOML: &str = "Cargo.toml";
 const CARGO_LOCK: &str = "Cargo.lock";
@@ -115,6 +117,7 @@ impl PackageManagerAdapter for CargoAdapter {
         &'a self,
         worktree_path: &'a Path,
         spec: &'a str,
+        options: DependencyRunOptions,
     ) -> BoxFuture<'a, RelayResult<()>> {
         Box::pin(async move {
             let validated = validate_cargo_dependency_spec(spec)?;
@@ -127,12 +130,9 @@ impl PackageManagerAdapter for CargoAdapter {
             args.push("--".to_owned());
             args.push(validated);
 
-            let output = worktree_command("cargo", worktree_path, None)
-                .args(&args)
-                .stdin(Stdio::null())
-                .kill_on_drop(true)
-                .output()
-                .await?;
+            let mut command = worktree_command("cargo", worktree_path, None);
+            command.args(&args);
+            let output = run_dependency_command(command, "cargo", options).await?;
             if !output.status.success() {
                 let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
                 let detail = if stderr.is_empty() {
