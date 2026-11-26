@@ -1,12 +1,11 @@
 # Academic & Course Archive
 
-This directory consolidates the original research, course planning, benchmark, and evaluation artifacts produced during the initial development of SyncEverything (powered by the Relay engine).
+This directory consolidates the reproducible benchmark and evaluation artifacts produced during the development of SyncEverything (powered by the Relay engine).
 
 ## Directory Index
 
 | Directory | Contents |
 | --- | --- |
-| [`demo/`](demo/) | Dual-mode demonstration notes and checklists ([`README.md`](demo/README.md)). |
 | [`bench/`](bench/) | Reproducible forecasting fixture ([`fixture-repo/`](bench/fixture-repo/)), fault-injection Chaos Suite ([`chaos-cases/`](bench/chaos-cases/)), and baseline/ablation evaluation runners, logs, and figures ([`results/`](bench/results/)). |
 | [`eval/`](eval/) | Live MCP model evaluation harness, stale-metric scoring helpers, and regression unit tests ([`models/`](eval/models/), [`test_release_scoring.py`](eval/test_release_scoring.py)). |
 
