@@ -1,6 +1,6 @@
 # SyncEverything — Asymmetric Dual-Agent Routing Policy
 
-SyncEverything (powered by the Relay engine) separates deterministic state management (Rust DAG, SQLite WAL, `git worktree` + extensible package manager adapter sandbox) from LLM reasoning, and routes inference across three tiers depending on task complexity, latency budget, privacy, and offline availability.
+SyncEverything separates deterministic state management (Rust DAG, SQLite WAL, `git worktree` + extensible package manager adapter sandbox) from LLM reasoning, and routes inference across three tiers depending on task complexity, latency budget, privacy, and offline availability.
 
 ## Tier Selection Matrix
 

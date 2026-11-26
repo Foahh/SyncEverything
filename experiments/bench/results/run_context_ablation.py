@@ -9,7 +9,7 @@ Evaluates Relay's three context composition strategies exposed by
   3. `dag_bundle`      — Decision-Evidence DAG bundle with STALE quarantine
 
 Part A builds five real progressive DAG snapshots on isolated checkouts of
-`course/bench/fixture-repo` (1, 3, 6, 10 stale evidence rounds + a mixed 5-stale /
+`experiments/bench/fixture-repo` (1, 3, 6, 10 stale evidence rounds + a mixed 5-stale /
 1-fresh snapshot) and verifies blake3 hash determinism, token scaling, and
 `exposed_stale_metrics_count` directly from `relay-daemon compose-context`.
 
@@ -735,7 +735,7 @@ def main() -> int:
     load_dotenv(REPO_ROOT / ".env")
     parser = argparse.ArgumentParser(description="Track 5 Experiment 2: compose-context ablation")
     parser.add_argument("--daemon-bin", default=None, help="Path to relay-daemon executable")
-    parser.add_argument("--out", default=str(DEFAULT_OUT), help="Output directory (default: course/bench/results)")
+    parser.add_argument("--out", default=str(DEFAULT_OUT), help="Output directory (default: experiments/bench/results)")
     parser.add_argument(
         "--models",
         nargs="*",

@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# Materialize course/bench/fixture-repo as a standalone Git checkout that Relay can execute.
+# Materialize experiments/bench/fixture-repo as a standalone Git checkout that Relay can execute.
 #
 # The fixture lives inside the Relay monorepo, so Relay's worktree sandbox cannot
 # treat it as its own repository. This script copies it to a scratch directory,
 # initializes Git, and commits the baseline exactly once.
 #
-# Usage: course/bench/fixture-repo/scripts/bootstrap_fixture.sh [target-dir]
+# Usage: experiments/bench/fixture-repo/scripts/bootstrap_fixture.sh [target-dir]
 set -euo pipefail
 
 SOURCE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

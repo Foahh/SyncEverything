@@ -22,7 +22,7 @@ Maintainers aim to acknowledge reports within 72 hours and coordinate a fix befo
 
 ## Security Model & Trust Boundaries
 
-SyncEverything (powered by the Relay engine) coordinates Git state and task execution across developer machines. Understanding its security boundaries is essential before running a Host daemon.
+SyncEverything coordinates Git state and task execution across developer machines. Understanding its security boundaries is essential before running a Host daemon.
 
 ### 1. `relay.toml` Preset Whitelist (No Arbitrary Shell Execution)
 

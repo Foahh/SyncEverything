@@ -1,6 +1,6 @@
 # SyncEverything — Product Roadmap
 
-This roadmap tracks what has shipped in **SyncEverything v0.1** (powered by the Relay engine) and the upcoming milestones planned for open-source releases.
+This roadmap tracks what has shipped in **SyncEverything v0.1** and the upcoming milestones planned for open-source releases.
 
 ---
 

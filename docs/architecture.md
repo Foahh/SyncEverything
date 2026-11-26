@@ -1,6 +1,6 @@
-# SyncEverything Architecture (Relay Engine)
+# SyncEverything Architecture
 
-SyncEverything (powered by the Relay engine) hands off work tied to a Git commit from a Client to a Host. It records decisions, code revisions, and experiment results in a shared causal graph so that users and coding agents can tell which results still apply after the code changes.
+SyncEverything hands off work tied to a Git commit from a Client to a Host. It records decisions, code revisions, and experiment results in a shared causal graph so that users and coding agents can tell which results still apply after the code changes.
 
 ## Components
 
@@ -94,6 +94,6 @@ Adding a new package manager requires **zero changes** to `RelayEngine`, `RelayM
 | Agent prompts and MCP client templates | [`prompts/`](../prompts/) |
 | Example workspaces | [`examples/`](../examples/) |
 | Documentation | [`docs/`](./) |
-| Archived research, benchmarks, and evaluation suite | [`course/`](../course/README.md) |
+| Benchmarks and evaluation suite | [`experiments/`](../experiments/README.md) |
 
 Review the [interface contracts](contracts.md), the [Rust contract types](../crates/relay-core/src/contracts/), and the [frontend design spec](frontend-design-spec.md) before changing shared MCP tools, DAG and task types, wire RPC messages, or the `relay.toml` manifest format.

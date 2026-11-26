@@ -2,7 +2,7 @@
 """Generate the 4 publication-grade Track 5 figures (PNG 300 DPI + SVG + PDF).
 
 Usage (zero modifications to project pyproject.toml or Cargo.toml):
-    uv run --with matplotlib --with numpy python course/bench/results/plot_figures.py
+    uv run --with matplotlib --with numpy python experiments/bench/results/plot_figures.py
 """
 
 from __future__ import annotations

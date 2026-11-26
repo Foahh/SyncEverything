@@ -8,8 +8,8 @@ Gates (all offline, no PyPI access):
 4. Preset runs leave the repository clean AND the vendored tiny_stats wheel installs offline (tested in an isolated temp copy so --repo is never dirtied).
 
 Usage:
-    python course/bench/fixture-repo/scripts/verify_calibration.py
-    python course/bench/fixture-repo/scripts/verify_calibration.py --repo /path/to/fixture-checkout
+    python experiments/bench/fixture-repo/scripts/verify_calibration.py
+    python experiments/bench/fixture-repo/scripts/verify_calibration.py --repo /path/to/fixture-checkout
 """
 
 from __future__ import annotations

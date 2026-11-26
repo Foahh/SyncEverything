@@ -19,30 +19,30 @@ Eight declarative fault-injection cases plus a dual-mode judge (`scripted` offli
 
 ```bash
 # Default: deterministic offline regression + P2P loopback gate
-./course/bench/chaos-cases/judge.sh
-uv run python course/bench/chaos-cases/run_chaos_suite.py
+./experiments/bench/chaos-cases/judge.sh
+uv run python experiments/bench/chaos-cases/run_chaos_suite.py
 
 # Live LLM evaluation mode (auto-loads RELAY_LLM_* from repo-root .env)
-./course/bench/chaos-cases/judge.sh --mode llm
-uv run python course/bench/chaos-cases/run_chaos_suite.py --mode llm
+./experiments/bench/chaos-cases/judge.sh --mode llm
+uv run python experiments/bench/chaos-cases/run_chaos_suite.py --mode llm
 ```
 
 Useful flags:
 
 ```bash
 # Single case, keeping scratch repo and --data-dir for inspection
-uv run python course/bench/chaos-cases/run_chaos_suite.py --case chaos-04-mid-run-disconnect --keep
+uv run python experiments/bench/chaos-cases/run_chaos_suite.py --case chaos-04-mid-run-disconnect --keep
 
 # Explicit binary, report directory, or skipping the P2P loopback gate
-uv run python course/bench/chaos-cases/run_chaos_suite.py --daemon-bin target/debug/relay-daemon.exe --out course/bench/chaos-cases/results
+uv run python experiments/bench/chaos-cases/run_chaos_suite.py --daemon-bin target/debug/relay-daemon.exe --out experiments/bench/chaos-cases/results
 
 # Local Ollama run saved to a separate stem so the default cloud report stays intact
-uv run python course/bench/chaos-cases/run_chaos_suite.py \
+uv run python experiments/bench/chaos-cases/run_chaos_suite.py \
   --mode llm \
   --base-url http://127.0.0.1:11434/v1 \
   --model relay-qwen3.5-9b-16k \
   --label "qwen3.5:9b" \
-  --warmup --out course/bench/chaos-cases/results \
+  --warmup --out experiments/bench/chaos-cases/results \
   --report-stem chaos-llm-qwen3.5_9b
 ```
 

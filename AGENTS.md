@@ -1,10 +1,10 @@
-# SyncEverything (Relay Engine)
+# SyncEverything
 
 ## Project references
 
 - Use [architecture](docs/architecture.md) for component boundaries, [development guide](docs/development.md) for build and verification workflows, and [product roadmap](docs/product-roadmap.md) for release scope.
 - Use [contracts](docs/contracts.md) for shared interfaces, the [Rust API cheatsheet](docs/api-cheatsheet.md) for pinned dependencies, and the [desktop design spec](docs/frontend-design-spec.md) for UI behavior and terminology.
-- Historical academic artifacts, benchmarks, and evaluation scripts live under [course/](course/README.md).
+- Benchmarks and evaluation scripts live under [experiments/](experiments/README.md).
 
 ## Engineering constraints
 

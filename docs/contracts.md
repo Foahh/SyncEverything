@@ -1,4 +1,4 @@
-# SyncEverything (Relay Engine) Interface Contracts
+# SyncEverything Interface Contracts
 
 > **Stability:** Core interface contracts shared across the Rust contract structs (`crates/relay-core/src/contracts/`), MCP JSON schemas, and auto-generated Tauri-Specta TypeScript bindings (`crates/relay-desktop/src/bindings.ts`).
 
@@ -82,14 +82,14 @@ A single `iroh::Endpoint` handles both direct LAN discovery and NAT-traversing r
 
 `relay-desktop` supports three runtime modes so single-machine development and dual-machine (Windows Host + macOS Client) workflows use the exact same code paths:
 1. `Client` — Laptop workbench connecting to a remote Host `NodeId`
-2. `Host` — Workstation UI inspecting and controlling the local Relay engine
+2. `Host` — Workstation UI inspecting and controlling the local SyncEverything runtime
 3. `LocalDualSandbox` — Spawns isolated local Client + Host endpoints on one machine over loopback `iroh` for fast end-to-end testing
 
 ---
 
 ## 6. Chaos Suite Contract (`contracts::chaos`)
 
-Every fault-injection case in `course/bench/chaos-cases/*.json` conforms to `ChaosCase`:
+Every fault-injection case in `experiments/bench/chaos-cases/*.json` conforms to `ChaosCase`:
 * `case_id`, `title`, `description`
 * `initial_commit`, `injected_fault` (`MissingDependency` | `UpstreamCodeEdit` | `SameLineConflict` | `MidRunDisconnect` | `RuntimeException` | `CorruptedEnvLock` | `StaleEvidenceTrap` | `DuplicateTaskReplay`)
 * `user_prompt`

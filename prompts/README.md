@@ -1,6 +1,6 @@
 # Prompts & Standard MCP Client Setup
 
-SyncEverything (powered by the Relay engine) exposes its 9 MCP tools over the **Model Context Protocol (`rmcp` 3.11)** via two standard transports:
+SyncEverything exposes its 9 MCP tools over the **Model Context Protocol (`rmcp` 3.11)** via two standard transports:
 
 - **Stdio (`relay-daemon mcp-stdio`)**: Best for local AI coding agents (Claude Code, Cursor, Codex CLI, Windsurf, OpenCode, or `dsh`) operating directly on a workstation or laptop checkout.
 - **Streamable HTTP (`relay-daemon serve` / `relay-daemon mcp-http` at `http://127.0.0.1:7608/mcp`)**: Best when multiple clients or a remote laptop agent connect to a long-running Host daemon.

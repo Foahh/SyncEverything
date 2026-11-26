@@ -1,10 +1,10 @@
 # SyncEverything
 
-**Cross-device compute relay & causal state companion for coding agents (Claude Code, Cursor, Codex, and any MCP client), powered by the Relay engine.**
+**Cross-device compute relay & causal state companion for coding agents (Claude Code, Cursor, Codex, and any MCP client).**
 
 SyncEverything lets you code on a lightweight laptop while delegating builds, tests, and GPU experiments to your workstation over encrypted peer-to-peer QUIC—keeping every decision, Git revision, and run result synchronized in a deterministic causal graph so your coding agent never hallucinates outdated metrics or pollutes your main working tree.
 
-> **Naming:** **SyncEverything** is the user-facing product and desktop workbench. Internally, it is powered by the **Relay** Rust engine (`relay-core`, `relay-daemon`, `relay-desktop`), exposes the `relay-daemon` CLI/MCP server, and reads project task whitelists from `relay.toml`.
+> **Naming:** **SyncEverything** is the product and desktop workbench. Its Rust crates (`relay-core`, `relay-daemon`, `relay-desktop`), CLI/MCP binary (`relay-daemon`), and task manifest (`relay.toml`) use the `relay` prefix.
 
 ---
 
@@ -12,7 +12,7 @@ SyncEverything lets you code on a lightweight laptop while delegating builds, te
 
 ```mermaid
 flowchart LR
-    Agent["Coding Agent (Claude Code / Cursor / Codex)"] -->|"MCP stdio or Streamable HTTP (/mcp)"| Daemon["relay-daemon (Relay Engine)"]
+    Agent["Coding Agent (Claude Code / Cursor / Codex)"] -->|"MCP stdio or Streamable HTTP (/mcp)"| Daemon["relay-daemon"]
     Desktop["SyncEverything Desktop (Tauri v2 + React)"] -->|"Typed Tauri IPC (tauri-specta)"| Core["relay-core"]
     Daemon --> Core
     Core --> DAG[("Causal Decision-Evidence DAG + SQLite WAL")]
@@ -86,7 +86,7 @@ Or connect Claude Code, Cursor, or Codex CLI over **Stdio** (`relay-daemon mcp-s
 ## Examples
 
 - **PyTorch CUDA / MPS / CPU Demo ([`examples/pytorch-cuda-demo/`](examples/pytorch-cuda-demo/))**: A seeded 6-axis wearable IMU 4-class gesture classifier compression project with automatic accelerator selection (`CUDA -> MPS -> CPU`), structured JSON metrics (`val_acc`, `param_count`, `model_kb`, `device_name`) captured into the DAG, and [`smoke` / `train` / `train_compact` / `eval` presets](examples/pytorch-cuda-demo/relay.toml) ready for two-machine compute relay.
-- **Self-Hosted Workspace ([`relay.toml`](relay.toml))**: This repository ships a root `relay.toml` with `check`, `test_core`, and `test` Cargo presets so you can immediately open the SyncEverything repository itself as a live workspace and run tasks through the Relay engine.
+- **Self-Hosted Workspace ([`relay.toml`](relay.toml))**: This repository ships a root `relay.toml` with `check`, `test_core`, and `test` Cargo presets so you can immediately open the SyncEverything repository itself as a live workspace and run tasks through SyncEverything.
 
 ---
 
@@ -103,7 +103,7 @@ Or connect Claude Code, Cursor, or Codex CLI over **Stdio** (`relay-daemon mcp-s
 ├── docs/                      # Architecture, contracts, development guide, design spec, roadmap
 ├── examples/                  # Ready-to-run example workspaces (e.g., PyTorch CUDA demo)
 ├── prompts/                   # Edge/Host system prompts, routing policy, and MCP client config templates
-└── course/                    # Archived research proposal, planning, benchmarks, Chaos Suite, and eval harness
+└── experiments/               # Reproducible benchmarks, Chaos Suite, and evaluation harness
 ```
 
 ---

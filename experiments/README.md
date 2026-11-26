@@ -1,6 +1,6 @@
-# Academic & Course Archive
+# Benchmarks & Evaluation Suite
 
-This directory consolidates the reproducible benchmark and evaluation artifacts produced during the development of SyncEverything (powered by the Relay engine).
+This directory consolidates the reproducible benchmark and evaluation artifacts for SyncEverything.
 
 ## Directory Index
 
@@ -14,6 +14,6 @@ This directory consolidates the reproducible benchmark and evaluation artifacts 
 From the repository root:
 
 ```bash
-uv run python -m unittest discover -s course/eval -p "test_*.py"
-uv run python -m unittest discover -s course/bench/results -p "test_*.py"
+uv run python -m unittest discover -s experiments/eval -p "test_*.py"
+uv run python -m unittest discover -s experiments/bench/results -p "test_*.py"
 ```

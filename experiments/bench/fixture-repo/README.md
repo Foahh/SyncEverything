@@ -1,4 +1,4 @@
-# Relay Rolling-Window Forecast Fixture (`course/bench/fixture-repo`)
+# Relay Rolling-Window Forecast Fixture (`experiments/bench/fixture-repo`)
 
 Standard reproducible Python benchmark project for Relay v1.0 demos and the Track 4 Chaos Suite. The fixture is deliberately dependency-free and offline-safe: every preset runs from the Python standard library plus one vendored wheel.
 
@@ -48,7 +48,7 @@ Because the wheel is local, `uv add` and `uv run` never touch an index. The suit
 ## Running a preset by hand
 
 ```bash
-course/bench/fixture-repo/scripts/bootstrap_fixture.sh
+experiments/bench/fixture-repo/scripts/bootstrap_fixture.sh
 export RELAY_REPO_ROOT=$PWD/.tmp/relay-fixture
 uv run --directory "$RELAY_REPO_ROOT" python src/forecast.py --windows 7,14,28
 ```

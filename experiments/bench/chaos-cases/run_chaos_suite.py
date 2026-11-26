@@ -2,7 +2,7 @@
 """Relay Track 4 — dual-mode Chaos Suite judge.
 
 Supports two execution modes against the real `relay-daemon` binary and an
-isolated Git checkout of `course/bench/fixture-repo`:
+isolated Git checkout of `experiments/bench/fixture-repo`:
 
 1. `--mode scripted` (default): deterministic offline regression gate across
    all 8 frozen `ChaosCase` fault kinds + an iroh loopback P2P gate
@@ -15,9 +15,9 @@ isolated Git checkout of `course/bench/fixture-repo`:
    for Track 5 evaluation.
 
 Usage:
-    uv run python course/bench/chaos-cases/run_chaos_suite.py
-    uv run python course/bench/chaos-cases/run_chaos_suite.py --mode llm
-    uv run python course/bench/chaos-cases/run_chaos_suite.py --case chaos-04-mid-run-disconnect --keep
+    uv run python experiments/bench/chaos-cases/run_chaos_suite.py
+    uv run python experiments/bench/chaos-cases/run_chaos_suite.py --mode llm
+    uv run python experiments/bench/chaos-cases/run_chaos_suite.py --case chaos-04-mid-run-disconnect --keep
 """
 
 from __future__ import annotations

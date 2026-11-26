@@ -18,9 +18,9 @@ Four continuation tasks (`B1`–`B4`):
 Outputs pure measured timings, token usage, manual clarifications/corrections,
 UI approval counts, first-pass vs final completion, and human-wait sensitivity
 analysis (`T_eff(t_h) = T_wall + N_suppl * t_h + N_approve * t_a`) to:
-  - course/bench/results/baseline_comparison_runs.jsonl
-  - course/bench/results/baseline_comparison_summary.json
-  - course/bench/results/baseline_comparison_summary.csv
+  - experiments/bench/results/baseline_comparison_runs.jsonl
+  - experiments/bench/results/baseline_comparison_summary.json
+  - experiments/bench/results/baseline_comparison_summary.csv
 
 Zero third-party Python dependencies (pure Python 3.11+ stdlib).
 """
@@ -1462,7 +1462,7 @@ def main() -> int:
     load_dotenv(REPO_ROOT / ".env")
     parser = argparse.ArgumentParser(description="Track 5 Experiment 1: Three-baseline comparison")
     parser.add_argument("--daemon-bin", default=None, help="Path to relay-daemon binary")
-    parser.add_argument("--out", default=str(DEFAULT_OUT), help="Output directory (default: course/bench/results)")
+    parser.add_argument("--out", default=str(DEFAULT_OUT), help="Output directory (default: experiments/bench/results)")
     parser.add_argument("--trials", type=int, default=3, help="Number of trials per baseline x task")
     parser.add_argument("--max-turns", type=int, default=12, help="Initial autonomous turn budget")
     parser.add_argument("--max-corrections", type=int, default=3, help="Max deterministic human-oracle correction rounds")

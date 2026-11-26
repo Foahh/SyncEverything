@@ -1,6 +1,6 @@
 # Contributing to SyncEverything
 
-Thank you for your interest in contributing to **SyncEverything** (powered by the Relay Rust engine)!
+Thank you for your interest in contributing to **SyncEverything**!
 
 ## Prerequisites
 
@@ -46,8 +46,8 @@ bun run build
 git restore --worktree -- crates/relay-desktop/dist/.gitkeep
 
 # Evaluation harness unit tests (from repository root)
-uv run python -m unittest discover -s course/eval -p "test_*.py"
-uv run python -m unittest discover -s course/bench/results -p "test_*.py"
+uv run python -m unittest discover -s experiments/eval -p "test_*.py"
+uv run python -m unittest discover -s experiments/bench/results -p "test_*.py"
 
 # Whitespace and diff sanity check
 git diff --check
