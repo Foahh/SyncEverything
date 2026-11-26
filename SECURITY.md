@@ -10,7 +10,7 @@
 
 Please **do not** report security vulnerabilities through public GitHub issues.
 
-Instead, report vulnerabilities privately via [GitHub Security Advisories](https://github.com/Foahh/relay/security/advisories/new) on `https://github.com/Foahh/relay`. Include:
+Instead, report vulnerabilities privately via [GitHub Security Advisories](https://github.com/Foahh/SyncEverything/security/advisories/new) on `https://github.com/Foahh/SyncEverything`. Include:
 
 - A clear description of the vulnerability and its potential impact.
 - Reproduction steps, affected component (`relay-core`, `relay-daemon`, `relay-desktop`, or MCP tools), and environment details.
